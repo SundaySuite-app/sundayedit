@@ -325,6 +325,11 @@ pub fn thumbnail_args(media_path: &str, at_ms: i64, out_path: &str) -> Vec<Strin
 /// Extract a single JPEG thumbnail frame from `media_path` at `at_ms` into
 /// `out_path`. Returns `out_path` on success. Spawns the bundled ffmpeg.
 pub fn extract_thumbnail(media_path: &str, at_ms: i64, out_path: &str) -> AppResult<String> {
+    // ffmpeg won't create missing directories — the frontend asks for a
+    // `<cache>/thumbnails/<id>.jpg` path (same guard as extract_audio_wav).
+    if let Some(parent) = std::path::Path::new(out_path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let args = thumbnail_args(media_path, at_ms, out_path);
     let status = Command::new(ffmpeg_path())
         .args(&args)

@@ -65,13 +65,11 @@ pub fn split_caption(
     right.last_edited_at = now_ms;
     right.ai_generated = original.ai_generated; // preserve provenance
 
-    let mut new_captions = project.captions.clone();
-    new_captions.remove(caption_index);
-    new_captions.insert(caption_index, left);
-    new_captions.insert(caption_index + 1, right);
-
+    // Clone the project ONCE and edit its captions in place — cloning
+    // `project.captions` separately would copy the vec twice per split.
     let mut next = project.clone();
-    next.captions = new_captions;
+    next.captions[caption_index] = left;
+    next.captions.insert(caption_index + 1, right);
     next.updated_at = now_ms;
     next.validate().map_err(AppError::Invariant)?;
     Ok(next)
@@ -132,12 +130,10 @@ pub fn merge_captions(project: &Project, caption_ids: &[&str], now_ms: i64) -> A
         track_id: None,
     };
 
-    let mut new_captions = project.captions.clone();
-    new_captions.drain(first_idx..=last_idx);
-    new_captions.insert(first_idx, merged);
-
+    // Clone the project ONCE and edit its captions in place (see split_caption).
     let mut next = project.clone();
-    next.captions = new_captions;
+    next.captions[first_idx] = merged;
+    next.captions.drain(first_idx + 1..=last_idx); // len >= 2 ⇒ last_idx > first_idx
     next.updated_at = now_ms;
     next.validate().map_err(AppError::Invariant)?;
     Ok(next)

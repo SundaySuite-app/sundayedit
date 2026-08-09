@@ -1,5 +1,5 @@
 /**
- * NLE timeline (Task 2D) — the multi-lane spatial canvas of the editor.
+ * NLE timeline — the multi-lane spatial canvas of the editor.
  *
  * A fixed-size viewport renders the visible time window (pan = scrollMs, zoom =
  * pxPerMs) rather than one enormous scrolled element, so a 90-minute project
@@ -12,11 +12,13 @@
  *
  * Transport is J/K/L shuttle (reverse/stop/forward, doubling on repeat) plus
  * Space; an internal playhead clock advances by the signed rate. Drags snap to
- * neighbouring edges, the playhead and the bounds (S toggles snapping). Media
- * dragged from the bin drops onto a lane to become a new clip.
+ * neighbouring edges, the playhead and the bounds (S toggles snapping). B
+ * blades the selected clip at the playhead; Delete/Backspace ripple-deletes
+ * it. Media dragged from the bin drops onto a lane to become a new clip.
  */
 
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -42,6 +44,7 @@ import {
   Clapperboard,
   Loader2,
   RotateCcw,
+  X,
 } from "lucide-react";
 
 import type {
@@ -66,8 +69,10 @@ import {
   timelineDurationMs,
 } from "./laneLayout";
 import { MediaPlayer } from "./MediaPlayer";
+import { publishPlayheadMs } from "./playhead";
 import { renderPreviewProxy } from "@/lib/composeEngine";
 import { MEDIA_DND_MIME } from "@/features/media/MediaBin";
+import { useThumbnail } from "@/features/media/thumbnails";
 
 interface Props {
   project: Project;
@@ -186,6 +191,10 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
   // A transient warning when the user scrubs the native video control while the
   // timeline is driving playback (the two clocks would fight).
   const [scrubWarning, setScrubWarning] = useState(false);
+  // A backend rejection worth showing (remove-track on a non-empty track…).
+  // Drag/trim rejections stay silent — the ghost snapping back IS the feedback
+  // — but button-triggered ops have no visual echo, so surface the message.
+  const [opError, setOpError] = useState<string | null>(null);
   // Preview-render proxy: a flattened composite the MediaPlayer plays instead of
   // the live per-clip mapping, so the user can see the true composite. Rendered
   // on demand through the compose engine; cleared to return to the live preview.
@@ -285,6 +294,20 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     return () => clearTimeout(id);
   }, [scrubWarning]);
 
+  // Auto-dismiss surfaced op rejections (same pattern as the scrub warning).
+  useEffect(() => {
+    if (!opError) return;
+    const id = setTimeout(() => setOpError(null), 6000);
+    return () => clearTimeout(id);
+  }, [opError]);
+
+  // Mirror the playhead into the shared external store so the clip inspector
+  // (rendered by App, outside this tree) can split at the current position
+  // without App re-rendering on every playback frame.
+  useEffect(() => {
+    publishPlayheadMs(playheadMs);
+  }, [playheadMs]);
+
   // Draw the ruler-aligned waveform window into the canvas.
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -333,27 +356,28 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
   }, [waveform, view, project.video_duration_ms]);
 
   // ── interactions ───────────────────────────────────────────────────────────
-  function seekToX(clientX: number) {
-    const el = viewportRef.current;
-    if (!el) return;
-    const x = clientX - el.getBoundingClientRect().left;
-    const ms = tl.snapToFrame(
-      Math.max(0, Math.min(durationMs, tl.xToMs(x, view))),
-      fps,
-    );
-    setPlayheadMs(ms);
-  }
+  // Stable (useCallback) so the memoized ruler/lane subtrees they are passed to
+  // don't re-render on every playhead tick — their deps change on pan/zoom or
+  // project edits, never per animation frame.
 
   /** ms under a client X, clamped to the timeline + frame-snapped. */
-  function clientXToMs(clientX: number): number {
-    const el = viewportRef.current;
-    if (!el) return 0;
-    const x = clientX - el.getBoundingClientRect().left;
-    return tl.snapToFrame(
-      Math.max(0, Math.min(durationMs, tl.xToMs(x, view))),
-      fps,
-    );
-  }
+  const clientXToMs = useCallback(
+    (clientX: number): number => {
+      const el = viewportRef.current;
+      if (!el) return 0;
+      const x = clientX - el.getBoundingClientRect().left;
+      return tl.snapToFrame(
+        Math.max(0, Math.min(durationMs, tl.xToMs(x, view))),
+        fps,
+      );
+    },
+    [durationMs, view, fps],
+  );
+
+  const seekToX = useCallback(
+    (clientX: number) => setPlayheadMs(clientXToMs(clientX)),
+    [clientXToMs],
+  );
 
   function onWheel(e: React.WheelEvent) {
     const el = viewportRef.current;
@@ -395,51 +419,53 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
   }
 
   // ── caption drag (move / resize) — preview locally, commit on release ──────
-  function onCaptionPointerDown(
-    e: React.PointerEvent,
-    c: Caption,
-    kind: CaptionDrag["kind"],
-  ) {
-    e.stopPropagation();
-    (e.target as Element).setPointerCapture?.(e.pointerId);
-    setSelectedId(c.id);
-    selectClip(null);
-    setDrag({
-      kind,
-      id: c.id,
-      startClientX: e.clientX,
-      origStart: c.start_ms,
-      origEnd: c.end_ms,
-      deltaMs: 0,
-    });
-  }
+  const onCaptionPointerDown = useCallback(
+    (e: React.PointerEvent, c: Caption, kind: CaptionDrag["kind"]) => {
+      e.stopPropagation();
+      (e.target as Element).setPointerCapture?.(e.pointerId);
+      setSelectedId(c.id);
+      selectClip(null);
+      setDrag({
+        kind,
+        id: c.id,
+        startClientX: e.clientX,
+        origStart: c.start_ms,
+        origEnd: c.end_ms,
+        deltaMs: 0,
+      });
+    },
+    [selectClip],
+  );
 
   // ── clip drag (move across tracks / trim) — preview locally, commit on release
-  function onClipPointerDown(
-    e: React.PointerEvent,
-    track: Track,
-    ti: TimelineItem,
-    kind: ClipDrag["kind"],
-  ) {
-    e.stopPropagation();
-    if (track.locked || ti.locked) return;
-    (e.target as Element).setPointerCapture?.(e.pointerId);
-    selectClip(ti.id);
-    setSelectedId(null);
-    setClipDrag({
-      kind,
-      id: ti.id,
-      trackId: track.id,
-      trackKind: track.kind,
-      speed: Math.max(0.01, ti.speed),
-      startClientX: e.clientX,
-      origStart: ti.timeline_start_ms,
-      origInMs: ti.in_ms,
-      origOutMs: ti.out_ms,
-      deltaMs: 0,
-      targetTrackId: track.id,
-    });
-  }
+  const onClipPointerDown = useCallback(
+    (
+      e: React.PointerEvent,
+      track: Track,
+      ti: TimelineItem,
+      kind: ClipDrag["kind"],
+    ) => {
+      e.stopPropagation();
+      if (track.locked || ti.locked) return;
+      (e.target as Element).setPointerCapture?.(e.pointerId);
+      selectClip(ti.id);
+      setSelectedId(null);
+      setClipDrag({
+        kind,
+        id: ti.id,
+        trackId: track.id,
+        trackKind: track.kind,
+        speed: Math.max(0.01, ti.speed),
+        startClientX: e.clientX,
+        origStart: ti.timeline_start_ms,
+        origInMs: ti.in_ms,
+        origOutMs: ti.out_ms,
+        deltaMs: 0,
+        targetTrackId: track.id,
+      });
+    },
+    [selectClip],
+  );
 
   function onPointerMove(e: React.PointerEvent) {
     if (drag) {
@@ -585,48 +611,80 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
   }
 
   // Drop a media row from the bin onto a lane → place it as a clip.
-  async function onLaneDrop(e: React.DragEvent, track: Track) {
-    const mediaId = e.dataTransfer.getData(MEDIA_DND_MIME);
-    setDropTrackId(null);
-    if (!mediaId || track.locked || track.kind === "caption") return;
-    e.preventDefault();
-    const media = mediaById.get(mediaId);
-    if (!media) return;
-    // Audio-only media carries no visuals — compose export ignores it on a
-    // video track (`is_visual`), so placing it there would make preview and
-    // export disagree. It belongs on an audio track.
-    if (media.kind === "audio_only" && track.kind === "video") return;
-    const dropTimeMs = clientXToMs(e.clientX);
-    try {
-      await run((p) =>
-        ipc.timeline.addTimelineItem(
-          p,
-          track.id,
-          mediaId,
-          0,
-          media.duration_ms,
-          dropTimeMs,
-          "av",
-        ),
-      );
-    } catch {
-      // Overlapping/invalid placement — the backend clamps or rejects.
-    }
-  }
+  const onLaneDrop = useCallback(
+    async (e: React.DragEvent, track: Track) => {
+      const mediaId = e.dataTransfer.getData(MEDIA_DND_MIME);
+      setDropTrackId(null);
+      if (!mediaId || track.locked || track.kind === "caption") return;
+      e.preventDefault();
+      const media = mediaById.get(mediaId);
+      if (!media) return;
+      // Audio-only media carries no visuals — compose export ignores it on a
+      // video track (`is_visual`), so placing it there would make preview and
+      // export disagree. It belongs on an audio track.
+      if (media.kind === "audio_only" && track.kind === "video") return;
+      const dropTimeMs = clientXToMs(e.clientX);
+      try {
+        await run((p) =>
+          ipc.timeline.addTimelineItem(
+            p,
+            track.id,
+            mediaId,
+            0,
+            media.duration_ms,
+            dropTimeMs,
+            "av",
+          ),
+        );
+      } catch {
+        // Overlapping/invalid placement — the backend clamps or rejects.
+      }
+    },
+    [mediaById, clientXToMs, run],
+  );
 
-  function onLaneDragOver(e: React.DragEvent, track: Track) {
+  const onLaneDragOver = useCallback((e: React.DragEvent, track: Track) => {
     if (track.locked || track.kind === "caption") return;
     if (!e.dataTransfer.types.includes(MEDIA_DND_MIME)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "copy";
-    if (dropTrackId !== track.id) setDropTrackId(track.id);
-  }
+    // Functional identity bailout — returning the same reference skips the
+    // re-render entirely when the pointer stays over the same lane.
+    setDropTrackId((prev) => (prev === track.id ? prev : track.id));
+  }, []);
 
-  function selectAndSeek(c: Caption) {
-    setSelectedId(c.id);
-    selectClip(null);
-    setPlayheadMs(c.start_ms);
-  }
+  const onLaneDragLeave = useCallback((track: Track) => {
+    setDropTrackId((prev) => (prev === track.id ? null : prev));
+  }, []);
+
+  // Clicking empty lane space seeks + clears both selections.
+  const onLanePointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      seekToX(e.clientX);
+      setSelectedId(null);
+      selectClip(null);
+    },
+    [seekToX, selectClip],
+  );
+
+  const selectAndSeek = useCallback(
+    (c: Caption) => {
+      setSelectedId(c.id);
+      selectClip(null);
+      setPlayheadMs(c.start_ms);
+    },
+    [selectClip],
+  );
+
+  // Clicking a clip selects it and parks the playhead at its start.
+  const onClipSelect = useCallback(
+    (ti: TimelineItem) => {
+      selectClip(ti.id);
+      setSelectedId(null);
+      setPlayheadMs(ti.timeline_start_ms);
+    },
+    [selectClip],
+  );
 
   function step(dir: -1 | 1, count: number) {
     const idx = captions.findIndex((c) => c.id === selectedId);
@@ -648,6 +706,17 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     // Modified chords (Cmd+K command palette, Cmd+S save, menu accelerators)
     // belong to app-level handlers — never treat them as timeline shortcuts.
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // Keystrokes typed into a focused field are never timeline shortcuts —
+    // mirrors the app-wide typing guard in useUndoHotkeys.
+    const target = e.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable)
+    ) {
+      return;
+    }
     const lower = e.key.toLowerCase();
     if (lower === "j" || lower === "k" || lower === "l") {
       e.preventDefault();
@@ -659,10 +728,22 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
       setSnapEnabled((s) => !s);
       return;
     }
+    if (lower === "b") {
+      // Blade — split the selected clip at the playhead. B (not S, which is
+      // taken by snap) matches the standard NLE blade shortcut.
+      e.preventDefault();
+      splitSelectedAtPlayhead();
+      return;
+    }
     switch (e.key) {
       case " ":
         e.preventDefault();
         setRate((r) => (r !== 0 ? 0 : 1));
+        break;
+      case "Delete":
+      case "Backspace":
+        e.preventDefault();
+        deleteSelectedClip();
         break;
       case "ArrowLeft":
         e.preventDefault();
@@ -683,21 +764,74 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     }
   }
 
-  // Toggle a track flag through the shared undo stack.
-  function toggleFlag(track: Track, flag: "muted" | "solo" | "locked") {
-    void run((p) =>
-      ipc.timeline.setTrackFlags(p, track.id, { [flag]: !track[flag] }),
-    ).catch(() => {});
+  // The selected clip's live item — or null when the selection points at a
+  // deleted item, a caption is selected instead, or its track is locked.
+  function selectedEditableClip(): TimelineItem | null {
+    if (!selectedClipId) return null;
+    const ti = project.timeline_items.find((i) => i.id === selectedClipId);
+    if (!ti || ti.locked) return null;
+    const track = project.tracks.find((tr) => tr.id === ti.track_id);
+    return track?.locked ? null : ti;
   }
 
-  // Move a lane up (toward the top = higher index) or down.
-  function reorder(track: Track, dir: -1 | 1) {
-    const next = track.index + dir;
-    if (next < 0) return;
-    void run((p) => ipc.timeline.reorderTrack(p, track.id, next)).catch(
+  // Blade (B key + the inspector's split button drives the same op): split the
+  // selected clip where the playhead stands. Only meaningful strictly inside
+  // the clip's span — an edge cut would leave a zero-length half, which the
+  // backend rejects anyway.
+  function splitSelectedAtPlayhead() {
+    const ti = selectedEditableClip();
+    if (!ti) return;
+    const { start_ms, end_ms } = itemSpan(ti);
+    if (playheadMs <= start_ms || playheadMs >= end_ms) return;
+    const at = playheadMs;
+    void run((p) => ipc.timeline.splitTimelineItem(p, ti.id, at)).catch(
       () => {},
     );
   }
+
+  // Delete/Backspace: ripple-delete the selected clip (later same-track clips
+  // slide left), then clear the selection so the inspector closes with it.
+  function deleteSelectedClip() {
+    const ti = selectedEditableClip();
+    if (!ti) return;
+    void run((p) => ipc.timeline.rippleDeleteItem(p, ti.id))
+      .then(() => selectClip(null))
+      .catch(() => {});
+  }
+
+  // Remove an (empty) track. The backend rejects a non-empty one — surface
+  // that message instead of failing silently (there is no ghost to snap back).
+  const removeTrack = useCallback(
+    (track: Track) => {
+      setOpError(null);
+      void run((p) => ipc.timeline.removeTrack(p, track.id)).catch((e) =>
+        setOpError((e as Error).message),
+      );
+    },
+    [run],
+  );
+
+  // Toggle a track flag through the shared undo stack.
+  const toggleFlag = useCallback(
+    (track: Track, flag: "muted" | "solo" | "locked") => {
+      void run((p) =>
+        ipc.timeline.setTrackFlags(p, track.id, { [flag]: !track[flag] }),
+      ).catch(() => {});
+    },
+    [run],
+  );
+
+  // Move a lane up (toward the top = higher index) or down.
+  const reorder = useCallback(
+    (track: Track, dir: -1 | 1) => {
+      const next = track.index + dir;
+      if (next < 0) return;
+      void run((p) => ipc.timeline.reorderTrack(p, track.id, next)).catch(
+        () => {},
+      );
+    },
+    [run],
+  );
 
   // ── preview render (proxy) ─────────────────────────────────────────────────
   // Flatten the timeline to a temp file and load it into the preview so the user
@@ -736,13 +870,20 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
   }, [project]);
 
   // ── render ───────────────────────────────────────────────────────────────
-  const [visStart, visEnd] = tl.visibleRange(view);
-  const visibleCaptionRows = tl.visibleCaptions(captions, visStart, visEnd);
-  const ticks = tl.rulerTicks(view, 80);
+  // Memoized on [view]/[items] — NOT playhead — so the ~60 fps playback clock
+  // re-renders only the toolbar timecode, the playhead line and the player;
+  // the memoized ruler/header/lane subtrees below bail out per tick.
+  const [visStart, visEnd] = useMemo(() => tl.visibleRange(view), [view]);
+  const visibleCaptionRows = useMemo(
+    () => tl.visibleCaptions(captions, visStart, visEnd),
+    [captions, visStart, visEnd],
+  );
+  const ticks = useMemo(() => tl.rulerTicks(view, 80), [view]);
   const playheadX = tl.msToX(playheadMs, view);
 
   return (
     <div
+      data-testid="timeline"
       className="flex h-full flex-col bg-[var(--color-bg)] text-[var(--color-fg)] outline-none"
       tabIndex={0}
       onKeyDown={onKeyDown}
@@ -778,6 +919,14 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
             className="absolute inset-x-0 bottom-0 bg-[var(--color-warning)]/90 px-3 py-1 text-center text-[var(--text-ui-xs)] text-[var(--color-neutral-950)]"
           >
             {t("mediaPlayerScrubWarning")}
+          </div>
+        )}
+        {opError && (
+          <div
+            role="alert"
+            className="absolute inset-x-0 top-0 bg-[var(--color-danger,#b3261e)]/90 px-3 py-1 text-center text-[var(--text-ui-xs)] text-white"
+          >
+            {opError}
           </div>
         )}
       </div>
@@ -889,24 +1038,20 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
             style={{ height: RULER_H + WAVE_H }}
           />
           <div ref={headerScrollRef} className="min-h-0 flex-1 overflow-hidden">
-            {stacked.map((track, i) => (
-              <TrackHeader
-                key={track.id}
-                track={track}
-                height={LANE_H}
-                canMoveUp={i > 0}
-                canMoveDown={i < stacked.length - 1}
-                onToggle={(flag) => toggleFlag(track, flag)}
-                onMove={(dir) => reorder(track, dir)}
-                labels={{
-                  mute: t("trackMute"),
-                  solo: t("trackSolo"),
-                  lock: t("trackLock"),
-                  up: t("trackMoveUp"),
-                  down: t("trackMoveDown"),
-                }}
-              />
-            ))}
+            <LaneHeaders
+              stacked={stacked}
+              onToggle={toggleFlag}
+              onMove={reorder}
+              onRemove={removeTrack}
+              // Individual strings (not an object) so memo's shallow compare
+              // holds even though `t` is a fresh closure every render.
+              labelMute={t("trackMute")}
+              labelSolo={t("trackSolo")}
+              labelLock={t("trackLock")}
+              labelUp={t("trackMoveUp")}
+              labelDown={t("trackMoveDown")}
+              labelRemove={"Remove track" /* i18n:pending trackRemove */}
+            />
           </div>
         </div>
 
@@ -921,23 +1066,7 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
           onPointerLeave={() => (drag || clipDrag) && onPointerUp()}
         >
           {/* Ruler */}
-          <div
-            className="relative border-b border-[var(--color-border)] bg-[var(--color-bg-elevated)]"
-            style={{ height: RULER_H }}
-            onPointerDown={(e) => seekToX(e.clientX)}
-          >
-            {ticks.map((ms) => (
-              <div
-                key={ms}
-                className="absolute top-0 flex h-full items-center"
-                style={{ left: tl.msToX(ms, view) }}
-              >
-                <span className="border-l border-[var(--color-border)] pl-1 font-mono text-[9px] text-[var(--color-fg-subtle)]">
-                  {tl.formatTimecode(ms, fps)}
-                </span>
-              </div>
-            ))}
-          </div>
+          <RulerBar ticks={ticks} view={view} fps={fps} onSeek={seekToX} />
 
           {/* Waveform (primary source) */}
           <canvas
@@ -954,74 +1083,28 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
             className="overflow-y-auto"
             style={{ height: `calc(100% - ${RULER_H + WAVE_H}px)` }}
           >
-            {stacked.map((track) => (
-              <div
-                key={track.id}
-                className={cn(
-                  "relative border-t border-[var(--color-border)]",
-                  dropTrackId === track.id &&
-                    "bg-[var(--color-accent-500)]/10 ring-1 ring-inset ring-[var(--color-accent-500)]/50",
-                  !track.enabled && "opacity-50",
-                )}
-                style={{ height: LANE_H }}
-                onDragOver={(e) => onLaneDragOver(e, track)}
-                onDragLeave={() =>
-                  dropTrackId === track.id && setDropTrackId(null)
-                }
-                onDrop={(e) => onLaneDrop(e, track)}
-                onPointerDown={(e) => {
-                  seekToX(e.clientX);
-                  setSelectedId(null);
-                  selectClip(null);
-                }}
-              >
-                {track.kind === "caption"
-                  ? visibleCaptionRows.map(({ item: c }) => (
-                      <CaptionBox
-                        key={c.id}
-                        caption={c}
-                        view={view}
-                        drag={drag?.id === c.id ? drag : null}
-                        selected={selectedId === c.id}
-                        locked={track.locked}
-                        onPointerDown={(e, kind) =>
-                          onCaptionPointerDown(e, c, kind)
-                        }
-                        onSelect={() => selectAndSeek(c)}
-                      />
-                    ))
-                  : tl
-                      .visibleCaptions(
-                        clipsByTrack.get(track.id) ?? [],
-                        visStart,
-                        visEnd,
-                      )
-                      .map(({ item: span }) => (
-                        <ClipBox
-                          key={span.ti.id}
-                          item={span.ti}
-                          media={
-                            span.ti.source_media_id
-                              ? mediaById.get(span.ti.source_media_id)
-                              : undefined
-                          }
-                          view={view}
-                          speed={Math.max(0.01, span.ti.speed)}
-                          drag={clipDrag?.id === span.ti.id ? clipDrag : null}
-                          selected={selectedClipId === span.ti.id}
-                          locked={track.locked}
-                          onPointerDown={(e, kind) =>
-                            onClipPointerDown(e, track, span.ti, kind)
-                          }
-                          onSelect={() => {
-                            selectClip(span.ti.id);
-                            setSelectedId(null);
-                            setPlayheadMs(span.ti.timeline_start_ms);
-                          }}
-                        />
-                      ))}
-              </div>
-            ))}
+            <LaneStack
+              stacked={stacked}
+              view={view}
+              visStart={visStart}
+              visEnd={visEnd}
+              visibleCaptionRows={visibleCaptionRows}
+              clipsByTrack={clipsByTrack}
+              mediaById={mediaById}
+              drag={drag}
+              clipDrag={clipDrag}
+              selectedId={selectedId}
+              selectedClipId={selectedClipId}
+              dropTrackId={dropTrackId}
+              onCaptionPointerDown={onCaptionPointerDown}
+              onCaptionSelect={selectAndSeek}
+              onClipPointerDown={onClipPointerDown}
+              onClipSelect={onClipSelect}
+              onLaneDragOver={onLaneDragOver}
+              onLaneDragLeave={onLaneDragLeave}
+              onLaneDrop={onLaneDrop}
+              onLanePointerDown={onLanePointerDown}
+            />
           </div>
 
           {/* Playhead across the viewport */}
@@ -1042,6 +1125,210 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
 }
 
 // ── lane sub-components ───────────────────────────────────────────────────────
+// RulerBar / LaneHeaders / LaneStack are React.memo subtrees: the playback
+// clock re-renders Timeline ~60×/s (playheadMs is its state), but every prop
+// these receive is playhead-independent and referentially stable per tick
+// (useMemo'd arrays/maps, useCallback handlers, primitives) — so the whole
+// header/lane forest reconciles ZERO nodes per frame. They re-render only on
+// pan/zoom (view), project edits (items), drags and selection changes.
+
+const RulerBar = memo(function RulerBar({
+  ticks,
+  view,
+  fps,
+  onSeek,
+}: {
+  ticks: number[];
+  view: tl.TimelineView;
+  fps: number;
+  onSeek: (clientX: number) => void;
+}) {
+  return (
+    <div
+      className="relative border-b border-[var(--color-border)] bg-[var(--color-bg-elevated)]"
+      style={{ height: RULER_H }}
+      onPointerDown={(e) => onSeek(e.clientX)}
+    >
+      {ticks.map((ms) => (
+        <div
+          key={ms}
+          className="absolute top-0 flex h-full items-center"
+          style={{ left: tl.msToX(ms, view) }}
+        >
+          <span className="border-l border-[var(--color-border)] pl-1 font-mono text-[9px] text-[var(--color-fg-subtle)]">
+            {tl.formatTimecode(ms, fps)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+});
+
+const LaneHeaders = memo(function LaneHeaders({
+  stacked,
+  onToggle,
+  onMove,
+  onRemove,
+  labelMute,
+  labelSolo,
+  labelLock,
+  labelUp,
+  labelDown,
+  labelRemove,
+}: {
+  stacked: Track[];
+  onToggle: (track: Track, flag: "muted" | "solo" | "locked") => void;
+  onMove: (track: Track, dir: -1 | 1) => void;
+  onRemove: (track: Track) => void;
+  labelMute: string;
+  labelSolo: string;
+  labelLock: string;
+  labelUp: string;
+  labelDown: string;
+  labelRemove: string;
+}) {
+  return (
+    <>
+      {stacked.map((track, i) => (
+        <TrackHeader
+          key={track.id}
+          track={track}
+          height={LANE_H}
+          canMoveUp={i > 0}
+          canMoveDown={i < stacked.length - 1}
+          onToggle={onToggle}
+          onMove={onMove}
+          onRemove={onRemove}
+          labels={{
+            mute: labelMute,
+            solo: labelSolo,
+            lock: labelLock,
+            up: labelUp,
+            down: labelDown,
+            remove: labelRemove,
+          }}
+        />
+      ))}
+    </>
+  );
+});
+
+const LaneStack = memo(function LaneStack({
+  stacked,
+  view,
+  visStart,
+  visEnd,
+  visibleCaptionRows,
+  clipsByTrack,
+  mediaById,
+  drag,
+  clipDrag,
+  selectedId,
+  selectedClipId,
+  dropTrackId,
+  onCaptionPointerDown,
+  onCaptionSelect,
+  onClipPointerDown,
+  onClipSelect,
+  onLaneDragOver,
+  onLaneDragLeave,
+  onLaneDrop,
+  onLanePointerDown,
+}: {
+  stacked: Track[];
+  view: tl.TimelineView;
+  visStart: number;
+  visEnd: number;
+  visibleCaptionRows: { index: number; item: Caption }[];
+  clipsByTrack: Map<
+    string,
+    { start_ms: number; end_ms: number; ti: TimelineItem }[]
+  >;
+  mediaById: Map<string, MediaItem>;
+  drag: CaptionDrag | null;
+  clipDrag: ClipDrag | null;
+  selectedId: string | null;
+  selectedClipId: string | null;
+  dropTrackId: string | null;
+  onCaptionPointerDown: (
+    e: React.PointerEvent,
+    c: Caption,
+    kind: CaptionDrag["kind"],
+  ) => void;
+  onCaptionSelect: (c: Caption) => void;
+  onClipPointerDown: (
+    e: React.PointerEvent,
+    track: Track,
+    ti: TimelineItem,
+    kind: ClipDrag["kind"],
+  ) => void;
+  onClipSelect: (ti: TimelineItem) => void;
+  onLaneDragOver: (e: React.DragEvent, track: Track) => void;
+  onLaneDragLeave: (track: Track) => void;
+  onLaneDrop: (e: React.DragEvent, track: Track) => void;
+  onLanePointerDown: (e: React.PointerEvent) => void;
+}) {
+  return (
+    <>
+      {stacked.map((track) => (
+        <div
+          key={track.id}
+          className={cn(
+            "relative border-t border-[var(--color-border)]",
+            dropTrackId === track.id &&
+              "bg-[var(--color-accent-500)]/10 ring-1 ring-inset ring-[var(--color-accent-500)]/50",
+            !track.enabled && "opacity-50",
+          )}
+          style={{ height: LANE_H }}
+          onDragOver={(e) => onLaneDragOver(e, track)}
+          onDragLeave={() => onLaneDragLeave(track)}
+          onDrop={(e) => void onLaneDrop(e, track)}
+          onPointerDown={onLanePointerDown}
+        >
+          {track.kind === "caption"
+            ? visibleCaptionRows.map(({ item: c }) => (
+                <CaptionBox
+                  key={c.id}
+                  caption={c}
+                  view={view}
+                  drag={drag?.id === c.id ? drag : null}
+                  selected={selectedId === c.id}
+                  locked={track.locked}
+                  onPointerDown={(e, kind) => onCaptionPointerDown(e, c, kind)}
+                  onSelect={() => onCaptionSelect(c)}
+                />
+              ))
+            : tl
+                .visibleCaptions(
+                  clipsByTrack.get(track.id) ?? [],
+                  visStart,
+                  visEnd,
+                )
+                .map(({ item: span }) => (
+                  <ClipBox
+                    key={span.ti.id}
+                    item={span.ti}
+                    media={
+                      span.ti.source_media_id
+                        ? mediaById.get(span.ti.source_media_id)
+                        : undefined
+                    }
+                    view={view}
+                    speed={Math.max(0.01, span.ti.speed)}
+                    drag={clipDrag?.id === span.ti.id ? clipDrag : null}
+                    selected={selectedClipId === span.ti.id}
+                    locked={track.locked}
+                    onPointerDown={(e, kind) =>
+                      onClipPointerDown(e, track, span.ti, kind)
+                    }
+                    onSelect={() => onClipSelect(span.ti)}
+                  />
+                ))}
+        </div>
+      ))}
+    </>
+  );
+});
 
 function TrackHeader({
   track,
@@ -1050,25 +1337,29 @@ function TrackHeader({
   canMoveDown,
   onToggle,
   onMove,
+  onRemove,
   labels,
 }: {
   track: Track;
   height: number;
   canMoveUp: boolean;
   canMoveDown: boolean;
-  onToggle: (flag: "muted" | "solo" | "locked") => void;
-  onMove: (dir: -1 | 1) => void;
+  onToggle: (track: Track, flag: "muted" | "solo" | "locked") => void;
+  onMove: (track: Track, dir: -1 | 1) => void;
+  onRemove: (track: Track) => void;
   labels: {
     mute: string;
     solo: string;
     lock: string;
     up: string;
     down: string;
+    remove: string;
   };
 }) {
   const audible = track.kind === "video" || track.kind === "audio";
   return (
     <div
+      data-testid={`track-header-${track.id}`}
       className="flex items-center gap-1 border-t border-[var(--color-border)] px-2"
       style={{ height }}
     >
@@ -1084,7 +1375,7 @@ function TrackHeader({
         <button
           type="button"
           disabled={!canMoveUp}
-          onClick={() => onMove(1)}
+          onClick={() => onMove(track, 1)}
           title={labels.up}
           aria-label={labels.up}
           className="grid h-3.5 w-4 place-items-center text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)] disabled:opacity-30"
@@ -1094,7 +1385,7 @@ function TrackHeader({
         <button
           type="button"
           disabled={!canMoveDown}
-          onClick={() => onMove(-1)}
+          onClick={() => onMove(track, -1)}
           title={labels.down}
           aria-label={labels.down}
           className="grid h-3.5 w-4 place-items-center text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)] disabled:opacity-30"
@@ -1106,7 +1397,7 @@ function TrackHeader({
         <>
           <FlagToggle
             active={track.muted}
-            onClick={() => onToggle("muted")}
+            onClick={() => onToggle(track, "muted")}
             label={labels.mute}
             on={<VolumeX size={13} />}
             off={<Volume2 size={13} />}
@@ -1114,7 +1405,7 @@ function TrackHeader({
           />
           <FlagToggle
             active={track.solo}
-            onClick={() => onToggle("solo")}
+            onClick={() => onToggle(track, "solo")}
             label={labels.solo}
             on={<Headphones size={13} />}
             off={<Headphones size={13} />}
@@ -1124,12 +1415,22 @@ function TrackHeader({
       )}
       <FlagToggle
         active={track.locked}
-        onClick={() => onToggle("locked")}
+        onClick={() => onToggle(track, "locked")}
         label={labels.lock}
         on={<Lock size={13} />}
         off={<Unlock size={13} />}
         activeClass="text-[var(--color-warning)]"
       />
+      <button
+        type="button"
+        data-testid="remove-track"
+        onClick={() => onRemove(track)}
+        title={labels.remove}
+        aria-label={labels.remove}
+        className="grid h-6 w-6 shrink-0 place-items-center rounded text-[var(--color-fg-subtle)] hover:bg-[var(--color-bg-surface)] hover:text-[var(--color-danger,#b3261e)]"
+      >
+        <X size={13} />
+      </button>
     </div>
   );
 }
@@ -1262,6 +1563,10 @@ function ClipBox({
   const width = Math.max(2, (end - start) * view.pxPerMs);
   const label =
     item.text?.text || media?.original_filename || media?.path || item.kind;
+  // A dimmed source-frame backdrop behind the label for video clips. Extraction
+  // is memoized per media id and no-ops outside Tauri (browser/e2e keeps the
+  // text-only look).
+  const thumb = useThumbnail(media?.kind === "video" ? media : undefined);
   return (
     <div
       className={cn(
@@ -1276,6 +1581,15 @@ function ClipBox({
       onClick={onSelect}
       title={label}
     >
+      {thumb && (
+        <img
+          src={thumb}
+          alt=""
+          aria-hidden="true"
+          draggable={false}
+          className="pointer-events-none absolute inset-0 h-full w-full object-cover opacity-40"
+        />
+      )}
       {!locked && (
         <>
           <span
@@ -1288,7 +1602,7 @@ function ClipBox({
           />
         </>
       )}
-      <div className="truncate px-2 py-1 text-[var(--color-fg)]">
+      <div className="relative truncate px-2 py-1 text-[var(--color-fg)]">
         {label}
         {speed !== 1 && (
           <span className="ml-1 text-[var(--color-accent-300)]">{speed}×</span>

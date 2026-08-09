@@ -12,6 +12,7 @@ import {
   fireEvent,
   act,
   waitFor,
+  within,
 } from "@testing-library/react";
 
 // Mock the lowest layer (Tauri invoke) so the real typed `ipc` wrappers run.
@@ -255,6 +256,96 @@ describe("Timeline — rendered preview proxy is invalidated on edit", () => {
     );
     // …and the toolbar must stop asserting the preview is current.
     expect(queryByRole("button", { name: "Preview rendered" })).toBeNull();
+  });
+});
+
+// ── blade + delete keyboard ops ─────────────────────────────────────────────
+// B splits the selected clip at the playhead (S is taken by snap); Delete/
+// Backspace ripple-deletes it. Both commit through the shared store.
+
+describe("Timeline — blade (B) and Delete clip ops", () => {
+  beforeEach(() => {
+    invoke.mockImplementation((cmd: unknown, rawArgs: unknown) =>
+      cmd === "waveform_compute"
+        ? Promise.reject(new Error("no waveform under vitest"))
+        : Promise.resolve((rawArgs as { project: Project }).project),
+    );
+  });
+
+  function surfaceOf(container: HTMLElement): HTMLElement {
+    return container.firstElementChild as HTMLElement;
+  }
+
+  it("B is a no-op while the playhead rests on the clip's edge, splits once inside", async () => {
+    const { container } = render(<Timeline project={SAMPLE_PROJECT} />);
+    const surface = surfaceOf(container);
+
+    // Select the clip; onSelect parks the playhead at the clip start (0) —
+    // NOT strictly inside the 0..18000 span, so B must do nothing.
+    fireEvent.click(clipBox());
+    fireEvent.keyDown(surface, { key: "b" });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "op_split_timeline_item",
+      expect.anything(),
+    );
+
+    // Seek to 2000 ms (canvas x=100 at pxPerMs 0.05, rect left 0 in jsdom)
+    // and blade again — the op commits at the playhead.
+    const canvas = container.querySelector("canvas")!;
+    fireEvent.pointerDown(canvas, { clientX: 100 });
+    fireEvent.keyDown(surface, { key: "b" });
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "op_split_timeline_item",
+        expect.objectContaining({ itemId: "ti1", atTimelineMs: 2000 }),
+      ),
+    );
+  });
+
+  it("Delete ripple-deletes the selected clip through the store", async () => {
+    const { container } = render(<Timeline project={SAMPLE_PROJECT} />);
+    fireEvent.click(clipBox());
+    fireEvent.keyDown(surfaceOf(container), { key: "Delete" });
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "op_ripple_delete_item",
+        expect.objectContaining({ itemId: "ti1" }),
+      ),
+    );
+  });
+
+  it("Delete without a selected clip commits nothing", () => {
+    const { container } = render(<Timeline project={SAMPLE_PROJECT} />);
+    fireEvent.keyDown(surfaceOf(container), { key: "Delete" });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "op_ripple_delete_item",
+      expect.anything(),
+    );
+  });
+});
+
+// ── remove track ────────────────────────────────────────────────────────────
+// The ✕ in a track header commits op_remove_track; the backend rejects a
+// non-empty track and the message surfaces as an alert strip instead of
+// vanishing into a silent catch.
+
+describe("Timeline — remove track surfaces backend rejections", () => {
+  it("shows the rejection message as an alert", async () => {
+    invoke.mockImplementation((cmd: unknown) =>
+      cmd === "op_remove_track"
+        ? Promise.reject(
+            Object.assign(new Error("track tv is not empty"), {
+              code: "validation",
+            }),
+          )
+        : Promise.reject(new Error("no tauri runtime under vitest")),
+    );
+    render(<Timeline project={SAMPLE_PROJECT} />);
+    const header = screen.getByTestId("track-header-tv");
+    fireEvent.click(within(header).getByTestId("remove-track"));
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toContain("is not empty"),
+    );
   });
 });
 

@@ -11,7 +11,9 @@ import type { ComposeProgress, Project } from "./bindings";
 
 // Mock the lowest layer (Tauri core + event bus). `tauriEnv` flips what
 // `isTauri()` reports per-test; `listen` is the dynamic-import target that
-// `subscribeComposeProgress` reaches for under Tauri.
+// `subscribeComposeProgress` reaches for under Tauri. `renderPreviewProxy`
+// routes through `ipc.compose.previewProxy`, which bottoms out in the same
+// mocked `invoke` — so the command-name assertions below still see it.
 const invoke = vi.fn();
 let tauriEnv = false;
 vi.mock("@tauri-apps/api/core", () => ({
@@ -175,7 +177,7 @@ describe("renderPreviewProxy", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it("invokes compose_preview_proxy under Tauri and resolves true", async () => {
+  it("invokes compose_preview_proxy (via ipc.compose.previewProxy) under Tauri and resolves true", async () => {
     tauriEnv = true;
     invoke.mockResolvedValueOnce(undefined);
     await expect(

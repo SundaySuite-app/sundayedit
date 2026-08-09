@@ -140,8 +140,9 @@ pub fn reorder_track(project: &Project, track_id: &str, new_index: i32) -> AppRe
     }
 
     let mut next = project.clone();
-    // Work on an index-ordered copy so the visual order is what we reshuffle.
-    let mut ordered = next.tracks.clone();
+    // Reshuffle in index order (the visual order). Take the vec out of the
+    // clone instead of cloning the tracks a second time.
+    let mut ordered = std::mem::take(&mut next.tracks);
     ordered.sort_by_key(|t| t.index);
     let cur_pos = ordered.iter().position(|t| t.id == track_id).unwrap();
     let moved = ordered.remove(cur_pos);
@@ -349,8 +350,7 @@ pub fn split_timeline_item(
     }
 
     let mut next = project.clone();
-    next.timeline_items.remove(idx);
-    next.timeline_items.insert(idx, left);
+    next.timeline_items[idx] = left; // replace in place — one shift, not three
     next.timeline_items.insert(idx + 1, right);
     finalize(next)
 }

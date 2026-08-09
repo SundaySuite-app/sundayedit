@@ -1,5 +1,5 @@
 /**
- * Multi-track compose export (Task U) — flatten the whole timeline (every video
+ * Multi-track compose export — flatten the whole timeline (every video
  * / audio / caption / overlay track) into one MP4 via the ffmpeg
  * `filter_complex` compose engine.
  *

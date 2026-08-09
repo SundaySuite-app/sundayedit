@@ -1,11 +1,14 @@
 /**
- * Clip inspector (Task U) — properties panel for the selected timeline item.
+ * Clip inspector — properties panel for the selected timeline item.
  *
  * Floats over the workspace when a clip is selected on the timeline. Every edit
  * commits through the shared `useProjectStore.run`, so it lands on the SAME
  * undo/redo stack as caption + drag edits and is fully reversible:
  *
  *   - Trim — in/out source points (ms). `trimTimelineItem`.
+ *   - Split — at the playhead (mirrors the timeline's B blade key), enabled
+ *     only while the playhead stands strictly inside the clip's span.
+ *     `splitTimelineItem`.
  *   - Transition — leading-edge type (none/fade/crossfade/dip) + duration.
  *     `setTransition` / `clearTransition`.
  *   - Transform — scale / x / y for overlay/PiP clips. `setTransform`.
@@ -16,12 +19,14 @@
  */
 
 import { useEffect, useState } from "react";
-import { X } from "lucide-react";
+import { Scissors, X } from "lucide-react";
 
 import type { Project, TimelineItem, Transform } from "@/lib/bindings";
 import { ipc } from "@/lib/ipc";
 import { useProjectStore } from "@/lib/useProjectStore";
 import { useT, type TKey } from "@/lib/i18n";
+import { itemSpan } from "./laneLayout";
+import { getPlayheadMs, usePlayheadInsideSpan } from "./playhead";
 
 /**
  * Transition kinds we expose in the picker. `""` = no transition. Every
@@ -88,6 +93,13 @@ export function ClipInspector({
   const [outBuf, setOutBuf] = useState(String(item.out_ms));
   useEffect(() => setInBuf(String(item.in_ms)), [item.id, item.in_ms]);
   useEffect(() => setOutBuf(String(item.out_ms)), [item.id, item.out_ms]);
+
+  // Live playhead from the timeline's shared store — split is only meaningful
+  // strictly inside the clip's span (an edge cut leaves a zero-length half).
+  // Subscribing to the derived boolean (not the raw ms) keeps the inspector
+  // from re-rendering 60×/s during playback; the click reads the live value.
+  const span = itemSpan(item);
+  const canSplit = usePlayheadInsideSpan(span.start_ms, span.end_ms);
 
   const transition = item.transition_in;
   // Legacy friendly kinds ("crossfade"/"dip") display — and re-commit — as the
@@ -186,6 +198,21 @@ export function ClipInspector({
               onCommit={() => commitTrim("out", outBuf)}
             />
           </div>
+          <button
+            type="button"
+            data-testid="inspector-split"
+            disabled={!canSplit}
+            onClick={() =>
+              commit((p) =>
+                ipc.timeline.splitTimelineItem(p, item.id, getPlayheadMs()),
+              )
+            }
+            title={"Split at playhead" /* i18n:pending inspectorSplit */}
+            className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-[var(--color-border)] px-2 py-1.5 text-[var(--text-ui-sm)] text-[var(--color-fg-muted)] hover:bg-[var(--color-bg-surface)] hover:text-[var(--color-fg)] disabled:pointer-events-none disabled:opacity-40"
+          >
+            <Scissors size={13} />
+            {"Split at playhead" /* i18n:pending inspectorSplit */}
+          </button>
         </Section>
 
         {/* Transition */}

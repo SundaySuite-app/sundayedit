@@ -471,7 +471,7 @@ const en = {
   exportPreviewHint:
     "Approximate preview of the burned-in styling, framed to this platform's aspect ratio.",
 
-  // ── Multi-track compose export (Task U) ─────────────────────────────────
+  // ── Multi-track compose export ──────────────────────────────────────────
   exportComposeHeader: "Composed video",
   exportComposeAction: "Export composed video",
   exportComposeDesc: "Flatten every track into one MP4 (ffmpeg).",
@@ -489,7 +489,7 @@ const en = {
   timelinePreviewDone: "Preview rendered",
   timelinePreviewLive: "Back to live",
 
-  // ── Clip inspector (Task U) ─────────────────────────────────────────────
+  // ── Clip inspector ──────────────────────────────────────────────────────
   navInspector: "Inspector",
   inspectorTitle: "Clip",
   inspectorTrimHeader: "Trim",
@@ -929,7 +929,7 @@ const no: Catalog = {
   exportPreviewHint:
     "Omtrentlig forhåndsvisning av den innbrente stilen, beskåret til plattformens bildeformat.",
 
-  // ── Multi-track compose export (Task U) ─────────────────────────────────
+  // ── Multi-track compose export ──────────────────────────────────────────
   exportComposeHeader: "Komponert video",
   exportComposeAction: "Eksporter komponert video",
   exportComposeDesc: "Flat ut alle spor til én MP4 (ffmpeg).",
@@ -947,7 +947,7 @@ const no: Catalog = {
   timelinePreviewDone: "Forhåndsvisning gjengitt",
   timelinePreviewLive: "Tilbake til live",
 
-  // ── Clip inspector (Task U) ─────────────────────────────────────────────
+  // ── Clip inspector ──────────────────────────────────────────────────────
   navInspector: "Inspektør",
   inspectorTitle: "Klipp",
   inspectorTrimHeader: "Trim",
@@ -1355,22 +1355,23 @@ const sv: Catalog = {
   mediaPlayerScrubWarning:
     "Tidslinjen styr uppspelningen — manuell skrubbning ignorerades.",
 
-  // ── Media bin + multi-track (sv translation TODO — English fallback) ─────
+  // ── Media bin + multi-track ─────────────────────────────────────────────
   navMedia: "Media",
-  mediaBinTitle: "Media library",
-  mediaBinImport: "Import media",
-  mediaBinImportError: "Import failed: {error}",
-  mediaBinEmpty: "No media yet. Import a clip to place it on a track.",
-  mediaBinDragHint: "Drag a clip onto a track to place it.",
-  mediaBinAddTrackHeader: "Add track",
-  mediaBinAddVideoTrack: "Video track",
-  mediaBinAddAudioTrack: "Audio track",
-  mediaBinAddOverlayTrack: "Overlay track",
-  trackMute: "Mute",
+  mediaBinTitle: "Mediebibliotek",
+  mediaBinImport: "Importera media",
+  mediaBinImportError: "Import misslyckades: {error}",
+  mediaBinEmpty:
+    "Inga medier ännu. Importera ett klipp för att placera det på ett spår.",
+  mediaBinDragHint: "Dra ett klipp till ett spår för att placera det.",
+  mediaBinAddTrackHeader: "Lägg till spår",
+  mediaBinAddVideoTrack: "Videospår",
+  mediaBinAddAudioTrack: "Ljudspår",
+  mediaBinAddOverlayTrack: "Överläggsspår",
+  trackMute: "Tysta",
   trackSolo: "Solo",
-  trackLock: "Lock",
-  trackMoveUp: "Move up",
-  trackMoveDown: "Move down",
+  trackLock: "Lås",
+  trackMoveUp: "Flytta upp",
+  trackMoveDown: "Flytta ned",
   exportSidecarHeader: "Textformat (sidecar)",
   exportSrtDesc: "Universell — YouTube, de flesta spelare",
   exportVttDesc: "Webbstandard, med talare",
@@ -1468,9 +1469,9 @@ const sv: Catalog = {
   projectMetaNounsHint:
     "Kommaseparerat. Läggs till i Whisper-prompten före transkribering för att minska feligenkänningar.",
   projectMetaLanguageLabel: "Inspelningsspråk",
-  projectMetaLanguageAuto: "Auto-detect",
+  projectMetaLanguageAuto: "Identifiera automatiskt",
   projectMetaLanguageHint:
-    "Åsidosätt auto-detection när Whisper väljer fel språk.",
+    "Åsidosätt automatisk identifiering när Whisper väljer fel språk.",
 };
 const da: Catalog = {
   navTranscribe: "Transskriber",
@@ -1802,22 +1803,23 @@ const da: Catalog = {
   mediaPlayerScrubWarning:
     "Tidslinjen styrer afspilningen — manuel scrubning blev ignoreret.",
 
-  // ── Media bin + multi-track (da translation TODO — English fallback) ─────
-  navMedia: "Media",
-  mediaBinTitle: "Media library",
-  mediaBinImport: "Import media",
-  mediaBinImportError: "Import failed: {error}",
-  mediaBinEmpty: "No media yet. Import a clip to place it on a track.",
-  mediaBinDragHint: "Drag a clip onto a track to place it.",
-  mediaBinAddTrackHeader: "Add track",
-  mediaBinAddVideoTrack: "Video track",
-  mediaBinAddAudioTrack: "Audio track",
-  mediaBinAddOverlayTrack: "Overlay track",
-  trackMute: "Mute",
+  // ── Media bin + multi-track ─────────────────────────────────────────────
+  navMedia: "Medier",
+  mediaBinTitle: "Mediebibliotek",
+  mediaBinImport: "Importér medier",
+  mediaBinImportError: "Import mislykkedes: {error}",
+  mediaBinEmpty:
+    "Ingen medier endnu. Importér et klip for at placere det på et spor.",
+  mediaBinDragHint: "Træk et klip til et spor for at placere det.",
+  mediaBinAddTrackHeader: "Tilføj spor",
+  mediaBinAddVideoTrack: "Videospor",
+  mediaBinAddAudioTrack: "Lydspor",
+  mediaBinAddOverlayTrack: "Overlay-spor",
+  trackMute: "Dæmp",
   trackSolo: "Solo",
-  trackLock: "Lock",
-  trackMoveUp: "Move up",
-  trackMoveDown: "Move down",
+  trackLock: "Lås",
+  trackMoveUp: "Flyt op",
+  trackMoveDown: "Flyt ned",
   exportSidecarHeader: "Tekstformater (sidecar)",
   exportSrtDesc: "Universelt — YouTube, de fleste afspillere",
   exportVttDesc: "Webstandard, med talere",
@@ -1915,9 +1917,9 @@ const da: Catalog = {
   projectMetaNounsHint:
     "Kommasepareret. Tilføjes Whisper-prompten inden transskription for at reducere forkerte genkendelser.",
   projectMetaLanguageLabel: "Optagelsessprog",
-  projectMetaLanguageAuto: "Auto-detect",
+  projectMetaLanguageAuto: "Registrér automatisk",
   projectMetaLanguageHint:
-    "Tilsidesæt auto-detection, når Whisper vælger det forkerte sprog.",
+    "Tilsidesæt automatisk registrering, når Whisper vælger det forkerte sprog.",
 };
 const de: Catalog = {
   navTranscribe: "Transkribieren",
@@ -2257,22 +2259,24 @@ const de: Catalog = {
   mediaPlayerScrubWarning:
     "Die Timeline steuert die Wiedergabe — manuelles Scrubben wurde ignoriert.",
 
-  // ── Media bin + multi-track (de translation TODO — English fallback) ─────
-  navMedia: "Media",
-  mediaBinTitle: "Media library",
-  mediaBinImport: "Import media",
-  mediaBinImportError: "Import failed: {error}",
-  mediaBinEmpty: "No media yet. Import a clip to place it on a track.",
-  mediaBinDragHint: "Drag a clip onto a track to place it.",
-  mediaBinAddTrackHeader: "Add track",
-  mediaBinAddVideoTrack: "Video track",
-  mediaBinAddAudioTrack: "Audio track",
-  mediaBinAddOverlayTrack: "Overlay track",
-  trackMute: "Mute",
+  // ── Media bin + multi-track ─────────────────────────────────────────────
+  navMedia: "Medien",
+  mediaBinTitle: "Medienbibliothek",
+  mediaBinImport: "Medien importieren",
+  mediaBinImportError: "Import fehlgeschlagen: {error}",
+  mediaBinEmpty:
+    "Noch keine Medien. Importieren Sie einen Clip, um ihn auf einer Spur zu platzieren.",
+  mediaBinDragHint:
+    "Ziehen Sie einen Clip auf eine Spur, um ihn zu platzieren.",
+  mediaBinAddTrackHeader: "Spur hinzufügen",
+  mediaBinAddVideoTrack: "Videospur",
+  mediaBinAddAudioTrack: "Audiospur",
+  mediaBinAddOverlayTrack: "Overlay-Spur",
+  trackMute: "Stumm",
   trackSolo: "Solo",
-  trackLock: "Lock",
-  trackMoveUp: "Move up",
-  trackMoveDown: "Move down",
+  trackLock: "Sperren",
+  trackMoveUp: "Nach oben",
+  trackMoveDown: "Nach unten",
   exportSidecarHeader: "Textformate (Sidecar)",
   exportSrtDesc: "Universell — YouTube, die meisten Player",
   exportVttDesc: "Webstandard, mit Sprechern",
@@ -2711,22 +2715,23 @@ const fr: Catalog = {
   mediaPlayerScrubWarning:
     "La timeline pilote la lecture — le déplacement manuel a été ignoré.",
 
-  // ── Media bin + multi-track (fr translation TODO — English fallback) ─────
-  navMedia: "Media",
-  mediaBinTitle: "Media library",
-  mediaBinImport: "Import media",
-  mediaBinImportError: "Import failed: {error}",
-  mediaBinEmpty: "No media yet. Import a clip to place it on a track.",
-  mediaBinDragHint: "Drag a clip onto a track to place it.",
-  mediaBinAddTrackHeader: "Add track",
-  mediaBinAddVideoTrack: "Video track",
-  mediaBinAddAudioTrack: "Audio track",
-  mediaBinAddOverlayTrack: "Overlay track",
-  trackMute: "Mute",
+  // ── Media bin + multi-track ─────────────────────────────────────────────
+  navMedia: "Médias",
+  mediaBinTitle: "Bibliothèque de médias",
+  mediaBinImport: "Importer des médias",
+  mediaBinImportError: "Échec de l'import : {error}",
+  mediaBinEmpty:
+    "Aucun média pour l'instant. Importez un clip pour le placer sur une piste.",
+  mediaBinDragHint: "Glissez un clip sur une piste pour le placer.",
+  mediaBinAddTrackHeader: "Ajouter une piste",
+  mediaBinAddVideoTrack: "Piste vidéo",
+  mediaBinAddAudioTrack: "Piste audio",
+  mediaBinAddOverlayTrack: "Piste de superposition",
+  trackMute: "Muet",
   trackSolo: "Solo",
-  trackLock: "Lock",
-  trackMoveUp: "Move up",
-  trackMoveDown: "Move down",
+  trackLock: "Verrouiller",
+  trackMoveUp: "Monter",
+  trackMoveDown: "Descendre",
   exportSidecarHeader: "Formats texte (fichier annexe)",
   exportSrtDesc: "Universel — YouTube, la plupart des lecteurs",
   exportVttDesc: "Standard web, avec intervenants",
@@ -3160,22 +3165,22 @@ const pl: Catalog = {
   mediaPlayerScrubWarning:
     "Oś czasu steruje odtwarzaniem — ręczne przewijanie zignorowano.",
 
-  // ── Media bin + multi-track (pl translation TODO — English fallback) ─────
+  // ── Media bin + multi-track ─────────────────────────────────────────────
   navMedia: "Media",
-  mediaBinTitle: "Media library",
-  mediaBinImport: "Import media",
-  mediaBinImportError: "Import failed: {error}",
-  mediaBinEmpty: "No media yet. Import a clip to place it on a track.",
-  mediaBinDragHint: "Drag a clip onto a track to place it.",
-  mediaBinAddTrackHeader: "Add track",
-  mediaBinAddVideoTrack: "Video track",
-  mediaBinAddAudioTrack: "Audio track",
-  mediaBinAddOverlayTrack: "Overlay track",
-  trackMute: "Mute",
+  mediaBinTitle: "Biblioteka mediów",
+  mediaBinImport: "Importuj media",
+  mediaBinImportError: "Import nie powiódł się: {error}",
+  mediaBinEmpty: "Brak mediów. Zaimportuj klip, aby umieścić go na ścieżce.",
+  mediaBinDragHint: "Przeciągnij klip na ścieżkę, aby go umieścić.",
+  mediaBinAddTrackHeader: "Dodaj ścieżkę",
+  mediaBinAddVideoTrack: "Ścieżka wideo",
+  mediaBinAddAudioTrack: "Ścieżka audio",
+  mediaBinAddOverlayTrack: "Ścieżka nakładki",
+  trackMute: "Wycisz",
   trackSolo: "Solo",
-  trackLock: "Lock",
-  trackMoveUp: "Move up",
-  trackMoveDown: "Move down",
+  trackLock: "Zablokuj",
+  trackMoveUp: "Przenieś w górę",
+  trackMoveDown: "Przenieś w dół",
   exportSidecarHeader: "Formaty tekstowe (sidecar)",
   exportSrtDesc: "Uniwersalny — YouTube, większość odtwarzaczy",
   exportVttDesc: "Standard internetowy, z mówcami",

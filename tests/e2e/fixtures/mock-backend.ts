@@ -1026,6 +1026,12 @@ function backend(): void {
         // The compose-export "save as" picker; a deterministic output path lets
         // the real button drive `compose_render` end-to-end.
         return Promise.resolve("/demo/out.mp4");
+      case "extract_thumbnail":
+        // Thumbnail grabs write a JPEG and return its path — echo the
+        // requested outPath (or a stable fake) without any ffmpeg.
+        return Promise.resolve(
+          (args.outPath as string | undefined) ?? "/demo/thumb.jpg",
+        );
       case "video_probe":
         return Promise.resolve({
           duration_ms: 12_000,
