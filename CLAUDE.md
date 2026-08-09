@@ -103,22 +103,26 @@ docs/                 Architecture, decisions, calibration data
 tests/fixtures/       Test video files (Creative Commons)
 ```
 
-> **Note:** there is no `db/` Rust module (the `src-tauri/src/db/` dir is an
-> empty placeholder) and `sql/` is empty — there are no migration files. The
+> **Note:** there are no SQL migration files and no `db/` Rust module. The
 > SQLite schema is created in-code in `services/project_file.rs::ensure_schema`
 > (`SCHEMA_VERSION = 4`), which also backfills a default video + caption track
 > when opening older files.
 
 ## Project file format
 
-`.sundayedit` files are SQLite databases with a JSON-compatible schema, or compressed JSON — final decision in Phase 3.1. Containing:
+`.sundayedit` files are SQLite databases — decided and shipped
+(`services/project_file.rs`, `SCHEMA_VERSION = 4`, in-code schema creation +
+in-code migrations; a `tracks_persisted` meta marker distinguishes genuine
+v≤3 files, so load-time timeline backfill never resurrects a deliberately
+emptied timeline). Containing:
 
 - Reference to source video (absolute path + content hash for path stability)
-- Project settings
+- Project settings + metadata
 - Caption data (with per-word timing + confidence)
 - Style data
 - Context + glossary
-- History (undo stack)
+- NLE state: media pool, tracks, timeline items
+- Clips / highlight-reel plans
 
 ## Calibration discipline
 

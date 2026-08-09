@@ -1,5 +1,5 @@
 /**
- * Multi-track compose export (Task U) — flatten the whole timeline (every video
+ * Multi-track compose export — flatten the whole timeline (every video
  * / audio / caption / overlay track) into one MP4 via the ffmpeg
  * `filter_complex` compose engine.
  *
@@ -28,6 +28,7 @@ type Phase =
   | { kind: "idle" }
   | { kind: "rendering"; percent: number; cancelling: boolean }
   | { kind: "done"; path: string }
+  | { kind: "cancelled" }
   | { kind: "error"; message: string };
 
 export function ComposeExport({ project }: { project: Project }) {
@@ -35,6 +36,11 @@ export function ComposeExport({ project }: { project: Project }) {
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   // Live progress subscription; torn down on unmount / when the render settles.
   const unsubRef = useRef<(() => void) | null>(null);
+  // Set when the user clicks Cancel. The Rust side rejects the render future on
+  // cancel, so without this flag a user cancel is indistinguishable from a real
+  // failure unless we sniff the message — the flag makes the calm "cancelled"
+  // state robust even if the backend's error text changes.
+  const cancelRequestedRef = useRef(false);
 
   useEffect(() => () => unsubRef.current?.(), []);
 
@@ -46,6 +52,7 @@ export function ComposeExport({ project }: { project: Project }) {
     });
     if (typeof out !== "string") return; // cancelled the dialog
 
+    cancelRequestedRef.current = false;
     setPhase({ kind: "rendering", percent: 0, cancelling: false });
     unsubRef.current = subscribeComposeProgress((p) => {
       const pct = Math.round((p.fraction ?? 0) * 100);
@@ -66,11 +73,13 @@ export function ComposeExport({ project }: { project: Project }) {
           : e instanceof Error
             ? e.message
             : String(e);
-      // A user-triggered cancel surfaces as an error from the render future;
-      // treat it as a benign cancelled state rather than a failure.
+      // A user-triggered cancel surfaces as a rejection of the render future
+      // (Rust: "compose render cancelled"). The local flag is authoritative;
+      // the message sniff covers a cancel initiated elsewhere. Either way it's
+      // a calm, distinct state — never the error banner.
       setPhase(
-        /cancel/i.test(message)
-          ? { kind: "error", message: t("composeCancelled") }
+        cancelRequestedRef.current || /cancel/i.test(message)
+          ? { kind: "cancelled" }
           : { kind: "error", message },
       );
     } finally {
@@ -80,6 +89,7 @@ export function ComposeExport({ project }: { project: Project }) {
   }
 
   function cancel() {
+    cancelRequestedRef.current = true;
     setPhase((cur) =>
       cur.kind === "rendering" ? { ...cur, cancelling: true } : cur,
     );
@@ -170,6 +180,30 @@ export function ComposeExport({ project }: { project: Project }) {
                     type="button"
                     onClick={() => setPhase({ kind: "idle" })}
                     className="rounded-md bg-[var(--color-accent-600)] px-4 py-1.5 text-[var(--text-ui-sm)] font-semibold text-[var(--color-neutral-950)] hover:bg-[var(--color-accent-500)]"
+                  >
+                    {t("composeClose")}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {phase.kind === "cancelled" && (
+              <>
+                <p
+                  className="flex items-start gap-2 text-[var(--text-ui-sm)] text-[var(--color-fg)]"
+                  data-testid="compose-cancelled"
+                >
+                  <X
+                    size={16}
+                    className="mt-0.5 shrink-0 text-[var(--color-fg-muted)]"
+                  />
+                  {t("composeCancelled")}
+                </p>
+                <div className="mt-4 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setPhase({ kind: "idle" })}
+                    className="rounded-md border border-[var(--color-border)] px-4 py-1.5 text-[var(--text-ui-sm)] font-medium text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]"
                   >
                     {t("composeClose")}
                   </button>

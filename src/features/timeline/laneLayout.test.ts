@@ -6,7 +6,6 @@ import type { Track } from "@/lib/bindings/Track";
 import { SAMPLE_PROJECT } from "@/lib/sampleProject";
 import {
   itemSpan,
-  laneAtY,
   stackedTracks,
   trackAtY,
   timelineDurationMs,
@@ -79,28 +78,21 @@ describe("stackedTracks", () => {
   });
 });
 
-describe("laneAtY hit-test", () => {
-  const laneH = 48;
-  it("returns the lane index for a Y inside the lanes area", () => {
-    expect(laneAtY(0, 3, laneH)).toBe(0);
-    expect(laneAtY(47, 3, laneH)).toBe(0);
-    expect(laneAtY(48, 3, laneH)).toBe(1);
-    expect(laneAtY(100, 3, laneH)).toBe(2);
-  });
-
-  it("returns null above the first lane or below the last", () => {
-    expect(laneAtY(-1, 3, laneH)).toBeNull();
-    expect(laneAtY(3 * laneH, 3, laneH)).toBeNull();
-    expect(laneAtY(0, 0, laneH)).toBeNull();
-  });
-});
-
 describe("trackAtY", () => {
   it("resolves a Y to the track via the stacking order", () => {
     const tracks = [track("a", 0), track("b", 1)]; // stacked: [b, a]
     expect(trackAtY(0, tracks, 48)?.id).toBe("b"); // lane 0 = top = b
-    expect(trackAtY(48, tracks, 48)?.id).toBe("a");
+    expect(trackAtY(47, tracks, 48)?.id).toBe("b"); // last px of lane 0
+    expect(trackAtY(48, tracks, 48)?.id).toBe("a"); // lane boundary → lane 1
     expect(trackAtY(999, tracks, 48)).toBeNull();
+  });
+
+  it("returns null above the lanes area, with no tracks, or degenerate lane height", () => {
+    const tracks = [track("a", 0), track("b", 1)];
+    expect(trackAtY(-1, tracks, 48)).toBeNull();
+    expect(trackAtY(2 * 48, tracks, 48)).toBeNull(); // just past the last lane
+    expect(trackAtY(0, [], 48)).toBeNull();
+    expect(trackAtY(0, tracks, 0)).toBeNull();
   });
 });
 

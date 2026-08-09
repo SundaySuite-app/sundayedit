@@ -1,11 +1,14 @@
 /**
- * Clip inspector (Task U) — properties panel for the selected timeline item.
+ * Clip inspector — properties panel for the selected timeline item.
  *
  * Floats over the workspace when a clip is selected on the timeline. Every edit
  * commits through the shared `useProjectStore.run`, so it lands on the SAME
  * undo/redo stack as caption + drag edits and is fully reversible:
  *
  *   - Trim — in/out source points (ms). `trimTimelineItem`.
+ *   - Split — at the playhead (mirrors the timeline's B blade key), enabled
+ *     only while the playhead stands strictly inside the clip's span.
+ *     `splitTimelineItem`.
  *   - Transition — leading-edge type (none/fade/crossfade/dip) + duration.
  *     `setTransition` / `clearTransition`.
  *   - Transform — scale / x / y for overlay/PiP clips. `setTransform`.
@@ -16,15 +19,62 @@
  */
 
 import { useEffect, useState } from "react";
-import { X } from "lucide-react";
+import { Scissors, X } from "lucide-react";
 
 import type { Project, TimelineItem, Transform } from "@/lib/bindings";
 import { ipc } from "@/lib/ipc";
 import { useProjectStore } from "@/lib/useProjectStore";
-import { useT } from "@/lib/i18n";
+import { useT, type TKey } from "@/lib/i18n";
+import { itemSpan } from "./laneLayout";
+import { getPlayheadMs, usePlayheadInsideSpan } from "./playhead";
 
-/** Transition kinds we expose in the picker. `""` = no transition. */
-const TRANSITION_KINDS = ["", "fade", "crossfade", "dip"] as const;
+/**
+ * Transition kinds we expose in the picker. `""` = no transition. Every
+ * non-empty value is a REAL ffmpeg `xfade` transition name — the kind string
+ * is stored verbatim in the project and emitted as `xfade=transition={kind}`
+ * at export, so an invented "friendly" name here aborts the whole render
+ * (regression: seam-xfade-transition-vocabulary — the picker used to offer
+ * "crossfade"/"dip", which ffmpeg rejects). The picker↔ffmpeg seam is pinned
+ * end-to-end by src-tauri/tests/compose_xfade_vocabulary.rs, which parses
+ * THIS array literal out of the source — keep it a flat list of quoted names.
+ */
+const TRANSITION_KINDS = [
+  "",
+  "fade",
+  "dissolve",
+  "fadeblack",
+  "fadewhite",
+  "wipeleft",
+  "wiperight",
+  "slideleft",
+  "slideright",
+  "circleopen",
+] as const;
+
+/** Translated label per xfade name (the value stays the exact ffmpeg name). */
+const TRANSITION_LABEL_KEYS: Record<string, TKey> = {
+  fade: "inspectorTransitionFade",
+  dissolve: "inspectorTransitionCrossfade",
+  fadeblack: "inspectorTransitionDip",
+  fadewhite: "inspectorTransitionDipWhite",
+  wipeleft: "inspectorTransitionWipeLeft",
+  wiperight: "inspectorTransitionWipeRight",
+  slideleft: "inspectorTransitionSlideLeft",
+  slideright: "inspectorTransitionSlideRight",
+  circleopen: "inspectorTransitionCircleOpen",
+};
+
+/**
+ * Friendly kinds older project files may still carry, mapped to the real
+ * xfade names the backend renders them as (`compose::xfade_transition_name`).
+ * Shown — and re-committed — as their real name so the picker reflects what
+ * will actually be rendered.
+ */
+const LEGACY_TRANSITION_KINDS: Record<string, string> = {
+  crossfade: "dissolve",
+  dip: "fadeblack",
+};
+
 const DEFAULT_TRANSITION_MS = 500;
 
 export function ClipInspector({
@@ -44,7 +94,19 @@ export function ClipInspector({
   useEffect(() => setInBuf(String(item.in_ms)), [item.id, item.in_ms]);
   useEffect(() => setOutBuf(String(item.out_ms)), [item.id, item.out_ms]);
 
+  // Live playhead from the timeline's shared store — split is only meaningful
+  // strictly inside the clip's span (an edge cut leaves a zero-length half).
+  // Subscribing to the derived boolean (not the raw ms) keeps the inspector
+  // from re-rendering 60×/s during playback; the click reads the live value.
+  const span = itemSpan(item);
+  const canSplit = usePlayheadInsideSpan(span.start_ms, span.end_ms);
+
   const transition = item.transition_in;
+  // Legacy friendly kinds ("crossfade"/"dip") display — and re-commit — as the
+  // real xfade name the backend renders them as.
+  const transitionKind = transition
+    ? (LEGACY_TRANSITION_KINDS[transition.kind] ?? transition.kind)
+    : "";
   const transform = item.transform;
 
   const [durBuf, setDurBuf] = useState(String(transition?.duration_ms ?? ""));
@@ -85,7 +147,7 @@ export function ClipInspector({
     const duration = Number(raw);
     if (!Number.isFinite(duration) || !transition) return;
     commit((p) =>
-      ipc.timeline.setTransition(p, item.id, transition.kind, duration),
+      ipc.timeline.setTransition(p, item.id, transitionKind, duration),
     );
   }
 
@@ -136,6 +198,21 @@ export function ClipInspector({
               onCommit={() => commitTrim("out", outBuf)}
             />
           </div>
+          <button
+            type="button"
+            data-testid="inspector-split"
+            disabled={!canSplit}
+            onClick={() =>
+              commit((p) =>
+                ipc.timeline.splitTimelineItem(p, item.id, getPlayheadMs()),
+              )
+            }
+            title={t("inspectorSplit")}
+            className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-[var(--color-border)] px-2 py-1.5 text-[var(--text-ui-sm)] text-[var(--color-fg-muted)] hover:bg-[var(--color-bg-surface)] hover:text-[var(--color-fg)] disabled:pointer-events-none disabled:opacity-40"
+          >
+            <Scissors size={13} />
+            {t("inspectorSplit")}
+          </button>
         </Section>
 
         {/* Transition */}
@@ -145,7 +222,7 @@ export function ClipInspector({
               {t("inspectorTransitionType")}
             </span>
             <select
-              value={transition?.kind ?? ""}
+              value={transitionKind}
               onChange={(e) => commitTransitionKind(e.target.value)}
               className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-2 py-1.5 text-[var(--text-ui-sm)]"
             >
@@ -153,13 +230,15 @@ export function ClipInspector({
                 <option key={k || "none"} value={k}>
                   {k === ""
                     ? t("inspectorTransitionNone")
-                    : k === "fade"
-                      ? t("inspectorTransitionFade")
-                      : k === "crossfade"
-                        ? t("inspectorTransitionCrossfade")
-                        : t("inspectorTransitionDip")}
+                    : t(TRANSITION_LABEL_KEYS[k])}
                 </option>
               ))}
+              {/* A kind we don't offer (hand-edited project file) still shows
+                  as itself instead of silently snapping to the first option. */}
+              {transitionKind !== "" &&
+                !(TRANSITION_KINDS as readonly string[]).includes(
+                  transitionKind,
+                ) && <option value={transitionKind}>{transitionKind}</option>}
             </select>
           </label>
           {transition && (

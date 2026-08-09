@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 
 import { openDemoProject } from "./fixtures/mock-backend";
 
-// Multi-track compose export (Task U), end-to-end through the real UI.
+// Multi-track compose export, end-to-end through the real UI.
 //
 // The compose surface is guarded behind `isTauri()` (it needs a native save
 // dialog + the ffmpeg compose engine), so this spec opens the demo project with

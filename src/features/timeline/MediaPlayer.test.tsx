@@ -1,7 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, cleanup, act } from "@testing-library/react";
 
+import type { MediaItem } from "@/lib/bindings/MediaItem";
+import type { Project } from "@/lib/bindings/Project";
+import type { TimelineItem } from "@/lib/bindings/TimelineItem";
+import type { Track } from "@/lib/bindings/Track";
+
 import { MediaPlayer } from "./MediaPlayer";
+
+// The NLE branch runs clip media through convertFileSrc; there is no Tauri
+// runtime under Vitest, so mock the lowest layer.
+vi.mock("@tauri-apps/api/core", () => ({
+  convertFileSrc: (p: string) => `asset://localhost/${p}`,
+}));
 
 // jsdom implements <video> as an element but not playback: play()/pause() are
 // stubbed to throw "Not implemented", and currentTime/duration/paused are not
@@ -208,5 +219,205 @@ describe("MediaPlayer", () => {
       video.dispatchEvent(new Event("error"));
     });
     expect(queryByTestId("media-unavailable")).not.toBeNull();
+  });
+});
+
+// ── Minimal NLE project factories (mirror previewMap.test.ts) ───────────────
+
+function track(id: string, index: number): Track {
+  return {
+    id,
+    kind: "video",
+    name: id,
+    index,
+    enabled: true,
+    locked: false,
+    muted: false,
+    solo: false,
+  };
+}
+
+function media(id: string, path: string): MediaItem {
+  return {
+    id,
+    path,
+    content_hash: id,
+    kind: "video",
+    duration_ms: 60_000,
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    has_audio: true,
+    audio_wav_path: null,
+    original_filename: `${id}.mp4`,
+    added_at: 0,
+  };
+}
+
+function item(
+  id: string,
+  trackId: string,
+  mediaId: string,
+  startMs: number,
+  inMs: number,
+  outMs: number,
+): TimelineItem {
+  return {
+    id,
+    track_id: trackId,
+    kind: "av",
+    source_media_id: mediaId,
+    in_ms: inMs,
+    out_ms: outMs,
+    timeline_start_ms: startMs,
+    speed: 1,
+    transform: {
+      x: 0,
+      y: 0,
+      scale: 1,
+      rotation_deg: 0,
+      opacity: 1,
+      crop: null,
+    },
+    effects: [],
+    transition_in: null,
+    text: null,
+    enabled: true,
+    locked: false,
+  };
+}
+
+function nleProject(
+  tracks: Track[],
+  items: TimelineItem[],
+  medias: MediaItem[],
+): Project {
+  return {
+    media: medias,
+    tracks,
+    timeline_items: items,
+  } as unknown as Project;
+}
+
+// Regression (state-mediaplayer-unavailable-never-reset /
+// diff-unavailable-overlay-latched): the "media missing" overlay used to latch
+// forever — onError set `unavailable` and nothing ever cleared it, so a single
+// broken clip left a permanent banner over every subsequently playing source.
+// Any source change (rAF clip swap, proxy load, legacy src change) must reset.
+describe("MediaPlayer — unavailable overlay resets on source change", () => {
+  it("clears the overlay when the NLE rAF loop swaps video.src to a healthy clip's media", () => {
+    // Clip A (broken media) spans [0, 2000); clip B (fine) spans [2000, 4000).
+    const p = nleProject(
+      [track("t", 0)],
+      [item("iA", "t", "mA", 0, 0, 2000), item("iB", "t", "mB", 2000, 0, 2000)],
+      [media("mA", "/missing/deleted.mp4"), media("mB", "/ok/fine.mp4")],
+    );
+
+    const { container, queryByTestId, rerender } = render(
+      <MediaPlayer
+        project={p}
+        playheadMs={1000}
+        rate={1}
+        durationMs={4000}
+        fps={30}
+      />,
+    );
+    const video = container.querySelector("video")!;
+
+    // Frame under clip A → rAF loop loads clip A's media into the element.
+    pumpFrame();
+    expect(video.src).toContain("deleted.mp4");
+
+    // Clip A's file is gone → the element errors → overlay appears (correct).
+    act(() => {
+      video.dispatchEvent(new Event("error"));
+    });
+    expect(queryByTestId("media-unavailable")).not.toBeNull();
+
+    // Playhead reaches clip B → the rAF loop swaps the element to clip B's
+    // media, which loads and plays fine. The stale overlay must not stay.
+    rerender(
+      <MediaPlayer
+        project={p}
+        playheadMs={3000}
+        rate={1}
+        durationMs={4000}
+        fps={30}
+      />,
+    );
+    pumpFrame();
+    expect(video.src).toContain("fine.mp4");
+    expect(queryByTestId("media-unavailable")).toBeNull();
+  });
+
+  it("clears the overlay when a freshly rendered preview proxy is loaded", () => {
+    const p = nleProject(
+      [track("t", 0)],
+      [item("iA", "t", "mA", 0, 0, 2000)],
+      [media("mA", "/gone/deleted.mp4")],
+    );
+
+    const { container, queryByTestId, rerender } = render(
+      <MediaPlayer
+        project={p}
+        playheadMs={500}
+        rate={0}
+        durationMs={2000}
+        fps={30}
+      />,
+    );
+    const video = container.querySelector("video")!;
+    pumpFrame();
+    act(() => {
+      video.dispatchEvent(new Event("error"));
+    });
+    expect(queryByTestId("media-unavailable")).not.toBeNull();
+
+    // A preview proxy finishes rendering → the element is handed a brand-new
+    // composited file. It must not play under a permanent "missing" banner.
+    rerender(
+      <MediaPlayer
+        project={p}
+        proxySrc="asset://localhost/proxy-composite.mp4"
+        playheadMs={500}
+        rate={0}
+        durationMs={2000}
+        fps={30}
+      />,
+    );
+    pumpFrame();
+    expect(queryByTestId("media-unavailable")).toBeNull();
+  });
+
+  it("clears the overlay when the legacy src prop changes to a different file", () => {
+    const { container, queryByTestId, rerender } = render(
+      <MediaPlayer
+        src="asset://localhost/missing.mp4"
+        playheadMs={0}
+        rate={0}
+        durationMs={60_000}
+        fps={30}
+      />,
+    );
+    const video = container.querySelector("video")!;
+    act(() => {
+      video.dispatchEvent(new Event("error"));
+    });
+    expect(queryByTestId("media-unavailable")).not.toBeNull();
+
+    // The app points the player at a different, valid file.
+    rerender(
+      <MediaPlayer
+        src="asset://localhost/present.mp4"
+        playheadMs={0}
+        rate={0}
+        durationMs={60_000}
+        fps={30}
+      />,
+    );
+    pumpFrame();
+
+    // New source → the old error no longer describes the element's state.
+    expect(queryByTestId("media-unavailable")).toBeNull();
   });
 });

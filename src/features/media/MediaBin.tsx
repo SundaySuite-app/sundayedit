@@ -1,5 +1,5 @@
 /**
- * Media bin (Task 2D) — the source-media pool for the multi-track NLE.
+ * Media bin — the source-media pool for the multi-track NLE.
  *
  * Lists every imported `MediaItem`, imports new files through the Tauri file
  * dialog (same picker pattern as `useVideoImport`), and lets the user drag a
@@ -12,13 +12,14 @@
 
 import { useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { FileVideo, Music, Import, Plus } from "lucide-react";
+import { FileVideo, Music, Import, Plus, X } from "lucide-react";
 
 import type { MediaItem, Project, TrackKind } from "@/lib/bindings";
 import { ipc, project as projectApi } from "@/lib/ipc";
 import { useProjectStore } from "@/lib/useProjectStore";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/cn";
+import { useThumbnail } from "./thumbnails";
 
 /** dataTransfer MIME carrying a media id from a bin row to a timeline lane. */
 export const MEDIA_DND_MIME = "application/x-sundayedit-media";
@@ -75,6 +76,17 @@ export function MediaBin({ project }: { project: Project }) {
     }
   }
 
+  // Remove a media item from the pool. The backend rejects it while any
+  // timeline clip still references the media — surface that message.
+  async function removeMedia(m: MediaItem) {
+    setError(null);
+    try {
+      await run((p) => ipc.timeline.removeMedia(p, m.id));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] px-4 py-3">
@@ -104,7 +116,11 @@ export function MediaBin({ project }: { project: Project }) {
         ) : (
           <ul className="space-y-1.5">
             {project.media.map((m) => (
-              <MediaRow key={m.id} media={m} />
+              <MediaRow
+                key={m.id}
+                media={m}
+                onRemove={() => void removeMedia(m)}
+              />
             ))}
           </ul>
         )}
@@ -138,8 +154,18 @@ export function MediaBin({ project }: { project: Project }) {
   );
 }
 
-function MediaRow({ media }: { media: MediaItem }) {
+function MediaRow({
+  media,
+  onRemove,
+}: {
+  media: MediaItem;
+  onRemove: () => void;
+}) {
+  const t = useT();
   const Icon = media.kind === "audio_only" ? Music : FileVideo;
+  // Source-frame thumbnail (memoized per media id; null for audio / browser
+  // mode — the kind icon keeps standing in).
+  const thumb = useThumbnail(media);
   return (
     <li
       draggable
@@ -150,11 +176,21 @@ function MediaRow({ media }: { media: MediaItem }) {
       className="flex cursor-grab items-center gap-2.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-2.5 py-2 active:cursor-grabbing"
       title={media.path}
     >
-      <Icon
-        size={16}
-        className="shrink-0 text-[var(--color-fg-muted)]"
-        aria-hidden="true"
-      />
+      {thumb ? (
+        <img
+          src={thumb}
+          alt=""
+          aria-hidden="true"
+          draggable={false}
+          className="h-9 w-14 shrink-0 rounded object-cover"
+        />
+      ) : (
+        <Icon
+          size={16}
+          className="shrink-0 text-[var(--color-fg-muted)]"
+          aria-hidden="true"
+        />
+      )}
       <div className="min-w-0 flex-1">
         <div className="truncate text-[var(--text-ui-sm)]">
           {media.original_filename || media.path}
@@ -164,6 +200,16 @@ function MediaRow({ media }: { media: MediaItem }) {
           {media.width > 0 && ` · ${media.width}×${media.height}`}
         </div>
       </div>
+      <button
+        type="button"
+        data-testid="remove-media"
+        onClick={onRemove}
+        title={t("mediaBinRemove")}
+        aria-label={t("mediaBinRemove")}
+        className="grid h-6 w-6 shrink-0 place-items-center rounded text-[var(--color-fg-subtle)] hover:bg-[var(--color-bg)] hover:text-[var(--color-danger,#b3261e)]"
+      >
+        <X size={13} />
+      </button>
     </li>
   );
 }

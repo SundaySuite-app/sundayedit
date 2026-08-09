@@ -79,11 +79,71 @@ test("selecting a clip opens the inspector and a transition can be set", async (
   // The duration field only exists once a transition is attached — absent first.
   await expect(inspector.getByText("Varighet (ms)")).toHaveCount(0);
 
-  // Pick a crossfade lead-in → op_set_transition commits through the store → the
-  // inspector re-reads the item and reveals the duration field.
-  await inspector.getByRole("combobox").selectOption("crossfade");
-  await expect(inspector.getByRole("combobox")).toHaveValue("crossfade");
+  // Pick a crossfade lead-in (real xfade name "dissolve" — the picker only
+  // offers names ffmpeg accepts) → op_set_transition commits through the store
+  // → the inspector re-reads the item and reveals the duration field.
+  await inspector.getByRole("combobox").selectOption("dissolve");
+  await expect(inspector.getByRole("combobox")).toHaveValue("dissolve");
   await expect(inspector.getByText("Varighet (ms)")).toBeVisible();
+});
+
+// ── real-UI: split via the inspector button ──────────────────────────────────
+
+test("the inspector's split button blades the selected clip in two", async ({
+  page,
+}) => {
+  // Select the clip FIRST — selection parks the playhead at the clip start —
+  // then nudge the playhead off the edge (ArrowRight = one frame ≈ 33 ms,
+  // inside the clip's 0..18000 span) so the split button arms. The timeline's
+  // keyboard surface must hold focus for its handler to receive the key.
+  await page.getByTitle("sermon.mp4").dispatchEvent("click");
+  const inspector = page.getByTestId("clip-inspector");
+  await expect(inspector).toBeVisible();
+  await page.getByTestId("timeline").focus();
+  await page.keyboard.press("ArrowRight");
+
+  // op_split_timeline_item → two clips of the same source render on the lane.
+  const split = inspector.getByTestId("inspector-split");
+  await expect(split).toBeEnabled();
+  await split.click();
+  await expect(page.getByTitle("sermon.mp4")).toHaveCount(2);
+});
+
+// ── real-UI: Delete ripple-deletes the selected clip ─────────────────────────
+
+test("the Delete key ripple-deletes the selected clip", async ({ page }) => {
+  await page.getByTestId("timeline").focus();
+  await page.getByTitle("sermon.mp4").dispatchEvent("click");
+  await page.keyboard.press("Delete");
+  // op_ripple_delete_item removed the only clip — its box is gone.
+  await expect(page.getByTitle("sermon.mp4")).toHaveCount(0);
+});
+
+// ── real-UI: remove-track rejection surfaces in the timeline ─────────────────
+
+test("removing a non-empty track surfaces the backend rejection", async ({
+  page,
+}) => {
+  // The Video track (id "tv") still carries clip ti1 → op_remove_track rejects
+  // with a validation message the timeline shows as an alert strip. The gutter
+  // header sits partially clipped in the 224px docked timeline, so dispatch
+  // the click like the clip-box tests do.
+  await page
+    .getByTestId("track-header-tv")
+    .getByTestId("remove-track")
+    .dispatchEvent("click");
+  await expect(page.getByRole("alert")).toContainText("is not empty");
+});
+
+// ── real-UI: remove-media rejection surfaces in the bin ──────────────────────
+
+test("removing media still referenced by a clip surfaces the rejection", async ({
+  page,
+}) => {
+  await page.getByRole("button", { name: "Medier" }).click();
+  // m1 backs clip ti1 → op_remove_media rejects; the bin's error banner shows.
+  await page.getByTestId("remove-media").click();
+  await expect(page.getByRole("alert")).toContainText("still referenced");
 });
 
 // ── IPC-contract drivers (clip ops with no clickable trigger) ────────────────

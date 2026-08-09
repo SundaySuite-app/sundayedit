@@ -35,32 +35,20 @@ export function stackedTracks(tracks: Track[]): Track[] {
 }
 
 /**
- * Which stacked lane a vertical offset falls in. `y` is measured from the top
- * of the lanes area (i.e. below the ruler/waveform). Returns the lane index
- * into `stackedTracks(...)`, or null when outside every lane.
- */
-export function laneAtY(
-  y: number,
-  laneCount: number,
-  laneH: number,
-): number | null {
-  if (laneH <= 0 || y < 0) return null;
-  const i = Math.floor(y / laneH);
-  return i >= 0 && i < laneCount ? i : null;
-}
-
-/**
  * The track a vertical offset lands on, resolved through the stacking order.
- * Returns the `Track` (so callers can gate on `kind`/`locked`) or null.
+ * `y` is measured from the top of the lanes area (i.e. below the
+ * ruler/waveform). Returns the `Track` (so callers can gate on
+ * `kind`/`locked`) or null when outside every lane.
  */
 export function trackAtY(
   y: number,
   tracks: Track[],
   laneH: number,
 ): Track | null {
+  if (laneH <= 0 || y < 0) return null;
   const stacked = stackedTracks(tracks);
-  const i = laneAtY(y, stacked.length, laneH);
-  return i === null ? null : stacked[i];
+  const i = Math.floor(y / laneH);
+  return i < stacked.length ? stacked[i] : null;
 }
 
 /**

@@ -27,9 +27,10 @@ export function timelineEndMs(item: TimelineItem): number {
 /**
  * Among enabled Video tracks, pick the TOP-most (highest `index`) track whose
  * item's [timeline_start_ms, timeline_end_ms) contains `playheadMs`, and
- * resolve that item's `source_media_id` to a MediaItem. Returns null when no
- * clip is under the playhead (or there are no timeline items / the media can't
- * be resolved).
+ * resolve that item's `source_media_id` to a MediaItem. Only items backed by
+ * video-kind media count — export parity with `compose.rs::is_visual`, so an
+ * audio clip parked on a video track can never hijack the preview. Returns
+ * null when no such clip is under the playhead.
  */
 export function activeVideoItem(
   project: Project,
@@ -49,6 +50,7 @@ export function activeVideoItem(
   if (videoTrackIndex.size === 0) return null;
 
   let best: TimelineItem | null = null;
+  let bestMedia: MediaItem | null = null;
   let bestIndex = -Infinity;
   for (const item of project.timeline_items) {
     if (!item.enabled) continue;
@@ -60,16 +62,18 @@ export function activeVideoItem(
     ) {
       continue; // playhead not within this clip
     }
-    if (trackIdx > bestIndex) {
-      best = item;
-      bestIndex = trackIdx;
-    }
+    if (trackIdx <= bestIndex) continue;
+    // Resolve the media as part of selection: a non-video (or unresolvable)
+    // clip is not visual — skip it so a lower video clip can win, exactly
+    // like the export's visual stack.
+    const media = project.media.find((m) => m.id === item.source_media_id);
+    if (!media || media.kind !== "video") continue;
+    best = item;
+    bestMedia = media;
+    bestIndex = trackIdx;
   }
-  if (!best) return null;
-
-  const media = project.media.find((m) => m.id === best!.source_media_id);
-  if (!media) return null;
-  return { item: best, media };
+  if (!best || !bestMedia) return null;
+  return { item: best, media: bestMedia };
 }
 
 /**

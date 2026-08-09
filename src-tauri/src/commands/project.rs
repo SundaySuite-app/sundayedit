@@ -39,7 +39,10 @@ pub fn extract_thumbnail(media_path: String, at_ms: i64, out_path: String) -> Ap
 
 /// Create a fresh in-memory Project from a video file. Captions are empty
 /// until the user transcribes (Phase 2). The video is hashed for path
-/// stability and a sensible default style is applied.
+/// stability and a sensible default style is applied. The multi-track shape
+/// (media pool entry + Video/Caption tracks + the video placed as one
+/// full-length clip) is backfilled immediately, so a fresh import lands
+/// visible in the media bin, the lanes and the preview.
 #[tauri::command]
 pub fn project_create_from_video(path: String) -> AppResult<Project> {
     let p = Path::new(&path);
@@ -52,7 +55,7 @@ pub fn project_create_from_video(path: String) -> AppResult<Project> {
         .to_string();
     let now = now_ms();
 
-    Ok(Project {
+    let mut project = Project {
         id: new_id(),
         name,
         video_path: path.clone(),
@@ -77,7 +80,11 @@ pub fn project_create_from_video(path: String) -> AppResult<Project> {
         media: vec![],
         tracks: vec![],
         timeline_items: vec![],
-    })
+    };
+    // Shared with the v<=3 load backfill (`project_file::load`). Audio
+    // presence comes from the probe — the WAV extraction hasn't run yet.
+    project.backfill_default_timeline(meta.audio_codec.is_some());
+    Ok(project)
 }
 
 #[tauri::command]

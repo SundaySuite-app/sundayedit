@@ -923,6 +923,90 @@ function backend(): void {
           ),
         );
 
+      // ── project creation (mirrors commands/project.rs::project_create_from_video
+      //    + the shared Project::backfill_default_timeline) ──
+      case "project_create_from_video": {
+        // A fresh import lands with the multi-track shape already backfilled:
+        // one media item from the probe scalars, a Video/Caption track pair,
+        // and the video placed as ONE full-length clip at timeline 0.
+        const path = args.path as string;
+        const durationMs = 12_000; // matches the video_probe mock
+        const mediaItem: MediaItem = {
+          id: nleId(),
+          path,
+          content_hash: `hash-${path}`,
+          kind: "video",
+          duration_ms: durationMs,
+          width: 1920,
+          height: 1080,
+          fps: 30,
+          has_audio: true,
+          audio_wav_path: null,
+          original_filename: basename(path),
+          added_at: 0,
+        };
+        const videoTrack: Track = {
+          id: nleId(),
+          kind: "video",
+          name: "Video",
+          index: 0,
+          enabled: true,
+          locked: false,
+          muted: false,
+          solo: false,
+        };
+        const captionTrack: Track = {
+          id: nleId(),
+          kind: "caption",
+          name: "Captions",
+          index: 1,
+          enabled: true,
+          locked: false,
+          muted: false,
+          solo: false,
+        };
+        const placed: TimelineItem = {
+          id: nleId(),
+          track_id: videoTrack.id,
+          kind: "av",
+          source_media_id: mediaItem.id,
+          in_ms: 0,
+          out_ms: durationMs,
+          timeline_start_ms: 0,
+          speed: 1,
+          transform: identityTransform(),
+          effects: [],
+          transition_in: null,
+          text: null,
+          enabled: true,
+          locked: false,
+        };
+        return Promise.resolve({
+          // Scalar fields the app reads off a fresh project (subset of the
+          // real Project — the mock's job is the wiring, not completeness).
+          id: nleId(),
+          name: basename(path),
+          video_path: path,
+          video_content_hash: mediaItem.content_hash,
+          video_duration_ms: durationMs,
+          video_width: 1920,
+          video_height: 1080,
+          video_fps: 30,
+          audio_wav_path: null,
+          language: "auto",
+          captions: [],
+          speakers: [],
+          glossary: [],
+          clips: [],
+          talk_summary: null,
+          media: [mediaItem],
+          tracks: [videoTrack, captionTrack],
+          timeline_items: [placed],
+          created_at: 0,
+          updated_at: 0,
+        });
+      }
+
       // ── media import dialog + probe ──
       case "accepted_media_extensions":
         return Promise.resolve([
@@ -942,6 +1026,12 @@ function backend(): void {
         // The compose-export "save as" picker; a deterministic output path lets
         // the real button drive `compose_render` end-to-end.
         return Promise.resolve("/demo/out.mp4");
+      case "extract_thumbnail":
+        // Thumbnail grabs write a JPEG and return its path — echo the
+        // requested outPath (or a stable fake) without any ffmpeg.
+        return Promise.resolve(
+          (args.outPath as string | undefined) ?? "/demo/thumb.jpg",
+        );
       case "video_probe":
         return Promise.resolve({
           duration_ms: 12_000,
