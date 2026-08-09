@@ -71,7 +71,9 @@ export function MediaPlayer({
   // tell our own seeks/play/pause apart from the user's.
   const lastProgrammaticAtMs = useRef(0);
   // The video file may not be on disk (dev/demo) or may be an unsupported
-  // codec — fall back to the timeline-only experience and say why.
+  // codec — fall back to the timeline-only experience and say why. The flag is
+  // cleared whenever the element's SOURCE changes (rAF clip swap, proxy load,
+  // legacy src change) so a stale error never covers a healthy source.
   const [unavailable, setUnavailable] = useState(false);
 
   // NLE mode is active only when a project with placed clips is supplied AND no
@@ -90,6 +92,12 @@ export function MediaPlayer({
   useEffect(() => {
     loadedMediaPath.current = null;
   }, [proxySrc]);
+
+  // A new single source (rendered proxy loaded/cleared, legacy src change)
+  // invalidates any sticky error from the previous source.
+  useEffect(() => {
+    setUnavailable(false);
+  }, [singleSrc]);
 
   // Reconcile the element to the playhead every frame. We read the latest props
   // off refs so the rAF loop doesn't restart on every playhead tick.
@@ -125,6 +133,9 @@ export function MediaPlayer({
             if (loadedMediaPath.current !== active.media.path) {
               loadedMediaPath.current = active.media.path;
               video.src = convertFileSrc(active.media.path);
+              // The error belonged to the previous clip's media — a fresh
+              // source starts clean (its own onError re-raises if broken).
+              setUnavailable(false);
             }
             // Map the playhead into this clip's source time; clamp/pace against
             // the media's OWN duration (this clip, not the whole timeline).
@@ -215,6 +226,9 @@ export function MediaPlayer({
         playsInline
         preload="auto"
         onError={() => setUnavailable(true)}
+        // Any successful load dismisses a stale overlay (belt-and-braces for
+        // paths that swap the source without going through the resets above).
+        onLoadedData={() => setUnavailable(false)}
         onPlay={onMaybeUserGesture}
         onPause={onMaybeUserGesture}
         onSeeking={onMaybeUserGesture}

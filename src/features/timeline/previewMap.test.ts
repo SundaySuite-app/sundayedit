@@ -190,6 +190,87 @@ describe("activeVideoItem", () => {
     );
     expect(activeVideoItem(p, 1000)).toBeNull();
   });
+
+  // Regression (diff-audio-media-on-video-track): an audio-only MediaItem can
+  // end up on a Video track (older projects; ops never compared media kind to
+  // track kind). Export's is_visual() requires MediaKind::Video, so the
+  // preview must skip it too — otherwise an mp3 clip on an upper video track
+  // occludes real footage the export would actually render.
+  it("never selects audio_only media as the active video clip (export parity)", () => {
+    const p = project(
+      [track("v_low", 0), track("v_high", 1)],
+      [
+        item("clip_video", "v_low", "m_video", 0, 0, 10_000),
+        item("clip_audio", "v_high", "m_audio", 0, 0, 10_000),
+      ],
+      [
+        media("m_video", "/footage.mp4"),
+        {
+          ...media("m_audio", "/song.mp3"),
+          kind: "audio_only",
+          width: 0,
+          height: 0,
+          fps: 0,
+          original_filename: "song.mp3",
+        },
+      ],
+    );
+    const hit = activeVideoItem(p, 1000);
+    expect(hit?.media.kind).not.toBe("audio_only");
+    expect(hit?.item.id).toBe("clip_video");
+    expect(hit?.media.path).toBe("/footage.mp4");
+  });
+
+  it("falls through to a lower video clip when the top clip's media is unresolvable", () => {
+    const p = project(
+      [track("v_low", 0), track("v_high", 1)],
+      [
+        item("lo", "v_low", "m1", 0, 0, 4000),
+        item("hi", "v_high", "missing", 0, 0, 4000),
+      ],
+      [media("m1", "/lo.mp4")],
+    );
+    expect(activeVideoItem(p, 1000)?.item.id).toBe("lo");
+  });
+});
+
+// ── backfilled fresh-import shape ───────────────────────────────────────────
+// Mirrors what the Rust `Project::backfill_default_timeline` synthesizes for a
+// freshly imported video (project_create_from_video) or a migrated v<=3 file:
+// one media item built from the video_* scalars, a Video track at index 0 (plus
+// a Caption track), and ONE full-length Av clip at timeline 0, speed 1.
+
+describe("backfilled fresh-import shape", () => {
+  const DURATION = 60_000; // media() factory duration
+  const backfilled = (): Project =>
+    project(
+      [
+        track("track-video", 0),
+        track("track-captions", 1, { kind: "caption" }),
+      ],
+      [item("item-full", "track-video", "media-primary", 0, 0, DURATION)],
+      [media("media-primary", "/videos/test.mp4")],
+    );
+
+  it("maps every playhead in [0, duration) to the single placed clip", () => {
+    const p = backfilled();
+    for (const t of [0, 1, 29_999, DURATION - 1]) {
+      const hit = activeVideoItem(p, t);
+      expect(hit?.item.id).toBe("item-full");
+      expect(hit?.media.path).toBe("/videos/test.mp4");
+    }
+    expect(activeVideoItem(p, DURATION)).toBeNull(); // end is exclusive
+  });
+
+  it("source time equals the playhead — equivalent to the legacy path", () => {
+    const p = backfilled();
+    for (const t of [0, 1000, 12_345, DURATION - 1]) {
+      const hit = activeVideoItem(p, t)!;
+      // in_ms 0 + (t - 0) * 1.0 → t/1000: mapping mode shows the exact same
+      // frame the legacy single-src <video> would.
+      expect(sourceTimeSec(hit.item, t)).toBeCloseTo(t / 1000);
+    }
+  });
 });
 
 // ── sourceTimeSec ───────────────────────────────────────────────────────────

@@ -25,9 +25,8 @@ use std::str::FromStr;
 use crate::error::{AppError, AppResult};
 use crate::model::{
     Caption, Clip, ExportConfig, GlossaryTerm, MediaItem, Project, ProjectMeta, Speaker, Style,
-    TimelineItem, Track, TrackKind, Word,
+    TimelineItem, Track, Word,
 };
-use crate::services::video::MediaKind;
 
 const SCHEMA_VERSION: i64 = 4;
 
@@ -304,7 +303,13 @@ pub async fn save(project: &Project, path: &Path) -> AppResult<()> {
         .await?;
     }
 
-    // Replace tracks
+    // Replace tracks. The marker records that the track table's contents —
+    // INCLUDING an intentionally empty one — were written by a schema-v4
+    // save, so `load` can tell "v4 file whose tracks were all deleted" apart
+    // from "v<=3 file that never had tracks" and only backfills the latter.
+    sqlx::query("INSERT OR REPLACE INTO meta (key, value) VALUES ('tracks_persisted', '1')")
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM track").execute(&mut *tx).await?;
     for (pos, t) in project.tracks.iter().enumerate() {
         sqlx::query(
@@ -497,68 +502,7 @@ pub async fn load(path: &Path) -> AppResult<Project> {
         });
     }
 
-    // Backward-compat: any v<=3 file has no tracks. Synthesize a minimal
-    // multi-track project in memory from the scalar video_* fields so the
-    // rest of the app can treat every project uniformly.
-    if tracks.is_empty() {
-        let has_audio = row.get::<Option<String>, _>("audio_wav_path").is_some();
-        let width = row.get::<i64, _>("video_width") as i32;
-        let height = row.get::<i64, _>("video_height") as i32;
-        // A real video stream (has dimensions) → Video; otherwise audio-only.
-        let kind = if width > 0 && height > 0 {
-            MediaKind::Video
-        } else {
-            MediaKind::AudioOnly
-        };
-        let video_path: String = row.get("video_path");
-        let original_filename = Path::new(&video_path)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| video_path.clone());
-        media = vec![MediaItem {
-            id: uuid::Uuid::now_v7().to_string(),
-            path: video_path,
-            content_hash: row.get("video_content_hash"),
-            kind,
-            duration_ms: row.get("video_duration_ms"),
-            width,
-            height,
-            fps: row.get::<f64, _>("video_fps") as f32,
-            has_audio,
-            audio_wav_path: row.get("audio_wav_path"),
-            original_filename,
-            added_at: row.get("created_at"),
-        }];
-        let video_track_id = uuid::Uuid::now_v7().to_string();
-        let caption_track_id = uuid::Uuid::now_v7().to_string();
-        tracks = vec![
-            Track {
-                id: video_track_id,
-                kind: TrackKind::Video,
-                name: "Video".into(),
-                index: 0,
-                enabled: true,
-                locked: false,
-                muted: false,
-                solo: false,
-            },
-            Track {
-                id: caption_track_id.clone(),
-                kind: TrackKind::Caption,
-                name: "Captions".into(),
-                index: 1,
-                enabled: true,
-                locked: false,
-                muted: false,
-                solo: false,
-            },
-        ];
-        for c in captions.iter_mut() {
-            c.track_id = Some(caption_track_id.clone());
-        }
-    }
-
-    let project = Project {
+    let mut project = Project {
         id: row.get("id"),
         name: row.get("name"),
         video_path: row.get("video_path"),
@@ -585,6 +529,27 @@ pub async fn load(path: &Path) -> AppResult<Project> {
         updated_at: row.get("updated_at"),
     };
 
+    // Backward-compat: any v<=3 file has no tracks. Synthesize the minimal
+    // multi-track shape (media pool entry + Video/Caption tracks + the video
+    // placed as one full-length clip) so the rest of the app can treat every
+    // project uniformly. Shared with `project_create_from_video`.
+    //
+    // Empty `tracks` ALONE cannot distinguish a v<=3 file from a v4 project
+    // whose tracks the user deliberately deleted (a legal ops sequence) — the
+    // `tracks_persisted` meta marker, written by every v4 `save`, does.
+    // Backfilling a marker-carrying file would resurrect the deleted timeline
+    // on the next open.
+    if project.tracks.is_empty() {
+        let tracks_persisted = sqlx::query("SELECT value FROM meta WHERE key = 'tracks_persisted'")
+            .fetch_optional(&pool)
+            .await?
+            .is_some();
+        if !tracks_persisted {
+            let has_audio = project.audio_wav_path.is_some();
+            project.backfill_default_timeline(has_audio);
+        }
+    }
+
     pool.close().await;
     Ok(project)
 }
@@ -592,7 +557,8 @@ pub async fn load(path: &Path) -> AppResult<Project> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Word;
+    use crate::model::{TrackKind, Word};
+    use crate::services::video::MediaKind;
 
     fn sample_project() -> Project {
         use crate::model::{ExportConfig, ProjectMeta};
@@ -736,6 +702,24 @@ mod tests {
             created_at: 1000,
             updated_at: 2000,
         }
+    }
+
+    /// Turn a file just written by the v4 `save` into a faithful v<=3
+    /// simulation: strip the `tracks_persisted` marker a real old file never
+    /// carries (the hand-built v1/v2 fixtures above have no meta rows at all).
+    async fn strip_v4_tracks_marker(path: &Path) {
+        let url = format!("sqlite:{}", path.to_string_lossy());
+        let opts = SqliteConnectOptions::from_str(&url).unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM meta WHERE key = 'tracks_persisted'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
     }
 
     #[tokio::test]
@@ -939,6 +923,7 @@ mod tests {
             c.track_id = None;
         }
         save(&p, &path).await.unwrap();
+        strip_v4_tracks_marker(&path).await;
 
         let loaded = load(&path).await.unwrap();
         assert_eq!(loaded.media.len(), 1, "one media item synthesized");
@@ -970,5 +955,91 @@ mod tests {
                 "every caption points at the caption track"
             );
         }
+
+        // The backfill also PLACES the video: one full-length Av clip at 0,
+        // so lanes + preview see the source immediately.
+        assert_eq!(loaded.timeline_items.len(), 1, "one placed clip");
+        let it = &loaded.timeline_items[0];
+        assert_eq!(it.track_id, video_tracks[0].id);
+        assert_eq!(
+            it.source_media_id.as_deref(),
+            Some(loaded.media[0].id.as_str())
+        );
+        assert_eq!((it.in_ms, it.out_ms, it.timeline_start_ms), (0, 90_000, 0));
+        assert_eq!(it.kind, crate::model::TimelineItemKind::Av);
+        assert!(loaded.validate_timeline().is_ok());
+    }
+
+    #[tokio::test]
+    async fn backfilled_project_round_trips_without_duplication() {
+        // v<=3 file → load (backfills) → save (persists the v4 shape) → load
+        // again: the second load must NOT re-backfill — same media, tracks and
+        // the single placed clip, identical ids, no duplicates.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v3rt.sundayedit");
+        let mut p = sample_project();
+        p.media = vec![];
+        p.tracks = vec![];
+        p.timeline_items = vec![];
+        for c in p.captions.iter_mut() {
+            c.track_id = None;
+        }
+        save(&p, &path).await.unwrap();
+        strip_v4_tracks_marker(&path).await;
+
+        let loaded = load(&path).await.unwrap();
+        assert_eq!(loaded.timeline_items.len(), 1);
+
+        let resaved = dir.path().join("v4rt.sundayedit");
+        save(&loaded, &resaved).await.unwrap();
+        let reloaded = load(&resaved).await.unwrap();
+        assert_eq!(reloaded.media, loaded.media);
+        assert_eq!(reloaded.tracks, loaded.tracks);
+        assert_eq!(reloaded.timeline_items, loaded.timeline_items);
+        assert_eq!(reloaded.captions, loaded.captions);
+    }
+
+    #[tokio::test]
+    async fn deleted_timeline_survives_save_load_roundtrip() {
+        // A v4 project can legitimately reach ZERO tracks through the public
+        // ops alone: ripple-delete the auto-placed clip, then remove each
+        // now-empty track (legal when no items/captions reference it, and
+        // validate_timeline has no minimum-track rule). Saving stores zero
+        // track rows — the `tracks_persisted` marker is what tells this file
+        // apart from a v<=3 file, so reopening must NOT resurrect the
+        // synthesized tracks + full-length clip the user deleted on purpose.
+        use crate::services::timeline_ops::{remove_track, ripple_delete_item};
+
+        let mut p = sample_project();
+        p.captions = vec![]; // caption-free so the caption track is removable
+        let p = ripple_delete_item(&p, "ti1").expect("deleting the auto-placed clip is legal");
+        let p = remove_track(&p, "tv").expect("removing the emptied video track is legal");
+        let p = remove_track(&p, "tc").expect("removing the caption track is legal");
+        assert!(p.tracks.is_empty(), "ops legitimately reached zero tracks");
+        assert!(p.timeline_items.is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("emptied.sundayedit");
+        save(&p, &path).await.unwrap();
+        let loaded = load(&path).await.unwrap();
+
+        assert!(
+            loaded.tracks.is_empty(),
+            "deleted tracks resurrected on load: {:?}",
+            loaded
+                .tracks
+                .iter()
+                .map(|t| (&t.name, &t.kind))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            loaded.timeline_items.is_empty(),
+            "deleted clip resurrected on load: {:?}",
+            loaded
+                .timeline_items
+                .iter()
+                .map(|it| (&it.id, it.timeline_start_ms, it.out_ms))
+                .collect::<Vec<_>>()
+        );
     }
 }

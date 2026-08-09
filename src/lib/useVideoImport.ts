@@ -72,6 +72,12 @@ export function useVideoImport(
       setDragging(false);
       return;
     }
+    // Registration is an async IPC round-trip: cleanup can run BEFORE the
+    // promise resolves (unmount / `enabled` flip; guaranteed on StrictMode's
+    // dev double-mount). Guard with a `disposed` flag — same pattern as
+    // `subscribeComposeProgress` — so a late-resolving unlisten is invoked
+    // immediately instead of leaking a listener with a stale closure.
+    let disposed = false;
     let unlisten: (() => void) | undefined;
     let webview: ReturnType<typeof getCurrentWebview>;
     try {
@@ -83,6 +89,8 @@ export function useVideoImport(
     }
     webview
       .onDragDropEvent((event) => {
+        // Guards the gap between cleanup and the async unlisten taking effect.
+        if (disposed) return;
         if (event.payload.type === "over" || event.payload.type === "enter") {
           setDragging(true);
         } else if (event.payload.type === "drop") {
@@ -94,12 +102,19 @@ export function useVideoImport(
         }
       })
       .then((fn) => {
+        if (disposed) {
+          fn();
+          return;
+        }
         unlisten = fn;
       })
       .catch(() => {
         /* not in Tauri (browser dev) — picker still works */
       });
-    return () => unlisten?.();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled]);
 

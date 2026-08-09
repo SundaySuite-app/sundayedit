@@ -34,7 +34,7 @@ use tauri::Emitter;
 use ts_rs::TS;
 
 use crate::error::{AppError, AppResult};
-use crate::model::{Project, TimelineItem, Transform};
+use crate::model::{Project, TimelineItem, TimelineItemKind, Transform};
 use crate::services::burnin::{
     default_encoder, encoder_name, escape_filter_path, Encoder, VideoCodec,
 };
@@ -73,11 +73,32 @@ fn secs(ms: i64) -> String {
     format!("{:.3}", ms as f64 / 1000.0)
 }
 
-/// Distinct media ids referenced by video-bearing / audio-bearing timeline
-/// items, in first-seen order → `(id, input_index)` map. Pure.
+/// Map a stored transition kind — the ClipInspector picker vocabulary
+/// ("fade" / "crossfade" / "dip") — to a name ffmpeg's `xfade` filter actually
+/// accepts. "crossfade" and "dip" are friendly UI names, NOT members of the
+/// xfade enum; emitted verbatim they abort the whole render with
+/// `Unable to parse option value "crossfade" as transition`. Mapping at this
+/// seam (rather than renaming the UI options) also heals projects that saved
+/// the friendly names. Unrecognized kinds pass through untouched so genuine
+/// xfade names (e.g. "wipeleft") in project files keep working.
+fn xfade_transition_name(kind: &str) -> &str {
+    match kind {
+        "crossfade" => "dissolve",
+        "dip" => "fadeblack",
+        other => other,
+    }
+}
+
+/// Distinct media ids referenced by timeline items that actually CONTRIBUTE
+/// to the render (item enabled + owning track visible/audible), in first-seen
+/// order → `(id, input_index)` map. Pure.
 fn used_media(project: &Project) -> Vec<String> {
+    let any_solo = any_track_solo(project);
     let mut seen: Vec<String> = Vec::new();
     for it in &project.timeline_items {
+        if !item_contributes(project, it, any_solo) {
+            continue;
+        }
         if let Some(mid) = &it.source_media_id {
             if !seen.iter().any(|s| s == mid) && project.media.iter().any(|m| &m.id == mid) {
                 seen.push(mid.clone());
@@ -114,6 +135,40 @@ fn has_audio(project: &Project, item: &TimelineItem) -> bool {
         .and_then(|mid| project.media.iter().find(|m| &m.id == mid))
         .map(|m| m.has_audio)
         .unwrap_or(false)
+}
+
+/// The `Track` an item sits on, if it resolves.
+fn track_of<'a>(project: &'a Project, item: &TimelineItem) -> Option<&'a crate::model::Track> {
+    project.tracks.iter().find(|t| t.id == item.track_id)
+}
+
+/// Is any track soloed? While a solo is active, only soloed tracks are
+/// audible (DAW convention — mirrors the Timeline track-header S button).
+fn any_track_solo(project: &Project) -> bool {
+    project.tracks.iter().any(|t| t.solo)
+}
+
+/// Preview parity: an item is VISIBLE only when its owning track is enabled
+/// (`previewMap.activeVideoItem` skips `enabled === false` tracks). Items with
+/// an unresolvable track keep current behaviour (treated as visible).
+fn track_visible(project: &Project, item: &TimelineItem) -> bool {
+    track_of(project, item).is_none_or(|t| t.enabled)
+}
+
+/// Preview parity: an item is AUDIBLE only when its owning track is enabled,
+/// not muted, and — while any track is soloed — itself soloed. Items with an
+/// unresolvable track keep current behaviour (treated as audible).
+fn track_audible(project: &Project, item: &TimelineItem, any_solo: bool) -> bool {
+    track_of(project, item).is_none_or(|t| t.enabled && !t.muted && (!any_solo || t.solo))
+}
+
+/// Will this item contribute ANY stream to the render, given both its own
+/// `enabled` flag and its track's `enabled`/`muted`/`solo` state? Used to
+/// avoid feeding ffmpeg `-i` inputs that no filter node consumes.
+fn item_contributes(project: &Project, item: &TimelineItem, any_solo: bool) -> bool {
+    item.enabled
+        && ((is_visual(project, item) && track_visible(project, item))
+            || (has_audio(project, item) && track_audible(project, item, any_solo)))
 }
 
 /// The total timeline duration in ms — the max of every item's timeline end,
@@ -155,14 +210,56 @@ fn transform_filters(t: &Transform, chain: &mut Vec<String>) {
     }
 }
 
-/// A "simple" timeline is one the existing single-track burn-in can render:
-/// no extra visual/audio timeline items to composite (only the primary video +
-/// caption tracks). Such a project delegates to `burnin::render`.
+/// A "simple" timeline is one the existing single-track burn-in can render
+/// exactly: no visual/audio timeline items to composite beyond, at most, the
+/// primary video placed as ONE pristine full-length clip — the shape
+/// `Project::backfill_default_timeline` synthesizes on import/load. Such a
+/// project delegates to `burnin::render` (hardware encoding + audio
+/// passthrough, battle-tested).
 pub fn is_simple_timeline(project: &Project) -> bool {
-    !project
+    let av_items: Vec<&TimelineItem> = project
         .timeline_items
         .iter()
-        .any(|it| is_visual(project, it) || has_audio(project, it))
+        .filter(|it| is_visual(project, it) || has_audio(project, it))
+        .collect();
+    match av_items.as_slice() {
+        [] => true,
+        // The burn-in shortcut renders the primary video with full audio
+        // passthrough, so it is only exact while the owning track's
+        // enabled/muted/solo state is a no-op — otherwise the composite path
+        // must apply the track flags (export/preview parity).
+        [only] => {
+            let any_solo = any_track_solo(project);
+            is_pristine_primary_item(project, only)
+                && track_visible(project, only)
+                && track_audible(project, only, any_solo)
+        }
+        _ => false,
+    }
+}
+
+/// Is `item` the backfilled baseline clip — the ENTIRE primary video placed at
+/// timeline 0 with no trim/speed/transform/effects/transition? Rendering that
+/// through burn-in is identical to compositing it, so it keeps the fast path.
+fn is_pristine_primary_item(project: &Project, item: &TimelineItem) -> bool {
+    let Some(media) = item
+        .source_media_id
+        .as_ref()
+        .and_then(|mid| project.media.iter().find(|m| &m.id == mid))
+    else {
+        return false;
+    };
+    media.path == project.video_path
+        && media.content_hash == project.video_content_hash
+        && item.kind == TimelineItemKind::Av
+        && item.enabled
+        && item.in_ms == 0
+        && item.out_ms == media.duration_ms
+        && item.timeline_start_ms == 0
+        && (item.speed - 1.0).abs() < f32::EPSILON
+        && item.transform == Transform::default()
+        && item.effects.iter().all(|e| !e.enabled)
+        && item.transition_in.is_none()
 }
 
 /// Build the FULL ffmpeg argument vector for a compose render. Pure — no IO.
@@ -174,17 +271,36 @@ pub fn build_filter_complex(
     ass_file: Option<&str>,
     output: &str,
 ) -> Vec<String> {
+    // H.264/`yuv420p` requires EVEN output dimensions. Odd caller-supplied
+    // geometry (projects imported from odd-dimension screen/web captures probe
+    // odd, and the frontend derives its default settings from those numbers)
+    // otherwise splits the graph: the lavfi canvas silently rounds itself down
+    // while the xfade branch scales to the raw odd size — the mismatch aborts
+    // the render ("Failed to inject frame into filter network"), and the plain
+    // path emits one pixel short of the requested frame. Sanitize at the seam
+    // (same `even_up` the proxy path already applies) so every caller composes
+    // at a valid geometry.
+    let settings = &ComposeSettings {
+        width: even_up(settings.width),
+        height: even_up(settings.height),
+        ..settings.clone()
+    };
+
     let media_ids = used_media(project);
     let input_index = |mid: &str| media_ids.iter().position(|m| m == mid).unwrap();
     let canvas_idx = media_ids.len();
 
     let total_ms = timeline_duration_ms(project);
+    let any_solo = any_track_solo(project);
 
     // ── Video items, composited LOW track → HIGH ────────────────────────────
+    // Track parity with the live preview: a clip renders only when BOTH its
+    // own `enabled` flag and its owning track's `enabled` flag are set
+    // (previewMap skips disabled tracks; export must agree).
     let mut video_items: Vec<&TimelineItem> = project
         .timeline_items
         .iter()
-        .filter(|it| it.enabled && is_visual(project, it))
+        .filter(|it| it.enabled && track_visible(project, it) && is_visual(project, it))
         .collect();
     video_items.sort_by(|a, b| {
         track_index(project, a)
@@ -197,9 +313,21 @@ pub fn build_filter_complex(
     // Process each visual item into a `[pv{n}]` stream.
     for (n, it) in video_items.iter().enumerate() {
         let src = input_index(it.source_media_id.as_ref().unwrap());
+        // Shift the clip's PTS to its TIMELINE position (mirroring `adelay` on
+        // the audio side). Without the shift, `overlay` pairs frames by raw
+        // timestamp: a clip starting at t>0 shows the wrong source region and
+        // freezes on its last frame once the 0-based stream runs out — the
+        // `enable=between(...)` window hides the misalignment but not the
+        // freeze. (An item consumed by `xfade` re-zeroes PTS in its normalise
+        // chain, so the shift is harmless there.)
+        let setpts = if it.timeline_start_ms > 0 {
+            format!("setpts=PTS-STARTPTS+{}/TB", secs(it.timeline_start_ms))
+        } else {
+            "setpts=PTS-STARTPTS".to_string()
+        };
         let mut chain: Vec<String> = vec![
             format!("trim=start={}:end={}", secs(it.in_ms), secs(it.out_ms)),
-            "setpts=PTS-STARTPTS".to_string(),
+            setpts,
         ];
         transform_filters(&it.transform, &mut chain);
         nodes.push(format!("[{src}:v]{}[pv{n}]", chain.join(",")));
@@ -231,7 +359,7 @@ pub fn build_filter_complex(
             ));
             nodes.push(format!(
                 "[xa{n}][xb{n}]xfade=transition={kind}:duration={dur}:offset={off}{out}",
-                kind = tr.kind,
+                kind = xfade_transition_name(&tr.kind),
                 dur = secs(tr.duration_ms),
                 off = secs(offset),
             ));
@@ -248,6 +376,11 @@ pub fn build_filter_complex(
     }
 
     // ── Audio items → amix ──────────────────────────────────────────────────
+    // Track parity with the preview mute/solo buttons: a clip's audio reaches
+    // the mix only when its track is enabled, unmuted and — while any track is
+    // soloed — itself soloed. The enumeration index `n` stays tied to the
+    // item's position in the full audio-bearing list (skips do not renumber),
+    // so `[pa{n}]` labels are stable regardless of flag state.
     let audio_items: Vec<&TimelineItem> = project
         .timeline_items
         .iter()
@@ -255,6 +388,9 @@ pub fn build_filter_complex(
         .collect();
     let mut audio_labels: Vec<String> = Vec::new();
     for (n, it) in audio_items.iter().enumerate() {
+        if !track_audible(project, it, any_solo) {
+            continue;
+        }
         let src = input_index(it.source_media_id.as_ref().unwrap());
         let delay = it.timeline_start_ms.max(0);
         nodes.push(format!(
@@ -284,6 +420,12 @@ pub fn build_filter_complex(
         // Placed last in the graph so `ass=` is the final filter node.
         nodes.push(format!("{prev}ass={}[vout]", escape_filter_path(ass)));
         "[vout]".to_string()
+    } else if video_items.is_empty() {
+        // No visual items and no caption layer: `prev` is still the RAW canvas
+        // input label. `-map` treats a bracketed name as a filtergraph OUTPUT
+        // label ("Output with label '{n}:v' does not exist"), so map the input
+        // pad plainly instead — e.g. an audio-only timeline over black.
+        format!("{canvas_idx}:v")
     } else {
         prev.clone()
     };
@@ -315,8 +457,14 @@ pub fn build_filter_complex(
         d = secs(total_ms),
     ));
 
-    args.push("-filter_complex".into());
-    args.push(nodes.join(";"));
+    // An EMPTY `-filter_complex ""` makes ffmpeg abort — reachable only when
+    // the builder is called directly on a project with no visual/audio items
+    // (e.g. caption-track-only without a sidecar; `run_compose` routes such
+    // timelines to the burn-in path). Defense-in-depth: skip the flag.
+    if !nodes.is_empty() {
+        args.push("-filter_complex".into());
+        args.push(nodes.join(";"));
+    }
 
     args.push("-map".into());
     args.push(video_out);
@@ -485,10 +633,131 @@ fn parse_progress_line(line: &str, out_ms: &mut i64, frame: &mut i64, done: &mut
     }
 }
 
+/// The SIMPLE-PATH render: burn-in argument builder (hardware encoding +
+/// audio passthrough), but spawned with `-progress pipe:1` so it streams
+/// `compose-render-progress` and polls `cancel` — exactly like the composite
+/// path. `burnin::render` blocks on `Command::status()` with no progress and
+/// no cancel, which made the DEFAULT export of every fresh import show a
+/// 0%-forever bar and a Cancel button that did nothing.
+fn run_simple_compose(
+    window: &tauri::Window,
+    project: &Project,
+    output: &Path,
+    opts: &crate::services::burnin::BurnInOptions,
+    cancel: Arc<AtomicBool>,
+) -> AppResult<()> {
+    if !Path::new(&project.video_path).exists() {
+        return Err(AppError::VideoMissing(project.video_path.clone()));
+    }
+    let total_ms = timeline_duration_ms(project);
+
+    // Write the caption sidecar (reused verbatim from export::write_ass).
+    let ass = crate::services::export::write_ass(project);
+    let ass_path = unique_sidecar_path(output);
+    std::fs::write(&ass_path, ass)?;
+
+    let args = crate::services::burnin::build_ffmpeg_args(
+        &project.video_path,
+        &ass_path.to_string_lossy(),
+        &output.to_string_lossy(),
+        opts,
+    );
+
+    // Ensure output dir exists (best-effort).
+    if let Some(parent) = output.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let mut child = Command::new(ffmpeg_path())
+        .args(&args)
+        .args(["-progress", "pipe:1", "-nostats"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&ass_path);
+            AppError::Internal(format!(
+                "failed to launch ffmpeg for compose: {e}. Is ffmpeg installed / bundled?"
+            ))
+        })?;
+
+    // Initial 0% tick.
+    let _ = window.emit(
+        "compose-render-progress",
+        &ComposeProgress {
+            out_ms: 0,
+            total_ms,
+            fraction: compose_fraction(0, total_ms),
+            frame: 0,
+            done: false,
+        },
+    );
+
+    if let Some(stdout) = child.stdout.take() {
+        let reader = BufReader::new(stdout);
+        let mut out_ms = 0i64;
+        let mut frame = 0i64;
+        for line in reader.lines().map_while(Result::ok) {
+            if cancel.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                break;
+            }
+            let mut done = false;
+            parse_progress_line(&line, &mut out_ms, &mut frame, &mut done);
+            // A `progress=` line closes each stats block — emit once per block.
+            if line.trim_start().starts_with("progress=") {
+                let _ = window.emit(
+                    "compose-render-progress",
+                    &ComposeProgress {
+                        out_ms,
+                        total_ms,
+                        fraction: compose_fraction(out_ms, total_ms),
+                        frame,
+                        done,
+                    },
+                );
+            }
+        }
+    }
+
+    let status = child.wait().map_err(|e| {
+        let _ = std::fs::remove_file(&ass_path);
+        AppError::Internal(format!("ffmpeg compose wait failed: {e}"))
+    })?;
+
+    let _ = std::fs::remove_file(&ass_path);
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err(AppError::Internal("compose render cancelled".into()));
+    }
+
+    // Final tick.
+    let _ = window.emit(
+        "compose-render-progress",
+        &ComposeProgress {
+            out_ms: total_ms,
+            total_ms,
+            fraction: compose_fraction(total_ms, total_ms),
+            frame: 0,
+            done: true,
+        },
+    );
+
+    if !status.success() {
+        return Err(AppError::Internal(
+            "ffmpeg compose failed. If your machine lacks the chosen hardware \
+             encoder, retry with the CPU encoder."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Render the whole timeline to `output`. Takes the SIMPLE-PATH shortcut
-/// (delegating to `burnin::render`) when the timeline holds no extra
-/// visual/audio items; otherwise spawns the `filter_complex` pipeline with
-/// `-progress pipe:1`, streams `compose-render-progress`, and honours `cancel`.
+/// (the burn-in argument builder via `run_simple_compose`, which keeps
+/// progress + cancel) when the timeline holds no extra visual/audio items;
+/// otherwise spawns the `filter_complex` pipeline with `-progress pipe:1`,
+/// streams `compose-render-progress`, and honours `cancel`.
 pub fn run_compose(
     window: &tauri::Window,
     project: &Project,
@@ -496,20 +765,26 @@ pub fn run_compose(
     settings: &ComposeSettings,
     cancel: Arc<AtomicBool>,
 ) -> AppResult<()> {
-    // Simple path: only the primary video + caption track(s) — the existing
-    // single-track burn-in renders this exactly, with hardware encoding + audio
-    // passthrough. Cheaper and battle-tested.
+    // Simple path: only the primary video + caption track(s) — the
+    // single-track burn-in ARGUMENT BUILDER renders this exactly, with
+    // hardware encoding + audio passthrough. Cheaper and battle-tested. The
+    // spawn still goes through the streaming skeleton below so the `window`
+    // gets progress events and the `cancel` flag is honoured — `burnin::render`
+    // itself can do neither, and this is the DEFAULT path of every fresh
+    // import (see tests/compose_simple_path_contract.rs).
     if is_simple_timeline(project) {
         let opts = crate::services::burnin::BurnInOptions {
             codec: settings.codec,
             encoder: settings.encoder,
-            out_width: Some(settings.width),
-            out_height: Some(settings.height),
+            // Same even-dimension guard the composite path applies inside
+            // `build_filter_complex` — libx264/yuv420p rejects odd frames.
+            out_width: Some(even_up(settings.width)),
+            out_height: Some(even_up(settings.height)),
             bitrate_kbps: settings.bitrate_kbps,
             clip_start_ms: None,
             clip_end_ms: None,
         };
-        return crate::services::burnin::render(project, output, &opts);
+        return run_simple_compose(window, project, output, &opts, cancel);
     }
 
     let total_ms = timeline_duration_ms(project);
@@ -972,6 +1247,75 @@ mod tests {
         );
     }
 
+    /// Regression (seam-xfade-transition-vocabulary): the ClipInspector picker
+    /// offers "crossfade" and "dip", which are NOT names ffmpeg's `xfade` enum
+    /// accepts — emitted verbatim they abort the render. The builder must map
+    /// them to real xfade names ("dissolve" / "fadeblack") and pass genuine
+    /// xfade names through untouched. The picker↔ffmpeg seam itself is pinned
+    /// end-to-end in tests/compose_xfade_vocabulary.rs.
+    #[test]
+    fn ui_transition_kinds_map_to_real_xfade_names() {
+        for (ui_kind, expected) in [
+            ("fade", "fade"),
+            ("crossfade", "dissolve"),
+            ("dip", "fadeblack"),
+            ("wipeleft", "wipeleft"), // genuine xfade name → pass-through
+        ] {
+            let mut second = item("i1", "v1", "m1", 4000, 0, 4000);
+            second.transition_in = Some(Transition {
+                kind: ui_kind.into(),
+                duration_ms: 1000,
+            });
+            let p = project(
+                vec![media("m1", "/a.mp4", false)],
+                vec![track("v1", TrackKind::Video, 0)],
+                vec![item("i0", "v1", "m1", 0, 0, 4000), second],
+                vec![],
+            );
+            let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+            assert!(
+                g.contains(&format!("xfade=transition={expected}:")),
+                "picker kind {ui_kind:?} must emit xfade name {expected:?}: {g}"
+            );
+        }
+    }
+
+    /// Regression (seam-compose-settings-missing-even-up): odd caller-supplied
+    /// dimensions must be sanitized to even at the builder seam — otherwise the
+    /// lavfi canvas silently rounds down while the xfade branch scales to the
+    /// raw odd size, and the mismatch aborts the render. `proxy_settings`
+    /// already even_up'd; the export path must too.
+    #[test]
+    fn odd_settings_are_evened_up_across_the_whole_graph() {
+        let mut second = item("i1", "v1", "m1", 4000, 0, 4000);
+        second.transition_in = Some(Transition {
+            kind: "fade".into(),
+            duration_ms: 1000,
+        });
+        let p = project(
+            vec![media("m1", "/a.mp4", false)],
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![item("i0", "v1", "m1", 0, 0, 4000), second],
+            vec![],
+        );
+        let mut s = settings();
+        s.width = 641;
+        s.height = 481;
+        let args = build_filter_complex(&p, &s, None, "out.mp4");
+        // Canvas and the xfade scale branch agree on the sanitized geometry…
+        assert!(
+            args.iter().any(|a| a.starts_with("color=black:s=642x482")),
+            "canvas must use even dims: {args:?}"
+        );
+        let g = fc(&args);
+        assert!(g.contains("scale=642:482"), "xfade branch even: {g}");
+        // …and no raw odd geometry leaks anywhere in the argv.
+        assert!(
+            !args.iter().any(|a| a.contains("641") || a.contains("481")),
+            "odd dimensions must not survive sanitization: {args:?}"
+        );
+    }
+
     #[test]
     fn audio_items_combine_via_amix() {
         let p = project(
@@ -1128,6 +1472,86 @@ mod tests {
         assert!(!is_simple_timeline(&p));
     }
 
+    /// The exact shape `Project::backfill_default_timeline` synthesizes on
+    /// import/load: the primary video (path + hash match the scalars) placed
+    /// as ONE pristine full-length clip, plus captions.
+    fn baseline_project() -> Project {
+        project(
+            vec![media("m1", "/x.mp4", true)], // matches video_path "/x.mp4", hash "h"
+            vec![
+                track("v1", TrackKind::Video, 0),
+                track("c1", TrackKind::Caption, 1),
+            ],
+            vec![item("i0", "v1", "m1", 0, 0, 60_000)], // full 60s source
+            vec![caption("c0", 0, 3000)],
+        )
+    }
+
+    #[test]
+    fn backfilled_import_shape_takes_the_simple_path() {
+        // A fresh import (or a migrated v<=3 file) must keep the battle-tested
+        // burn-in fast path even though the video is now a placed clip.
+        assert!(is_simple_timeline(&baseline_project()));
+    }
+
+    #[test]
+    fn backfill_helper_output_takes_the_simple_path() {
+        // Cross-layer invariant, proven against the REAL helper: whatever
+        // `backfill_default_timeline` produces is simple.
+        let mut p = project(vec![], vec![], vec![], vec![caption("c0", 0, 3000)]);
+        p.backfill_default_timeline(true);
+        assert!(is_simple_timeline(&p));
+    }
+
+    #[test]
+    fn edited_baseline_clip_is_not_simple() {
+        // Any real edit to the placed primary clip must leave the fast path.
+        let mut p = baseline_project();
+        p.timeline_items[0].out_ms = 30_000; // trimmed
+        assert!(!is_simple_timeline(&p));
+
+        let mut p = baseline_project();
+        p.timeline_items[0].timeline_start_ms = 1_000; // moved
+        assert!(!is_simple_timeline(&p));
+
+        let mut p = baseline_project();
+        p.timeline_items[0].speed = 2.0; // retimed
+        assert!(!is_simple_timeline(&p));
+
+        let mut p = baseline_project();
+        p.timeline_items[0].transform.scale = 0.5; // transformed
+        assert!(!is_simple_timeline(&p));
+
+        let mut p = baseline_project();
+        p.timeline_items[0].effects.push(crate::model::Effect {
+            id: "e1".into(),
+            kind: "brightness".into(),
+            params: serde_json::json!({ "amount": 0.2 }),
+            enabled: true,
+        }); // effect applied
+        assert!(!is_simple_timeline(&p));
+    }
+
+    #[test]
+    fn extra_item_or_foreign_media_is_not_simple() {
+        // A second placed clip → composite path.
+        let mut p = baseline_project();
+        p.media.push(media("m2", "/broll.mp4", false));
+        p.timeline_items[0].out_ms = 30_000;
+        p.timeline_items
+            .push(item("i1", "v1", "m2", 30_000, 0, 5000));
+        assert!(!is_simple_timeline(&p));
+
+        // A single full-length clip of NON-primary media → composite path.
+        let p = project(
+            vec![media("m2", "/broll.mp4", true)], // path != video_path
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![item("i0", "v1", "m2", 0, 0, 60_000)],
+            vec![],
+        );
+        assert!(!is_simple_timeline(&p));
+    }
+
     #[test]
     fn compose_fraction_progresses_and_clamps() {
         assert_eq!(compose_fraction(0, 4000), Some(0.0));
@@ -1174,6 +1598,106 @@ mod tests {
         assert_eq!(s.height, 240, "no upscaling past the source");
         assert_eq!(s.width, 320);
         assert!((s.fps - 30.0).abs() < f32::EPSILON, "fps capped at 30");
+    }
+
+    #[test]
+    fn gap_start_item_shifts_pts_to_timeline_position() {
+        // A clip starting at t=2s must carry `setpts=PTS-STARTPTS+2.000/TB` so
+        // `overlay` pairs it with the canvas at the right timeline instant —
+        // without the shift it freezes on its last frame (frames verified live
+        // in `compose_edge_leading_gap`).
+        let p = project(
+            vec![media("m1", "/a.mp4", false)],
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![item("i0", "v1", "m1", 2000, 0, 3000)],
+            vec![],
+        );
+        let args = build_filter_complex(&p, &settings(), None, "out.mp4");
+        let g = fc(&args);
+        assert!(g.contains("setpts=PTS-STARTPTS+2.000/TB"), "got {g}");
+        assert!(
+            g.contains("enable='between(t,2.000,5.000)'"),
+            "overlay window matches the shifted clip: {g}"
+        );
+        // Items at t=0 keep the plain reset (graph stays byte-stable).
+        let p0 = project(
+            vec![media("m1", "/a.mp4", false)],
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![item("i0", "v1", "m1", 0, 0, 3000)],
+            vec![],
+        );
+        let g0 = fc(&build_filter_complex(&p0, &settings(), None, "out.mp4"));
+        assert!(g0.contains("setpts=PTS-STARTPTS[pv0]"), "got {g0}");
+    }
+
+    #[test]
+    fn leading_transition_on_first_item_degrades_to_hard_cut() {
+        // `transition_in` on the FIRST item of a track has no preceding
+        // boundary to crossfade over → plain overlay, no xfade in the graph.
+        let mut first = item("i0", "v1", "m1", 0, 0, 4000);
+        first.transition_in = Some(Transition {
+            kind: "fade".into(),
+            duration_ms: 1000,
+        });
+        let p = project(
+            vec![media("m1", "/a.mp4", false)],
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![first],
+            vec![],
+        );
+        let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+        assert!(
+            !g.contains("xfade"),
+            "leading transition must not xfade: {g}"
+        );
+        assert!(g.contains("[pv0]overlay"), "falls back to overlay: {g}");
+    }
+
+    #[test]
+    fn audio_only_timeline_maps_canvas_input_plainly() {
+        // No visual items → the video map is the RAW canvas input pad, which
+        // must be UNBRACKETED ("-map [1:v]" is a filtergraph-output lookup and
+        // fails with "Output with label '1:v' does not exist").
+        let p = project(
+            vec![audio_media("m1", "/a.mp3")],
+            vec![track("a1", TrackKind::Audio, 0)],
+            vec![item("i0", "a1", "m1", 0, 0, 3000)],
+            vec![],
+        );
+        let args = build_filter_complex(&p, &settings(), None, "out.mp4");
+        assert!(
+            args.windows(2).any(|w| w[0] == "-map" && w[1] == "1:v"),
+            "canvas mapped as a plain input pad: {args:?}"
+        );
+        assert!(args.windows(2).any(|w| w[0] == "-map" && w[1] == "[aout]"));
+        assert!(
+            !args.iter().any(|a| a == "[1:v]"),
+            "no bracketed raw-input map: {args:?}"
+        );
+    }
+
+    #[test]
+    fn degenerate_graph_omits_empty_filter_complex() {
+        // Caption-track-only project, called directly WITHOUT a sidecar (the
+        // run_compose simple-path guard normally routes this to burn-in): no
+        // nodes → the empty `-filter_complex ""` flag (which ffmpeg rejects)
+        // must be omitted and the bare canvas mapped plainly.
+        let p = project(
+            vec![],
+            vec![track("cap", TrackKind::Caption, 0)],
+            vec![],
+            vec![caption("c0", 0, 3000)],
+        );
+        assert!(is_simple_timeline(&p), "run_compose takes the burn-in path");
+        let args = build_filter_complex(&p, &settings(), None, "out.mp4");
+        assert!(
+            !args.iter().any(|a| a == "-filter_complex"),
+            "no empty filter_complex: {args:?}"
+        );
+        assert!(args.windows(2).any(|w| w[0] == "-map" && w[1] == "0:v"));
+        // WITH a sidecar the ass node exists, so the graph is non-degenerate.
+        let args = build_filter_complex(&p, &settings(), Some("subs.ass"), "out.mp4");
+        assert!(fc(&args).contains("[0:v]ass=subs.ass[vout]"));
     }
 
     #[test]
@@ -1556,6 +2080,327 @@ mod tests {
             "proxy output height ≤ 480, got {}",
             meta.height
         );
+        let _ = std::fs::remove_file(&out);
+    }
+
+    // ── #[ignore] edge-case regressions (Suspect D probe, 2026-08-08) ────────
+
+    /// Grab ONE decoded frame at `t` seconds as raw 8-bit grayscale bytes.
+    fn gray_frame_at(path: &Path, t: f64) -> Vec<u8> {
+        use std::process::Command;
+        let out = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{t}")])
+            .arg("-i")
+            .arg(path)
+            .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+            .output()
+            .expect("spawn ffmpeg frame grab");
+        assert!(out.status.success(), "frame grab at {t}s failed");
+        assert!(!out.stdout.is_empty(), "no frame decoded at {t}s");
+        out.stdout
+    }
+
+    fn mean_luma(frame: &[u8]) -> f64 {
+        frame.iter().map(|&b| b as f64).sum::<f64>() / frame.len() as f64
+    }
+
+    fn mean_abs_diff(a: &[u8], b: &[u8]) -> f64 {
+        assert_eq!(a.len(), b.len(), "frames must share dimensions");
+        a.iter()
+            .zip(b)
+            .map(|(&x, &y)| (x as f64 - y as f64).abs())
+            .sum::<f64>()
+            / a.len() as f64
+    }
+
+    /// Case 1 — the FIRST clip starts at t=2s (gap at the timeline head). The
+    /// canvas must cover [0,2s) with black, the clip must actually PLAY from
+    /// 2s (regression: without the `setpts=+start/TB` shift, `overlay` paired
+    /// raw 0-based PTS and froze the clip on its last frame), and the total
+    /// duration must span the timeline.
+    #[test]
+    #[ignore = "needs SUNDAYEDIT_TEST_VIDEO + ffmpeg/ffprobe on PATH"]
+    fn compose_edge_leading_gap() {
+        let sample = std::env::var("SUNDAYEDIT_TEST_VIDEO").expect("set SUNDAYEDIT_TEST_VIDEO");
+        let out = std::env::temp_dir().join("sundayedit_compose_edge_gap.mp4");
+        let _ = std::fs::remove_file(&out);
+
+        // 3s clip placed at [2s, 5s) — nothing on the timeline before it.
+        let p = project(
+            vec![media("m1", &sample, false)],
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![item("i0", "v1", "m1", 2000, 0, 3000)],
+            vec![],
+        );
+        let mut s = settings();
+        s.width = 1280;
+        s.height = 720;
+
+        let out_str = out.to_string_lossy().into_owned();
+        let args = build_filter_complex(&p, &s, None, &out_str);
+        let meta = run_ffmpeg_and_probe(&args, &out);
+        assert!(
+            (4500..=5500).contains(&meta.duration_ms),
+            "timeline spans 5s, got {} ms",
+            meta.duration_ms
+        );
+
+        // [0,2s) is black canvas…
+        let lead_in = gray_frame_at(&out, 1.0);
+        assert!(
+            mean_luma(&lead_in) < 16.0,
+            "gap must render black, mean luma {}",
+            mean_luma(&lead_in)
+        );
+        // …the clip is visible once it starts…
+        let content = gray_frame_at(&out, 2.5);
+        assert!(
+            mean_luma(&content) > 16.0,
+            "clip must be visible at 2.5s, mean luma {}",
+            mean_luma(&content)
+        );
+        // …and it PLAYS rather than freezing (distinct frames late in the clip).
+        let a = gray_frame_at(&out, 3.5);
+        let b = gray_frame_at(&out, 4.5);
+        assert!(
+            mean_abs_diff(&a, &b) > 0.05,
+            "clip froze after the gap (identical frames at 3.5s/4.5s)"
+        );
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// Case 2 — `transition_in` on the FIRST item of a track (nothing before
+    /// it) must degrade to a hard cut: the graph renders cleanly with no
+    /// xfade node.
+    #[test]
+    #[ignore = "needs SUNDAYEDIT_TEST_VIDEO + ffmpeg/ffprobe on PATH"]
+    fn compose_edge_leading_transition_hard_cut() {
+        let sample = std::env::var("SUNDAYEDIT_TEST_VIDEO").expect("set SUNDAYEDIT_TEST_VIDEO");
+        let out = std::env::temp_dir().join("sundayedit_compose_edge_leadtrans.mp4");
+        let _ = std::fs::remove_file(&out);
+
+        let mut first = item("i0", "v1", "m1", 0, 0, 3000);
+        first.transition_in = Some(Transition {
+            kind: "fade".into(),
+            duration_ms: 1000,
+        });
+        let p = project(
+            vec![media("m1", &sample, false)],
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![first],
+            vec![],
+        );
+        let mut s = settings();
+        s.width = 1280;
+        s.height = 720;
+
+        let out_str = out.to_string_lossy().into_owned();
+        let args = build_filter_complex(&p, &s, None, &out_str);
+        assert!(!fc(&args).contains("xfade"), "no dangling xfade");
+        let meta = run_ffmpeg_and_probe(&args, &out);
+        assert!(
+            meta.duration_ms >= 2500,
+            "≈3s clip, got {} ms",
+            meta.duration_ms
+        );
+        assert!(meta.video_codec.is_some());
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// Case 3 — an audio item at t=0 emits `adelay=0|0`; real ffmpeg accepts a
+    /// zero delay and the output carries the audio stream.
+    #[test]
+    #[ignore = "needs SUNDAYEDIT_TEST_VIDEO (with audio) + ffmpeg/ffprobe on PATH"]
+    fn compose_edge_adelay_zero() {
+        let sample = std::env::var("SUNDAYEDIT_TEST_VIDEO").expect("set SUNDAYEDIT_TEST_VIDEO");
+        let out = std::env::temp_dir().join("sundayedit_compose_edge_adelay0.mp4");
+        let _ = std::fs::remove_file(&out);
+
+        let p = project(
+            vec![media("m1", &sample, true)],
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![item("i0", "v1", "m1", 0, 0, 3000)],
+            vec![],
+        );
+        let mut s = settings();
+        s.width = 1280;
+        s.height = 720;
+
+        let out_str = out.to_string_lossy().into_owned();
+        let args = build_filter_complex(&p, &s, None, &out_str);
+        assert!(fc(&args).contains("adelay=0|0"), "t=0 item delays by zero");
+        let meta = run_ffmpeg_and_probe(&args, &out);
+        assert!(
+            meta.audio_codec.is_some(),
+            "adelay=0 must still yield an audio stream"
+        );
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// Case 4 — an `opacity<1` clip (whose chain ends `format=rgba,
+    /// colorchannelmixer`) feeding the xfade normalise chain (`format=yuv420p`)
+    /// must be accepted by real ffmpeg.
+    #[test]
+    #[ignore = "needs SUNDAYEDIT_TEST_VIDEO + ffmpeg/ffprobe on PATH"]
+    fn compose_edge_opacity_into_xfade() {
+        let sample = std::env::var("SUNDAYEDIT_TEST_VIDEO").expect("set SUNDAYEDIT_TEST_VIDEO");
+        let out = std::env::temp_dir().join("sundayedit_compose_edge_rgba_xfade.mp4");
+        let _ = std::fs::remove_file(&out);
+
+        let (w, h) = probe_dims(&sample);
+
+        // The INCOMING xfade branch carries opacity → its rgba stream enters
+        // the normalise chain.
+        let mut second = item("i1", "v1", "m1", 2500, 0, 3000);
+        second.transition_in = Some(Transition {
+            kind: "fade".into(),
+            duration_ms: 500,
+        });
+        second.transform.opacity = 0.5;
+        let p = project(
+            vec![media("m1", &sample, false)],
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![item("i0", "v1", "m1", 0, 0, 3000), second],
+            vec![],
+        );
+        let mut s = settings();
+        s.width = w;
+        s.height = h;
+
+        let out_str = out.to_string_lossy().into_owned();
+        let args = build_filter_complex(&p, &s, None, &out_str);
+        let g = fc(&args);
+        assert!(g.contains("colorchannelmixer=aa=0.5"), "got {g}");
+        assert!(g.contains("xfade"), "got {g}");
+        let meta = run_ffmpeg_and_probe(&args, &out);
+        assert!(meta.video_codec.is_some(), "rgba→yuv420p xfade renders");
+        assert!(
+            meta.duration_ms >= 4500,
+            "≈5.5s xfade timeline, got {} ms",
+            meta.duration_ms
+        );
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// Case 5 — a SINGLE audio-only item (no visual items at all): the video
+    /// map is the raw canvas pad (regression: `-map "[1:v]"` was rejected with
+    /// "Output with label '1:v' does not exist") and the output carries BOTH
+    /// the black-canvas video and the anull'd audio.
+    #[test]
+    #[ignore = "needs SUNDAYEDIT_TEST_VIDEO (with audio) + ffmpeg/ffprobe on PATH"]
+    fn compose_edge_audio_only_item() {
+        let sample = std::env::var("SUNDAYEDIT_TEST_VIDEO").expect("set SUNDAYEDIT_TEST_VIDEO");
+        let out = std::env::temp_dir().join("sundayedit_compose_edge_audio_only.mp4");
+        let _ = std::fs::remove_file(&out);
+
+        let p = project(
+            vec![audio_media("m1", &sample)],
+            vec![track("a1", TrackKind::Audio, 0)],
+            vec![item("i0", "a1", "m1", 0, 0, 3000)],
+            vec![],
+        );
+        let mut s = settings();
+        s.width = 1280;
+        s.height = 720;
+
+        let out_str = out.to_string_lossy().into_owned();
+        let args = build_filter_complex(&p, &s, None, &out_str);
+        let meta = run_ffmpeg_and_probe(&args, &out);
+        assert!(
+            meta.audio_codec.is_some(),
+            "audio-only item must be audible"
+        );
+        assert!(meta.video_codec.is_some(), "black canvas video present");
+        assert!(
+            (2500..=3500).contains(&meta.duration_ms),
+            "3s audio timeline, got {} ms",
+            meta.duration_ms
+        );
+        let _ = std::fs::remove_file(&out);
+    }
+
+    /// Case 6 — a caption-track-only project called DIRECTLY on the builder
+    /// with an ass sidecar: the degenerate graph (bare canvas + ass, no [pv]
+    /// nodes) must render. (`run_compose` itself routes this through burn-in —
+    /// asserted in `degenerate_graph_omits_empty_filter_complex`.)
+    #[test]
+    #[ignore = "needs ffmpeg/ffprobe on PATH"]
+    fn compose_edge_caption_only_graph() {
+        let out = std::env::temp_dir().join("sundayedit_compose_edge_caponly.mp4");
+        let _ = std::fs::remove_file(&out);
+
+        let p = project(
+            vec![],
+            vec![track("cap", TrackKind::Caption, 0)],
+            vec![],
+            vec![caption("c0", 0, 2500)],
+        );
+        assert!(is_simple_timeline(&p), "run_compose would take burn-in");
+        let mut s = settings();
+        s.width = 1280;
+        s.height = 720;
+
+        let ass = crate::services::export::write_ass(&p);
+        let ass_path = std::env::temp_dir().join("sundayedit_compose_edge_caponly.ass");
+        std::fs::write(&ass_path, ass).unwrap();
+
+        let out_str = out.to_string_lossy().into_owned();
+        let args = build_filter_complex(&p, &s, Some(&ass_path.to_string_lossy()), &out_str);
+        let g = fc(&args);
+        assert!(
+            !g.contains("[pv"),
+            "no visual nodes in a caption-only graph"
+        );
+        let meta = run_ffmpeg_and_probe(&args, &out);
+        assert!(meta.video_codec.is_some(), "canvas+ass renders");
+
+        // And WITHOUT the sidecar: the degenerate no-node arg vector (bare
+        // lavfi canvas, no -filter_complex) must also be a valid command.
+        let _ = std::fs::remove_file(&out);
+        let args = build_filter_complex(&p, &s, None, &out_str);
+        assert!(!args.iter().any(|a| a == "-filter_complex"));
+        let meta = run_ffmpeg_and_probe(&args, &out);
+        assert!(meta.video_codec.is_some(), "bare canvas renders");
+
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&ass_path);
+    }
+
+    /// Case 7 — two items OVERLAPPING on the same track WITHOUT a transition
+    /// (the validator forbids this; defense-in-depth): the builder emits two
+    /// overlays with overlapping enable-windows, the LATER item simply wins
+    /// during the overlap, and real ffmpeg renders the full span.
+    #[test]
+    #[ignore = "needs SUNDAYEDIT_TEST_VIDEO + SUNDAYEDIT_TEST_VIDEO2 + ffmpeg/ffprobe on PATH"]
+    fn compose_edge_overlap_without_transition() {
+        let a = std::env::var("SUNDAYEDIT_TEST_VIDEO").expect("set SUNDAYEDIT_TEST_VIDEO");
+        let b = std::env::var("SUNDAYEDIT_TEST_VIDEO2").expect("set SUNDAYEDIT_TEST_VIDEO2");
+        let out = std::env::temp_dir().join("sundayedit_compose_edge_overlap.mp4");
+        let _ = std::fs::remove_file(&out);
+
+        // [0,3s) and [2s,6s) overlap on [2s,3s) — no transition declared.
+        let p = project(
+            vec![media("m1", &a, false), media("m2", &b, false)],
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![
+                item("i0", "v1", "m1", 0, 0, 3000),
+                item("i1", "v1", "m2", 2000, 0, 4000),
+            ],
+            vec![],
+        );
+        let mut s = settings();
+        s.width = 1280;
+        s.height = 720;
+
+        let out_str = out.to_string_lossy().into_owned();
+        let args = build_filter_complex(&p, &s, None, &out_str);
+        let meta = run_ffmpeg_and_probe(&args, &out);
+        assert!(
+            (5500..=6500).contains(&meta.duration_ms),
+            "timeline spans 6s, got {} ms",
+            meta.duration_ms
+        );
+        assert!(meta.video_codec.is_some());
         let _ = std::fs::remove_file(&out);
     }
 }

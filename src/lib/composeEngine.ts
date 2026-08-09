@@ -29,20 +29,38 @@ export const COMPOSE_PROGRESS_EVENT = "compose-render-progress";
 export function subscribeComposeProgress(
   cb: (p: ComposeProgress) => void,
 ): () => void {
+  let disposed = false;
+  // Once the Tauri bus has delivered an event it is the authoritative source:
+  // window CustomEvents are dropped from then on, so a backend that emits on
+  // both channels can't double-fire a single progress tick into `cb`. (The E2E
+  // mock sets `__TAURI_INTERNALS__` — so `isTauri()` is true — but only ever
+  // dispatches window CustomEvents; those keep flowing because no Tauri-bus
+  // event ever arrives there.)
+  let tauriDelivered = false;
+
   const onWindow = (e: Event) => {
+    if (disposed || tauriDelivered) return;
     const detail = (e as CustomEvent).detail as ComposeProgress | undefined;
     if (detail) cb(detail);
   };
   window.addEventListener(COMPOSE_PROGRESS_EVENT, onWindow);
 
-  let disposed = false;
   let unlistenTauri: (() => void) | undefined;
   if (isTauri()) {
     import("@tauri-apps/api/event")
-      .then(({ listen }) =>
-        listen<ComposeProgress>(COMPOSE_PROGRESS_EVENT, (e) => cb(e.payload)),
-      )
+      .then(({ listen }) => {
+        // Unsubscribed while the dynamic import was in flight — never register
+        // a listener we'd only have to tear down again.
+        if (disposed) return undefined;
+        return listen<ComposeProgress>(COMPOSE_PROGRESS_EVENT, (e) => {
+          // Guards the gap between dispose() and the async unlisten resolving.
+          if (disposed) return;
+          tauriDelivered = true;
+          cb(e.payload);
+        });
+      })
       .then((un) => {
+        if (!un) return;
         if (disposed) un();
         else unlistenTauri = un;
       })
@@ -55,6 +73,7 @@ export function subscribeComposeProgress(
     disposed = true;
     window.removeEventListener(COMPOSE_PROGRESS_EVENT, onWindow);
     unlistenTauri?.();
+    unlistenTauri = undefined;
   };
 }
 
@@ -72,14 +91,25 @@ export async function renderPreviewProxy(
   return true;
 }
 
+/**
+ * Round up to the nearest even dimension, never below 2 — mirrors Rust
+ * `compose::even_up`. H.264/`yuv420p` requires even output dimensions; odd
+ * ones (screen/web captures probe as odd) otherwise abort a transition export
+ * (xfade size mismatch) or silently shrink the plain path by one pixel.
+ */
+const evenUp = (n: number): number => {
+  const m = Math.max(2, Math.round(n));
+  return m % 2 ? m + 1 : m;
+};
+
 /** H264 / CPU output settings derived from the project's own frame geometry. */
 export function defaultComposeSettings(project: Project): ComposeSettings {
   const width = project.video_width > 0 ? project.video_width : 1920;
   const height = project.video_height > 0 ? project.video_height : 1080;
   const fps = project.video_fps > 0 ? Math.round(project.video_fps) : 30;
   return {
-    width,
-    height,
+    width: evenUp(width),
+    height: evenUp(height),
     fps,
     codec: "h264",
     encoder: "cpu",

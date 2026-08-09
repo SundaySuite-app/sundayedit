@@ -204,16 +204,18 @@ pub fn add_timeline_item(
     timeline_start_ms: i64,
     kind: TimelineItemKind,
 ) -> AppResult<Project> {
-    if !project.tracks.iter().any(|t| t.id == track_id) {
-        return Err(AppError::NotFound {
+    let track = project
+        .tracks
+        .iter()
+        .find(|t| t.id == track_id)
+        .ok_or_else(|| AppError::NotFound {
             entity: "track",
             id: track_id.to_string(),
-        });
-    }
+        })?;
 
     // Clamp in/out. With media the bounds are the media duration; without it
     // (text/graphic) we only need `in < out` and `in >= 0`.
-    let (in_ms, out_ms) = if let Some(mid) = &source_media_id {
+    let (in_ms, mut out_ms) = if let Some(mid) = &source_media_id {
         let media = find_media(project, mid)?;
         let dur = media.duration_ms;
         let i = in_ms.clamp(0, dur);
@@ -228,6 +230,52 @@ pub fn add_timeline_item(
         ));
     }
 
+    let mut start = timeline_start_ms.max(0);
+
+    // Lane placement (Video/Audio disallow overlap): a drop whose full length
+    // would touch an existing clip is CLAMPED into the gap under the pointer,
+    // falling back to the end of the track when there is no gap — mirroring
+    // `move_timeline_item`'s shift policy instead of letting `finalize` reject
+    // the op (which the UI's drop handler swallows as a silent no-op).
+    // New items always have speed 1.0, so source ms == timeline ms.
+    if matches!(track.kind, TrackKind::Video | TrackKind::Audio) {
+        let others: Vec<&TimelineItem> = project
+            .timeline_items
+            .iter()
+            .filter(|it| it.track_id == track_id)
+            .collect();
+        let track_end = others
+            .iter()
+            .map(|o| o.timeline_end_ms())
+            .max()
+            .unwrap_or(0)
+            .max(0);
+        let prev_end = others
+            .iter()
+            .filter(|o| o.timeline_start_ms <= start)
+            .map(|o| o.timeline_end_ms())
+            .max()
+            .unwrap_or(0);
+        if start < prev_end {
+            // The pointer sits inside an existing clip — no gap here.
+            start = track_end;
+        }
+        let next_start = others
+            .iter()
+            .filter(|o| o.timeline_start_ms > start)
+            .map(|o| o.timeline_start_ms)
+            .min();
+        if let Some(ns) = next_start {
+            let gap = ns - start;
+            if gap >= 1 {
+                // Trim the clip's tail so it fits the gap under the pointer.
+                out_ms = out_ms.min(in_ms + gap);
+            } else {
+                start = track_end;
+            }
+        }
+    }
+
     let item = TimelineItem {
         id,
         track_id: track_id.to_string(),
@@ -235,7 +283,7 @@ pub fn add_timeline_item(
         source_media_id,
         in_ms,
         out_ms,
-        timeline_start_ms: timeline_start_ms.max(0),
+        timeline_start_ms: start,
         speed: 1.0,
         transform: Transform::default(),
         effects: vec![],
@@ -270,19 +318,35 @@ pub fn split_timeline_item(
         )));
     }
 
-    // Map the timeline split point back into the source media.
-    let speed = original.speed.max(0.01);
-    let src_split = original.in_ms + (((at_timeline_ms - start) as f32) * speed).round() as i64;
+    // Map the timeline split point back into the source media. floor() (not
+    // round) so the LEFT piece's truncating `timeline_end_ms` can never land
+    // past the cut — with speed < 1 a half-up source ms amplifies to 1/speed
+    // timeline ms, and a left piece ending after `at_timeline_ms` overlaps the
+    // right piece and fails validation on a perfectly valid interior split.
+    let speed = original.speed.max(0.01) as f64;
+    let src_split = original.in_ms + (((at_timeline_ms - start) as f64) * speed).floor() as i64;
     let src_split = src_split.clamp(original.in_ms + 1, original.out_ms - 1);
 
     let mut left = original.clone();
     left.out_ms = src_split;
+    // Defense-in-depth against f64 rounding and the clamp above: the left
+    // piece must end at or before the cut.
+    while left.out_ms > left.in_ms + 1 && left.timeline_end_ms() > at_timeline_ms {
+        left.out_ms -= 1;
+    }
 
     let mut right = original.clone();
     right.id = new_id;
     right.in_ms = src_split;
     right.timeline_start_ms = at_timeline_ms;
     right.transition_in = None; // the cut is not a transition
+                                // Flooring `src_split` hands the boundary source ms to the RIGHT piece,
+                                // which can push its derived end past the original clip end (and into a
+                                // butt-joined neighbour). Trim its tail so the split never grows the span.
+    let original_end = original.timeline_end_ms();
+    while right.out_ms > right.in_ms + 1 && right.timeline_end_ms() > original_end {
+        right.out_ms -= 1;
+    }
 
     let mut next = project.clone();
     next.timeline_items.remove(idx);
@@ -294,6 +358,14 @@ pub fn split_timeline_item(
 /// Edge-drag trim: adjust any of `in_ms` / `out_ms` / `timeline_start_ms`.
 /// Each is clamped to the source media bounds and to same-track neighbours so
 /// the clip can neither reveal content it doesn't have nor overlap a sibling.
+///
+/// The MOVING edge is the one that gives way:
+///   - right-edge drag (`new_out_ms` alone) clamps `out_ms` so the clip ends
+///     at the next neighbour's start — `timeline_start_ms` never moves;
+///   - left-edge drag (`new_in_ms` + `new_timeline_start_ms`, the coupled
+///     pair `clipDrag.ts` sends) clamps ONE effective delta against every
+///     bound before applying it to BOTH fields, so a clamped edge can neither
+///     slip source content nor grow the clip's duration.
 pub fn trim_timeline_item(
     project: &Project,
     item_id: &str,
@@ -306,6 +378,35 @@ pub fn trim_timeline_item(
         Some(mid) => find_media(project, mid)?.duration_ms,
         None => i64::MAX,
     };
+    let speed = original.speed.max(0.01) as f64;
+
+    // Neighbour bounds on the same track (Video/Audio only care about overlap).
+    let (prev_end, next_start) = neighbour_bounds(project, original);
+
+    // ── Coupled left-edge trim: in + start move by ONE delta ────────────────
+    // The frontend pre-couples only the zero bounds; the neighbour bound is
+    // known solely here, so the pair must be re-coupled after clamping —
+    // otherwise an overshoot into the previous clip stops `start` at
+    // `prev_end` while `in_ms` keeps the full reduction (content slip).
+    if let (Some(_), Some(req_start), None) = (new_in_ms, new_timeline_start_ms, new_out_ms) {
+        let requested = req_start - original.timeline_start_ms;
+        let min_from_prev = prev_end - original.timeline_start_ms;
+        let min_from_zero_start = -original.timeline_start_ms;
+        let min_from_zero_in = (-(original.in_ms as f64) / speed).ceil() as i64;
+        let max_from_out = (((original.out_ms - 1 - original.in_ms) as f64) / speed).floor() as i64;
+        let delta = requested
+            .max(min_from_prev)
+            .max(min_from_zero_start)
+            .max(min_from_zero_in)
+            .min(max_from_out);
+
+        let mut next = project.clone();
+        let it = &mut next.timeline_items[idx];
+        it.timeline_start_ms = original.timeline_start_ms + delta;
+        it.in_ms = (original.in_ms + ((delta as f64) * speed).round() as i64)
+            .clamp(0, original.out_ms - 1);
+        return finalize(next);
+    }
 
     let mut in_ms = new_in_ms.unwrap_or(original.in_ms).clamp(0, media_dur);
     let mut out_ms = new_out_ms.unwrap_or(original.out_ms).clamp(0, media_dur);
@@ -318,11 +419,30 @@ pub fn trim_timeline_item(
         }
     }
 
-    let speed = original.speed.max(0.01);
-    let dur = (((out_ms - in_ms) as f32) / speed).round() as i64;
+    // ── Right-edge trim: only `out_ms` moves, `start` stays put ─────────────
+    if new_out_ms.is_some() && new_timeline_start_ms.is_none() {
+        let start = original.timeline_start_ms;
+        if let Some(ns) = next_start {
+            // Largest source span that still ends at (or before) the next
+            // neighbour's start. floor() so the truncating `timeline_end_ms`
+            // can never land past `ns`; the guard loop absorbs any residual
+            // f64 rounding at extreme speeds.
+            let max_dur = (ns - start).max(1);
+            let max_out = in_ms + ((max_dur as f64) * speed).floor() as i64;
+            out_ms = out_ms.min(max_out).max(in_ms + 1).min(media_dur);
+            while out_ms > in_ms + 1 && start + (((out_ms - in_ms) as f64) / speed) as i64 > ns {
+                out_ms -= 1;
+            }
+        }
+        let mut next = project.clone();
+        let it = &mut next.timeline_items[idx];
+        it.in_ms = in_ms;
+        it.out_ms = out_ms;
+        return finalize(next);
+    }
 
-    // Neighbour bounds on the same track (Video/Audio only care about overlap).
-    let (prev_end, next_start) = neighbour_bounds(project, original);
+    // ── Start move (and legacy single-field combinations) ───────────────────
+    let dur = (((out_ms - in_ms) as f64) / speed) as i64;
     let mut start = new_timeline_start_ms.unwrap_or(original.timeline_start_ms);
     let hi = next_start.map(|ns| ns - dur);
     start = start.max(prev_end);

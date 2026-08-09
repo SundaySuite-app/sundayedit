@@ -58,6 +58,7 @@ import { useProjectStore } from "@/lib/useProjectStore";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/cn";
 import * as tl from "./geometry";
+import { clipDragToOp } from "./clipDrag";
 import {
   itemSpan,
   stackedTracks,
@@ -531,33 +532,56 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
       const d = clipDrag;
       setClipDrag(null);
       setDropTrackId(null);
-      const movedTrack = d.targetTrackId !== d.trackId;
-      if (d.deltaMs === 0 && !movedTrack) return;
+      // Pure commit math (timeline↔source domain mapping, left-edge clamping,
+      // no-op detection) lives in clipDrag.ts — unit-tested in isolation.
+      const op = clipDragToOp(
+        {
+          id: d.id,
+          track_id: d.trackId,
+          in_ms: d.origInMs,
+          out_ms: d.origOutMs,
+          timeline_start_ms: d.origStart,
+          speed: d.speed,
+        },
+        d.kind,
+        d.deltaMs,
+        d.targetTrackId,
+      );
+      if (op.op === "none") return;
       try {
         await run((p) => {
-          if (d.kind === "move") {
+          if (op.op === "move") {
             return ipc.timeline.moveTimelineItem(
               p,
-              d.id,
-              d.targetTrackId,
-              d.origStart + d.deltaMs,
+              op.itemId,
+              op.trackId,
+              op.timelineStartMs,
             );
           }
-          if (d.kind === "resize-start") {
-            return ipc.timeline.trimTimelineItem(p, d.id, {
-              newInMs: d.origInMs + d.deltaMs * d.speed,
-              newTimelineStartMs: d.origStart + d.deltaMs,
+          if (op.op === "trim-start") {
+            return ipc.timeline.trimTimelineItem(p, op.itemId, {
+              newInMs: op.newInMs,
+              newTimelineStartMs: op.newTimelineStartMs,
             });
           }
-          // resize-end: only the source-out edge moves.
-          return ipc.timeline.trimTimelineItem(p, d.id, {
-            newOutMs: d.origOutMs + d.deltaMs * d.speed,
+          // trim-end: only the source-out edge moves.
+          return ipc.timeline.trimTimelineItem(p, op.itemId, {
+            newOutMs: op.newOutMs,
           });
         });
       } catch {
         // Clamped/invalid trim/move — leave the project untouched.
       }
     }
+  }
+
+  // A pointercancel (touch/pen gesture takeover, OS-level interruption)
+  // releases the pointer capture WITHOUT a pointerup — abort both drags
+  // without committing so the ghost doesn't stay glued to later hover moves.
+  function onPointerCancel() {
+    setDrag(null);
+    setClipDrag(null);
+    setDropTrackId(null);
   }
 
   // Drop a media row from the bin onto a lane → place it as a clip.
@@ -568,6 +592,10 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     e.preventDefault();
     const media = mediaById.get(mediaId);
     if (!media) return;
+    // Audio-only media carries no visuals — compose export ignores it on a
+    // video track (`is_visual`), so placing it there would make preview and
+    // export disagree. It belongs on an audio track.
+    if (media.kind === "audio_only" && track.kind === "video") return;
     const dropTimeMs = clientXToMs(e.clientX);
     try {
       await run((p) =>
@@ -617,6 +645,9 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
+    // Modified chords (Cmd+K command palette, Cmd+S save, menu accelerators)
+    // belong to app-level handlers — never treat them as timeline shortcuts.
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
     const lower = e.key.toLowerCase();
     if (lower === "j" || lower === "k" || lower === "l") {
       e.preventDefault();
@@ -635,11 +666,11 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
         break;
       case "ArrowLeft":
         e.preventDefault();
-        step(-1, e.metaKey || e.shiftKey ? 5 : 1);
+        step(-1, e.shiftKey ? 5 : 1);
         break;
       case "ArrowRight":
         e.preventDefault();
-        step(1, e.metaKey || e.shiftKey ? 5 : 1);
+        step(1, e.shiftKey ? 5 : 1);
         break;
       case "Home":
         e.preventDefault();
@@ -693,6 +724,16 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     setProxySrc(undefined);
     setPreviewState("idle");
   }
+
+  // Any project change (drag commit, trim, add/delete, undo/redo…) makes a
+  // rendered proxy stale: it composites the PRE-edit timeline. Drop it so the
+  // preview returns to the live per-clip mapping instead of silently playing
+  // an outdated flattened file. (renderPreview itself never changes `project`,
+  // so a fresh render survives; the initial mount is a no-op.)
+  useEffect(() => {
+    setProxySrc(undefined);
+    setPreviewState("idle");
+  }, [project]);
 
   // ── render ───────────────────────────────────────────────────────────────
   const [visStart, visEnd] = tl.visibleRange(view);
@@ -876,6 +917,7 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
           onWheel={onWheel}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
+          onPointerCancel={onPointerCancel}
           onPointerLeave={() => (drag || clipDrag) && onPointerUp()}
         >
           {/* Ruler */}

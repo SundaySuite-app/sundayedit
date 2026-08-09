@@ -490,8 +490,16 @@ pub struct TimelineItem {
 
 impl TimelineItem {
     /// Where this item ends on the timeline, accounting for `speed`.
+    ///
+    /// Computed in **f64** with truncation toward zero — the exact arithmetic
+    /// of the TypeScript mirror `previewMap.timelineEndMs` (`Math.trunc` on JS
+    /// numbers). f32 here diverges from the UI by 1 ms around integer
+    /// quotients (e.g. 1100 ms at speed 1.1) and above 2^24 ms durations,
+    /// making validate_timeline reject layouts the UI showed as legal — see
+    /// tests/timeline_end_parity.rs.
     pub fn timeline_end_ms(&self) -> i64 {
-        self.timeline_start_ms + (((self.out_ms - self.in_ms) as f32 / self.speed.max(0.01)) as i64)
+        self.timeline_start_ms
+            + (((self.out_ms - self.in_ms) as f64) / (self.speed as f64).max(0.01)) as i64
     }
 }
 
@@ -663,6 +671,104 @@ impl Project {
 
         Ok(())
     }
+
+    /// Backfill the minimal multi-track shape for a project whose scalar
+    /// `video_*` fields are populated but whose NLE arrays are empty — a
+    /// freshly imported video (`project_create_from_video`) or a v<=3 project
+    /// file (`project_file::load`). Synthesizes one `MediaItem` from the
+    /// scalars, a Video + Caption track pair, stamps every caption with the
+    /// caption track's id, and places the video as ONE full-length `Av` clip
+    /// at timeline 0 — so the media bin, lanes and preview all see the
+    /// imported video immediately.
+    ///
+    /// No-op when the project already has tracks: a v4 file (or an in-memory
+    /// project that has been edited) must never be double-backfilled.
+    ///
+    /// `has_audio` is the caller's best knowledge of the source's audio
+    /// stream: probe metadata at import time, `audio_wav_path` presence when
+    /// loading an old file.
+    pub fn backfill_default_timeline(&mut self, has_audio: bool) {
+        if !self.tracks.is_empty() {
+            return;
+        }
+        let new_id = || uuid::Uuid::now_v7().to_string();
+
+        // A real video stream (has dimensions) → Video; otherwise audio-only.
+        let kind = if self.video_width > 0 && self.video_height > 0 {
+            crate::services::video::MediaKind::Video
+        } else {
+            crate::services::video::MediaKind::AudioOnly
+        };
+        let original_filename = std::path::Path::new(&self.video_path)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| self.video_path.clone());
+        let media_id = new_id();
+        self.media = vec![MediaItem {
+            id: media_id.clone(),
+            path: self.video_path.clone(),
+            content_hash: self.video_content_hash.clone(),
+            kind,
+            duration_ms: self.video_duration_ms,
+            width: self.video_width,
+            height: self.video_height,
+            fps: self.video_fps,
+            has_audio,
+            audio_wav_path: self.audio_wav_path.clone(),
+            original_filename,
+            added_at: self.created_at,
+        }];
+
+        let video_track_id = new_id();
+        let caption_track_id = new_id();
+        self.tracks = vec![
+            Track {
+                id: video_track_id.clone(),
+                kind: TrackKind::Video,
+                name: "Video".into(),
+                index: 0,
+                enabled: true,
+                locked: false,
+                muted: false,
+                solo: false,
+            },
+            Track {
+                id: caption_track_id.clone(),
+                kind: TrackKind::Caption,
+                name: "Captions".into(),
+                index: 1,
+                enabled: true,
+                locked: false,
+                muted: false,
+                solo: false,
+            },
+        ];
+        for c in self.captions.iter_mut() {
+            c.track_id = Some(caption_track_id.clone());
+        }
+
+        // Place the imported video as one full-length clip. Skip when the
+        // duration is unknown/zero — an empty span would violate
+        // `validate_timeline` (`in_ms < out_ms`).
+        if self.video_duration_ms > 0 {
+            self.timeline_items = vec![TimelineItem {
+                id: new_id(),
+                track_id: video_track_id,
+                kind: TimelineItemKind::Av,
+                source_media_id: Some(media_id),
+                in_ms: 0,
+                out_ms: self.video_duration_ms,
+                timeline_start_ms: 0,
+                speed: 1.0,
+                transform: Transform::default(),
+                effects: vec![],
+                transition_in: None,
+                text: None,
+                enabled: true,
+                locked: false,
+            }];
+        }
+    }
 }
 
 #[cfg(test)]
@@ -825,5 +931,116 @@ mod timeline_tests {
             item("i2", "t1", Some("m1"), 1000, 0, 1000), // overlaps i1 (ends 2000)
         ];
         assert!(p.validate_timeline().is_err());
+    }
+
+    // ── backfill_default_timeline ───────────────────────────────────────────
+
+    fn caption(id: &str, start: i64, end: i64) -> Caption {
+        Caption {
+            id: id.into(),
+            start_ms: start,
+            end_ms: end,
+            words: vec![Word::new("ord", start, end, 90.0)],
+            speaker_id: None,
+            style_id: None,
+            notes: None,
+            ai_generated: true,
+            last_edited_at: 0,
+            track_id: None,
+        }
+    }
+
+    /// The scalar-only shape both callers hand the helper: populated `video_*`
+    /// fields, empty NLE arrays.
+    fn scalar_only() -> Project {
+        let mut p = base();
+        p.media = vec![];
+        p.tracks = vec![];
+        p.timeline_items = vec![];
+        p.created_at = 42;
+        p
+    }
+
+    #[test]
+    fn backfill_synthesizes_media_tracks_and_one_placed_item() {
+        let mut p = scalar_only();
+        p.backfill_default_timeline(true);
+
+        // One media item mirroring the video_* scalars.
+        assert_eq!(p.media.len(), 1);
+        let m = &p.media[0];
+        assert_eq!(m.path, "/v.mp4");
+        assert_eq!(m.content_hash, "h");
+        assert_eq!(m.duration_ms, 10_000);
+        assert_eq!((m.width, m.height), (1920, 1080));
+        assert_eq!(m.original_filename, "v.mp4");
+        assert!(m.has_audio);
+        assert_eq!(m.kind, MediaKind::Video);
+        assert_eq!(m.added_at, 42);
+
+        // A Video + Caption track pair.
+        assert_eq!(p.tracks.len(), 2);
+        assert_eq!(p.tracks[0].kind, TrackKind::Video);
+        assert_eq!(p.tracks[0].index, 0);
+        assert_eq!(p.tracks[1].kind, TrackKind::Caption);
+        assert_eq!(p.tracks[1].index, 1);
+
+        // ONE full-length Av clip placed at timeline 0.
+        assert_eq!(p.timeline_items.len(), 1);
+        let it = &p.timeline_items[0];
+        assert_eq!(it.kind, TimelineItemKind::Av);
+        assert_eq!(it.track_id, p.tracks[0].id);
+        assert_eq!(it.source_media_id.as_deref(), Some(m.id.as_str()));
+        assert_eq!((it.in_ms, it.out_ms, it.timeline_start_ms), (0, 10_000, 0));
+        assert_eq!(it.speed, 1.0);
+        assert_eq!(it.transform, Transform::default());
+        assert!(it.effects.is_empty());
+        assert!(it.transition_in.is_none());
+        assert!(it.enabled && !it.locked);
+
+        // The result satisfies the timeline invariants.
+        assert!(p.validate_timeline().is_ok());
+    }
+
+    #[test]
+    fn backfill_stamps_caption_track_ids() {
+        let mut p = scalar_only();
+        p.captions = vec![caption("c1", 0, 1000), caption("c2", 1500, 2000)];
+        p.backfill_default_timeline(false);
+        let cap_track = &p.tracks[1];
+        for c in &p.captions {
+            assert_eq!(c.track_id.as_ref(), Some(&cap_track.id));
+        }
+    }
+
+    #[test]
+    fn backfill_is_a_noop_when_tracks_exist() {
+        let mut p = base(); // already has a track
+        let before = p.clone();
+        p.backfill_default_timeline(true);
+        assert_eq!(p, before, "a v4-shaped project must never be re-backfilled");
+    }
+
+    #[test]
+    fn backfill_marks_audio_only_media_and_respects_has_audio() {
+        let mut p = scalar_only();
+        p.video_width = 0;
+        p.video_height = 0;
+        p.backfill_default_timeline(false);
+        assert_eq!(p.media[0].kind, MediaKind::AudioOnly);
+        assert!(!p.media[0].has_audio);
+    }
+
+    #[test]
+    fn backfill_places_no_item_when_duration_is_unknown() {
+        let mut p = scalar_only();
+        p.video_duration_ms = 0;
+        p.backfill_default_timeline(true);
+        assert_eq!(p.tracks.len(), 2, "tracks are still synthesized");
+        assert!(
+            p.timeline_items.is_empty(),
+            "a zero-length clip would violate validate_timeline"
+        );
+        assert!(p.validate_timeline().is_ok());
     }
 }
