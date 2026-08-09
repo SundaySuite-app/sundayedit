@@ -161,6 +161,7 @@ function MediaRow({
   media: MediaItem;
   onRemove: () => void;
 }) {
+  const t = useT();
   const Icon = media.kind === "audio_only" ? Music : FileVideo;
   // Source-frame thumbnail (memoized per media id; null for audio / browser
   // mode — the kind icon keeps standing in).
@@ -203,8 +204,8 @@ function MediaRow({
         type="button"
         data-testid="remove-media"
         onClick={onRemove}
-        title={"Remove media" /* i18n:pending mediaBinRemove */}
-        aria-label={"Remove media" /* i18n:pending mediaBinRemove */}
+        title={t("mediaBinRemove")}
+        aria-label={t("mediaBinRemove")}
         className="grid h-6 w-6 shrink-0 place-items-center rounded text-[var(--color-fg-subtle)] hover:bg-[var(--color-bg)] hover:text-[var(--color-danger,#b3261e)]"
       >
         <X size={13} />

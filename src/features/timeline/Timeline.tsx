@@ -1050,7 +1050,7 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
               labelLock={t("trackLock")}
               labelUp={t("trackMoveUp")}
               labelDown={t("trackMoveDown")}
-              labelRemove={"Remove track" /* i18n:pending trackRemove */}
+              labelRemove={t("trackRemove")}
             />
           </div>
         </div>

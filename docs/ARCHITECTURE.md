@@ -1,6 +1,6 @@
 # SundayEdit — Architecture
 
-Last updated: 2026-05-28
+Last updated: 2026-08-09
 
 ## High-level flow
 
@@ -29,11 +29,32 @@ flowchart LR
 
 Killer-feature cells highlighted: ASR (with context priming) and Editor (with confidence highlighting).
 
+### NLE path (v0.7.0)
+
+The multi-track editor wraps around the caption pipeline above:
+
+```mermaid
+flowchart LR
+  Import[Import media<br/>ffprobe + hash] --> Pool[Media pool<br/>MediaItem + thumbnails]
+  Pool -- drag to lane --> TL[Tracks +<br/>TimelineItems]
+  TL --> Ops[timeline_ops<br/>15 pure functions]
+  Ops --> TL
+  TL --> Preview[Preview<br/>HTML5 video + canvas<br/>proxy-render fallback]
+  TL --> Compose[compose::build_filter_complex<br/>ffmpeg filter_complex]
+  CapTrack[Caption track<br/>ASS sidecar] --> Compose
+  Compose --> Out[Rendered MP4<br/>progress + cancel]
+```
+
+Preview is an approximation (ADR-009); the `filter_complex` export is the
+source of truth. Track `enabled` / `muted` / `solo` flags are honored by the
+builder, and transitions use the real ffmpeg `xfade` vocabulary (proven by an
+integration test composing every picker option with real ffmpeg).
+
 ## Data model
 
-> **Evolving to multi-track (2026-07):** the timeline/editor is moving from
+> **Multi-track landed (v0.7.0, 2026-08):** the timeline/editor evolved from
 > caption-only to a pragmatic multi-track NLE (see `docs/DECISIONS.md`
-> ADR-007). Alongside the caption model below, `Project` now carries
+> ADR-007). Alongside the caption model below, `Project` carries
 > `media` / `tracks` / `timeline_items` (see "NLE timeline model"). Captions
 > stay first-class — they are simply one `TrackKind`.
 
@@ -55,20 +76,30 @@ erDiagram
 
 ### Project
 
-| Field                         | Type    | Notes                                          |
-| ----------------------------- | ------- | ---------------------------------------------- |
-| `id`                          | UUIDv7  |                                                |
-| `name`                        | string  | derived from video filename initially          |
-| `video_path`                  | string  | absolute path                                  |
-| `video_content_hash`          | string  | sha-256, for relink on path break              |
-| `video_duration_ms`           | i64     |                                                |
-| `video_width`, `video_height` | i32     |                                                |
-| `video_fps`                   | f32     |                                                |
-| `audio_wav_path`              | string  | cached extracted audio                         |
-| `language`                    | string  | ISO 639-1; `auto` for autodetect               |
-| `default_style_id`            | UUIDv7? |                                                |
-| `context_description`         | string? | freeform — used as Whisper initial_prompt seed |
-| `created_at`, `updated_at`    | i64     | unix ms                                        |
+| Field                         | Type             | Notes                                          |
+| ----------------------------- | ---------------- | ---------------------------------------------- |
+| `id`                          | UUIDv7           |                                                |
+| `name`                        | string           | derived from video filename initially          |
+| `video_path`                  | string           | absolute path                                  |
+| `video_content_hash`          | string           | sha-256, for relink on path break              |
+| `video_duration_ms`           | i64              |                                                |
+| `video_width`, `video_height` | i32              |                                                |
+| `video_fps`                   | f32              |                                                |
+| `audio_wav_path`              | string?          | cached extracted audio                         |
+| `language`                    | string           | ISO 639-1; `auto` for autodetect               |
+| `default_style`               | `Style`          | inlined default style                          |
+| `context_description`         | string?          | freeform — used as Whisper initial_prompt seed |
+| `captions`                    | `Caption[]`      | the caption model below                        |
+| `speakers`                    | `Speaker[]`      | diarization                                    |
+| `glossary`                    | `GlossaryTerm[]` | context priming                                |
+| `clips`                       | `Clip[]`         | social-media clips carved from the talk        |
+| `talk_summary`                | string?          | short AI summary of the whole talk             |
+| `export_config`               | `ExportConfig`   | persisted export choices                       |
+| `project_meta`                | `ProjectMeta`    | title/description/AI-context metadata          |
+| `media`                       | `MediaItem[]`    | NLE media pool (`#[serde(default)]`)           |
+| `tracks`                      | `Track[]`        | NLE lanes (`#[serde(default)]`)                |
+| `timeline_items`              | `TimelineItem[]` | NLE clips (`#[serde(default)]`)                |
+| `created_at`, `updated_at`    | i64              | unix ms                                        |
 
 ### Caption (one displayed subtitle line)
 
@@ -195,7 +226,7 @@ Per-word confidence comes from the ASR model (log-probability of the chosen toke
 
 **Underlines are an accessibility fallback** — color alone isn't enough. Colorblind users still see SOMETHING.
 
-Tier boundaries are NOT defaults pulled from thin air — they're calibrated against real transcripts. See `docs/CALIBRATION.md` (to be filled as we ship data).
+Tier boundaries are NOT defaults pulled from thin air — they're fitted by the calibration harness. See `docs/CALIBRATION.md` for the headline numbers, the fitting procedure, and the (honestly-labelled) modelled-vs-real provenance of the current dataset.
 
 ## Operations (pure functions over Project state)
 
@@ -212,13 +243,37 @@ Tier boundaries are NOT defaults pulled from thin air — they're calibrated aga
 
 All operations validate invariants and return a new `Project` state. Undo is trivial: keep the previous state. History is capped (default 100).
 
+### Timeline operations (`services/timeline_ops.rs`)
+
+The NLE follows the same pure-function contract — 15 ops, each
+`(&Project, params) -> AppResult<Project>`, each running
+`Project::validate_timeline()` before returning:
+
+| Function              | Notes                                                              |
+| --------------------- | ------------------------------------------------------------------ |
+| `add_media`           | add an imported `MediaItem` to the pool                            |
+| `remove_media`        | rejected while any timeline item still references it               |
+| `add_track`           | new lane of a given `TrackKind`                                    |
+| `remove_track`        | rejected while the track still holds items                         |
+| `reorder_track`       | change stacking order                                              |
+| `set_track_flags`     | enabled / locked / muted / solo                                    |
+| `add_timeline_item`   | place a clip; an overlapping request places into the gap           |
+| `split_timeline_item` | split at playhead; lossless spans even at speed ≠ 1 (f64 + guards) |
+| `trim_timeline_item`  | clamps against neighbours without sliding content                  |
+| `move_timeline_item`  | move along/between tracks                                          |
+| `ripple_delete_item`  | delete + close the gap                                             |
+| `set_transition`      | leading-edge transition (real ffmpeg `xfade` kinds)                |
+| `clear_transition`    |                                                                    |
+| `set_transform`       | position/scale/rotation/opacity/crop                               |
+| `add_text_item`       | text/graphic item without source media                             |
+
 ## Project file format
 
 `.sundayedit` files are SQLite databases — one file per project. Same engine as the in-memory data model; just persisted. This makes loading instant and avoids JSON-parse cost for projects with 5000+ captions.
 
 Caveat for path-stability: if the user moves their video file, SundayEdit detects the missing path on open, hashes candidate files in common locations, and offers to relink. Same pattern as SundayStage's MediaAsset relink (Phase 7.2 there).
 
-## Phase status (May 2026)
+## Phase status (August 2026)
 
 Quality infra (Phase 0.2): ESLint/Prettier, Vitest, Playwright e2e, husky +
 commitlint, and a PR `ci.yml` gate (web + rust) — all wired.
@@ -226,7 +281,7 @@ commitlint, and a PR `ci.yml` gate (web + rust) — all wired.
 - [x] Phase 0 — Scaffold + design tokens + confidence color scale + quality infra (0.2)
 - [x] Phase 1.1 — Video import: ffprobe metadata, format validation, content-hash relink, `.sundayedit` SQLite file format
 - [x] Phase 1.2 — Audio extraction command + multi-zoom waveform peaks + Canvas waveform component
-- [x] Phase 1.3 — Full timeline: windowed waveform + ruler + virtualized caption track, drag-move/resize with snap-to-edges/playhead (S toggles), J/K/L shuttle transport, ←/→ caption step, ⌘+scroll zoom-to-cursor. Pending: real `<video>` attached to the playhead clock.
+- [x] Phase 1.3 — Full timeline: windowed waveform + ruler + virtualized caption track, drag-move/resize with snap-to-edges/playhead (S toggles), J/K/L shuttle transport, ←/→ caption step, ⌘+scroll zoom-to-cursor. Real `<video>` attached to the playhead clock shipped with the NLE preview (`MediaPlayer`).
 - [x] Phase 2.1 — ASR abstraction, Whisper model registry, feature-gated `LocalWhisperProvider`, captionizer, **+ first-run model download** (`asr_download_model`, atomic + progress + cancel)
 - [x] Phase 2.2 — Cloud: response normalization (OpenAI/AssemblyAI/Deepgram) + **provider picker, cost preview, upload-consent UX** + **API keys in the OS keychain** (`keyring`) + **OpenAI live upload** + **oversized-upload preflight** (per-provider byte caps surfaced in the picker; OpenAI's 25 MB limit fails early with a clear "use local Whisper / trim" message instead of an opaque API error). Pending: AssemblyAI/Deepgram live calls; chunking large files for OpenAI is a future option.
 - [x] Phase 2.3 — Per-word confidence normalization + **calibration harness** (`cargo run --example calibrate`). Curve still uses the v1 estimate until real labelled data is fed in.
@@ -242,9 +297,12 @@ commitlint, and a PR `ci.yml` gate (web + rust) — all wired.
 - [x] Phase 6.3 — Platform export presets + pre-render validation
 - [x] Phase 7 — translation (7.1), filler/silence removal with ripple (7.2), find & replace (7.3)
 - [~] Phase 8 — Sunday-link: **deep-link import + caption hand-back done** (inbound `sundayedit://import?…` → parser + renderer seeding of language/context/glossary; outbound `<returnTo>://captions?path=…` after an SRT/VTT save, see `docs/integration.md`). Pending native verification (OS scheme round-trip) + the optional Sunday **Account** (cloud) integration.
-- [~] Phase 9 — Onboarding (9.1) done; **distribution pipeline (9.2) live** (signed/notarized release on `v*` tag, ffmpeg sidecars, auto-update); **full i18n done** (all 7 locales carry the complete catalog). Pending: landing site (9.3).
+- [~] Phase 9 — Onboarding (9.1) done; **distribution pipeline (9.2) live** (signed/notarized release on `v*` tag — universal macOS + Windows, ffmpeg sidecars, auto-update); **full i18n done** (all 7 locales carry the complete catalog). Landing site (9.3): static site built in `site/` — pending deploy.
+- [x] **v0.7.0 (2026-08-08) — Multi-track NLE.** Four track kinds, media pool + `MediaBin`, `Timeline` lanes with drag/trim/snap, `ClipInspector`, `MediaPlayer` preview (real `<video>` + canvas overlay + preview-proxy fallback), compose export via ffmpeg `filter_complex` with progress + cancel, sermon highlight-reel studio, universal macOS binary. ADR-007/008/009.
+- [x] **Night hardening round (2026-08-08/09).** 22 adversarially confirmed bugs fixed with regression tests (import backfill of the NLE state, track-flags honored in compose, simple-path progress/cancel, CAS store commits, drag/clamp edge cases, …); deferred UI landed (thumbnails, split at playhead, ripple-delete, remove track/media with surfaced rejections); NLE i18n completed ×7 locales; measured render-efficiency pass (memoized Timeline subtrees). Gates: vitest 318, cargo ~635, Playwright 49, 18 real-ffmpeg integration tests.
 
-**Not yet wired end-to-end:** there is no in-app "Transcribe" action connecting
-model + audio → `asr_transcribe_local` → editor yet (each piece exists; the
-glue is native-only so it's untested headless). And nothing has run against a
-real video, so WER / `PERFORMANCE.md` / empirical calibration remain open.
+The in-app **Transcribe** action is wired end-to-end (`App.tsx` →
+`features/transcribe/LocalPanel` → `asr_transcribe_local` → editor); what
+remains open is native verification against a real device — see
+`docs/SMOKE-TEST.md` / `docs/NEEDS-RICHARD.md` — so WER numbers and
+real-recording calibration data remain to be collected.

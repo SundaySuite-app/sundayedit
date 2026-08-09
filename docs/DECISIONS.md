@@ -18,7 +18,14 @@ Consequences:
 - Operations are exhaustively unit-testable without a database or UI.
 - Invariants (`Project::validate`) run after every operation, so corrupt state can never be persisted.
 
-The renderer holds project state (TanStack Query); the Rust layer is stateless for operations. When SQLite persistence lands, the same operations feed the writer.
+The renderer holds project state in the Zustand `useProjectStore`
+(`src/lib/useProjectStore.ts`): snapshot undo/redo (each op replaces the whole
+`Project`; undo keeps the previous snapshot) and a compare-and-swap commit so
+concurrent op arrivals can't clobber each other. TanStack Query is used only
+for read-only backend queries (export/style presets, model registry, cloud
+providers, settings status) — never for project state. The Rust layer is
+stateless for operations; the same operations feed the SQLite writer
+(`services/project_file.rs`).
 
 ## ADR-003 — Confidence as first-class, calibrated empirically
 
@@ -26,7 +33,13 @@ The renderer holds project state (TanStack Query); the Rust layer is stateless f
 
 Per-word confidence (0–100) is stored on every `Word` and drives the 4-tier highlight system. This is the product's killer feature.
 
-Tier boundaries (85 / 70 / 50) are placeholders until calibrated against real labelled transcripts (`docs/CALIBRATION.md`). The boundary logic lives in ONE place — `Word::confidence_tier()` in Rust, mirrored by `confidenceTier()` in TS — so calibration changes one constant set.
+Tier boundaries (85 / 70 / 50) were fitted by the calibration pass — see
+`docs/CALIBRATION.md` for the headline recall/precision numbers and their
+provenance (currently a reproducible modelled 1500-word dataset; the harness
+refits identically when hand-labelled real recordings replace it). The
+boundary logic lives in ONE place — `Word::confidence_tier()` in Rust,
+mirrored by `confidenceTier()` in TS — so re-calibration changes one constant
+set.
 
 Locked or edited words are always tier 1 (no highlight) regardless of score — once a human has touched a word, we trust them.
 

@@ -207,11 +207,11 @@ export function ClipInspector({
                 ipc.timeline.splitTimelineItem(p, item.id, getPlayheadMs()),
               )
             }
-            title={"Split at playhead" /* i18n:pending inspectorSplit */}
+            title={t("inspectorSplit")}
             className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-[var(--color-border)] px-2 py-1.5 text-[var(--text-ui-sm)] text-[var(--color-fg-muted)] hover:bg-[var(--color-bg-surface)] hover:text-[var(--color-fg)] disabled:pointer-events-none disabled:opacity-40"
           >
             <Scissors size={13} />
-            {"Split at playhead" /* i18n:pending inspectorSplit */}
+            {t("inspectorSplit")}
           </button>
         </Section>
 
