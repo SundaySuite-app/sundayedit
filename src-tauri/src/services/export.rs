@@ -18,6 +18,7 @@ use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
 use crate::model::{Caption, Clip, Project, Speaker, Style};
+use crate::services::karaoke::{karaoke_words, uncertain_flags, KaraokeOptions};
 
 // ── SRT ─────────────────────────────────────────────────────────────────────
 
@@ -177,7 +178,31 @@ fn vtt_escape(s: &str) -> String {
 /// burn-in (Phase 6.2). The default `Style` from the project becomes
 /// `Style: Default` in the output; per-caption style overrides become
 /// additional named styles.
+///
+/// Karaoke (E4a) is read from `project.export_config.karaoke`, so EVERY caller
+/// — the sidecar export command, `burnin::render`, and all three `compose`
+/// paths (simple, filter_complex, preview proxy) — gets the same answer
+/// without threading an extra argument. Use [`write_ass_with`] to override.
 pub fn write_ass(project: &Project) -> String {
+    write_ass_with(project, &project_karaoke(project))
+}
+
+/// The karaoke options a project renders with. `None` (pre-E4a files) means
+/// OFF, which is byte-for-byte the pre-E4a output.
+pub fn project_karaoke(project: &Project) -> KaraokeOptions {
+    project
+        .export_config
+        .karaoke
+        .clone()
+        .unwrap_or_else(KaraokeOptions::disabled)
+}
+
+/// [`write_ass`] with explicit karaoke options — used by the export command so
+/// the UI can preview a karaoke toggle without mutating the project first.
+///
+/// With `karaoke.enabled == false` the output is byte-identical to the
+/// pre-E4a writer (pinned by `ass_output_is_byte_identical_when_karaoke_off`).
+pub fn write_ass_with(project: &Project, karaoke: &KaraokeOptions) -> String {
     let mut out = String::with_capacity(project.captions.len() * 100 + 1024);
 
     // ── [Script Info] ──
@@ -194,7 +219,11 @@ pub fn write_ass(project: &Project) -> String {
     // ── [V4+ Styles] ──
     out.push_str("[V4+ Styles]\n");
     out.push_str("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n");
-    out.push_str(&format_ass_style("Default", &project.default_style));
+    out.push_str(&format_ass_style_with(
+        "Default",
+        &project.default_style,
+        karaoke_secondary(karaoke).as_deref(),
+    ));
     out.push('\n');
 
     // ── [Events] ──
@@ -216,11 +245,77 @@ pub fn write_ass(project: &Project) -> String {
             fmt_ass_time(c.end_ms),
             style_name,
             ass_field(name_field), // Name is comma-delimited — must not contain a raw comma
-            ass_escape(&c.text()), // Text is the trailing field — commas stay literal
+            // Text is the trailing field — commas stay literal.
+            ass_dialogue_text(c, karaoke, &project.default_style),
         ));
     }
 
     out
+}
+
+// ── Karaoke text (E4a) ──────────────────────────────────────────────────────
+
+/// The Dialogue `Text` field for one caption: plain escaped text when karaoke
+/// is off, otherwise the `{\kNN}word ` run sequence.
+///
+/// All timing comes from `services::karaoke` — the SHARED source the frontend
+/// canvas overlay also renders from. Nothing here re-derives a duration.
+fn ass_dialogue_text(c: &Caption, karaoke: &KaraokeOptions, style: &Style) -> String {
+    if !karaoke.enabled {
+        return ass_escape(&c.text());
+    }
+
+    let words = karaoke_words(c);
+    let tag = karaoke.style.tag();
+    // When tinting, EVERY word carries an explicit `\c` — an inline colour
+    // override persists for the rest of the line, so one tinted word would
+    // bleed into all the words after it unless each run restates its colour.
+    // Nothing is computed at all when the option is off.
+    let tint = karaoke.confidence_tint.then(|| {
+        (
+            uncertain_flags(c, karaoke.confidence_threshold),
+            hex_to_ass_inline_color(&style.color_fg),
+            hex_to_ass_inline_color(&karaoke.low_confidence_color),
+        )
+    });
+
+    let last = words.len().saturating_sub(1);
+    let mut text = String::with_capacity(words.len() * 16);
+    for (i, w) in words.iter().enumerate() {
+        text.push_str("{\\");
+        text.push_str(tag);
+        text.push_str(&w.duration_cs.to_string());
+        if let Some((flags, normal_c, low_c)) = &tint {
+            text.push_str("\\c");
+            text.push_str(if flags.get(i).copied().unwrap_or(false) {
+                low_c
+            } else {
+                normal_c
+            });
+        }
+        text.push('}');
+        text.push_str(&ass_escape(&w.text));
+        // The separating space belongs to the PRECEDING run: putting it at the
+        // start of the next run would highlight the space together with the
+        // word that follows, which reads as a one-character early trigger.
+        if i != last {
+            text.push(' ');
+        }
+    }
+    text
+}
+
+/// The ASS `SecondaryColour` to use for this karaoke config, or `None` to keep
+/// the historical hard-coded value (karaoke off → byte-identical output).
+///
+/// `\k`/`\kf` fill PrimaryColour OVER SecondaryColour, so SecondaryColour is
+/// literally "the not-yet-sung colour". The pre-E4a value was an inert
+/// placeholder (red) that nothing rendered; it only becomes visible once
+/// karaoke is on, so it must not change while karaoke is off.
+fn karaoke_secondary(karaoke: &KaraokeOptions) -> Option<String> {
+    karaoke
+        .enabled
+        .then(|| hex_to_ass_bgr(&karaoke.pending_color))
 }
 
 /// Generate ASS for a single social clip (SundayEdit), for burn-in into a
@@ -232,6 +327,12 @@ pub fn write_ass(project: &Project) -> String {
 ///
 /// `play_res_w/h` are the OUTPUT (vertical) dimensions so libass sizes the
 /// title for the target frame.
+///
+/// Karaoke follows the project's `export_config` exactly like [`write_ass`], so
+/// a vertical social clip is highlighted the same way the full render is. Note
+/// the timings are offset to clip-relative 0 BEFORE the karaoke ladder is built
+/// (a shifted clone of the caption), so the `\k` steps close on the clipped
+/// Dialogue span rather than the original one.
 pub fn write_clip_ass(
     project: &Project,
     clip: &Clip,
@@ -239,6 +340,7 @@ pub fn write_clip_ass(
     play_res_w: i32,
     play_res_h: i32,
 ) -> String {
+    let karaoke = project_karaoke(project);
     let clip_dur = (clip.end_ms - clip.start_ms).max(1);
     let mut out = String::with_capacity(512);
 
@@ -254,7 +356,12 @@ pub fn write_clip_ass(
 
     out.push_str("[V4+ Styles]\n");
     out.push_str("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n");
-    out.push_str(&format_ass_style("Default", &project.default_style));
+    out.push_str(&format_ass_style_with(
+        "Default",
+        &project.default_style,
+        karaoke_secondary(&karaoke).as_deref(),
+    ));
+    // The title overlay is never karaoke'd — it keeps the untouched style line.
     out.push_str(&format_ass_style("Title", title_style));
     out.push('\n');
 
@@ -273,11 +380,14 @@ pub fn write_clip_ass(
         if end <= start {
             continue;
         }
+        // Shift the caption (and its words) into clip-relative time so the
+        // karaoke ladder is derived from the SAME numbers libass will see.
+        let shifted = shift_caption(c, clip.start_ms, start, end);
         out.push_str(&format!(
             "Dialogue: 0,{},{},Default,,0,0,0,,{}\n",
             fmt_ass_time(start),
             fmt_ass_time(end),
-            ass_escape(&c.text()),
+            ass_dialogue_text(&shifted, &karaoke, &project.default_style),
         ));
     }
 
@@ -292,6 +402,21 @@ pub fn write_clip_ass(
     }
 
     out
+}
+
+/// Clone a caption with every timestamp moved into clip-relative time and the
+/// caption bounds pinned to the already-clamped `[start, end]` the Dialogue
+/// line uses. Words keep their relative positions; the karaoke derivation then
+/// clamps any that fall outside.
+fn shift_caption(c: &Caption, offset_ms: i64, start: i64, end: i64) -> Caption {
+    let mut shifted = c.clone();
+    shifted.start_ms = start;
+    shifted.end_ms = end;
+    for w in &mut shifted.words {
+        w.start_ms -= offset_ms;
+        w.end_ms -= offset_ms;
+    }
+    shifted
 }
 
 fn fmt_ass_time(ms: i64) -> String {
@@ -323,6 +448,12 @@ fn ass_field(s: &str) -> String {
 }
 
 fn format_ass_style(name: &str, s: &Style) -> String {
+    format_ass_style_with(name, s, None)
+}
+
+/// `format_ass_style` with an optional `SecondaryColour` override (karaoke's
+/// pending colour). `None` keeps the historical placeholder value verbatim.
+fn format_ass_style_with(name: &str, s: &Style, secondary_override: Option<&str>) -> String {
     // ASS uses BGR hex with `&H` prefix and alpha; we keep alpha 00 (opaque).
     let primary = hex_to_ass_bgr(&s.color_fg);
     let outline = hex_to_ass_bgr(&s.outline_color);
@@ -347,7 +478,7 @@ fn format_ass_style(name: &str, s: &Style) -> String {
         font = ass_field(&s.font_family), // Fontname is comma-delimited
         size = s.font_size_px,
         primary = primary,
-        secondary = "&H000000FF",
+        secondary = secondary_override.unwrap_or("&H000000FF"),
         outline = outline,
         back = "&H64000000",
         bold = bold,
@@ -379,6 +510,16 @@ fn hex_to_ass_bgr(hex: &str) -> String {
         g.to_uppercase(),
         r.to_uppercase()
     )
+}
+
+/// Convert "#RRGGBB" to an INLINE ASS colour token `&HBBGGRR&` for `\c`
+/// overrides. Six digits, no alpha byte: `\c` sets colour only (alpha is
+/// `\1a`), and a trailing `&` is required to terminate the token — without it
+/// libass keeps swallowing the following tag characters.
+fn hex_to_ass_inline_color(hex: &str) -> String {
+    // Reuse the validated conversion, then drop the `&H00` alpha prefix.
+    let bgr = hex_to_ass_bgr(hex);
+    format!("&H{}&", &bgr[4..])
 }
 
 // ── Plain text ──────────────────────────────────────────────────────────────
@@ -1051,6 +1192,321 @@ mod tests {
         // Centisecond format: 1500ms → 0:00:01.50
         assert!(out
             .contains("Dialogue: 0,0:00:01.50,0:00:03.75,Default,Pastor Lars,0,0,0,,Hello world"));
+    }
+
+    // ── ASS karaoke (E4a) ──────────────────────────────────────────────────
+    //
+    // The flagship rule: turning karaoke ON must be the ONLY thing that changes
+    // the output. Everything below either pins the OFF output byte-for-byte or
+    // asserts a property of the ON output.
+
+    use crate::services::karaoke::{karaoke_words, KaraokeOptions, KaraokeStyle};
+
+    /// The complete pre-E4a `.ass` for the `p()` fixture, captured before the
+    /// karaoke work landed. Any diff here is a regression in the flagship
+    /// export path — including whitespace and field order.
+    const GOLDEN_ASS: &str = "\
+[Script Info]
+Title: test.mp4
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+YCbCr Matrix: TV.709
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Helvetica Neue,42,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,3,6,2,10,10,20,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.50,0:00:03.75,Default,Pastor Lars,0,0,0,,Hello world
+Dialogue: 0,0:00:04.00,0:00:07.25,Default,Maria,0,0,0,,This is two
+";
+
+    fn karaoke_on(style: KaraokeStyle) -> KaraokeOptions {
+        KaraokeOptions {
+            enabled: true,
+            style,
+            ..Default::default()
+        }
+    }
+
+    /// Strip every `{...}` override block — what's left must be the plain text.
+    fn strip_ass_overrides(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut depth = 0usize;
+        for ch in s.chars() {
+            match ch {
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                _ if depth == 0 => out.push(ch),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn dialogue_texts(ass: &str) -> Vec<String> {
+        ass.lines()
+            .filter(|l| l.starts_with("Dialogue:"))
+            .map(|l| {
+                // Text is the 10th (trailing) field — everything after the 9th comma.
+                l.splitn(10, ',').nth(9).unwrap_or("").to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ass_output_is_byte_identical_when_karaoke_off() {
+        // Default project (no karaoke persisted) — the pre-E4a bytes exactly.
+        assert_eq!(write_ass(&p()), GOLDEN_ASS);
+        // An explicitly-disabled option object must be identical too.
+        assert_eq!(
+            write_ass_with(&p(), &KaraokeOptions::disabled()),
+            GOLDEN_ASS
+        );
+        // …and so must a project that persisted a fully-configured but DISABLED
+        // karaoke block (pending colour / tint settings must stay inert).
+        let mut proj = p();
+        proj.export_config.karaoke = Some(KaraokeOptions {
+            enabled: false,
+            style: KaraokeStyle::Sweep,
+            pending_color: "#123456".into(),
+            confidence_tint: true,
+            confidence_threshold: 99.0,
+            low_confidence_color: "#FF0000".into(),
+        });
+        assert_eq!(
+            write_ass(&proj),
+            GOLDEN_ASS,
+            "a disabled karaoke block must not leak ANY byte into the output"
+        );
+    }
+
+    #[test]
+    fn karaoke_emits_one_k_tag_per_word_in_order() {
+        let ass = write_ass_with(&p(), &karaoke_on(KaraokeStyle::Highlight));
+        let texts = dialogue_texts(&ass);
+        assert_eq!(texts.len(), 2);
+        // c1: 1500..3750, words Hello(1500..1900) world(2000..3700).
+        // Cut at word 2's start (2000) → 50 cs, then the rest → 175 cs.
+        assert_eq!(texts[0], "{\\k50}Hello {\\k175}world");
+        // c2: 4000..7250, cuts at 4300 and 4400 → 30, 10, 285.
+        assert_eq!(texts[1], "{\\k30}This {\\k10}is {\\k285}two");
+    }
+
+    #[test]
+    fn karaoke_sweep_uses_kf() {
+        let ass = write_ass_with(&p(), &karaoke_on(KaraokeStyle::Sweep));
+        let texts = dialogue_texts(&ass);
+        assert_eq!(texts[0], "{\\kf50}Hello {\\kf175}world");
+        assert!(!ass.contains("{\\k5"), "sweep must not emit plain \\k tags");
+    }
+
+    /// `\k` durations are CUMULATIVE in libass. If they don't sum to the
+    /// Dialogue span, every word after the first rounding error drifts — the
+    /// exact failure this whole module exists to prevent.
+    #[test]
+    fn karaoke_tag_durations_sum_to_the_dialogue_span() {
+        let ass = write_ass_with(&p(), &karaoke_on(KaraokeStyle::Highlight));
+        for (line, c) in ass
+            .lines()
+            .filter(|l| l.starts_with("Dialogue:"))
+            .zip(p().captions.iter())
+        {
+            let text = line.splitn(10, ',').nth(9).unwrap();
+            let sum: i64 = text
+                .split("{\\k")
+                .skip(1)
+                .map(|chunk| {
+                    chunk
+                        .split('}')
+                        .next()
+                        .unwrap()
+                        .parse::<i64>()
+                        .expect("a \\k tag carries an integer centisecond count")
+                })
+                .sum();
+            let span_cs = c.end_ms / 10 - c.start_ms / 10;
+            assert_eq!(sum, span_cs, "\\k ladder must close on the Dialogue span");
+        }
+    }
+
+    #[test]
+    fn karaoke_text_with_tags_stripped_equals_the_plain_text() {
+        // The rendered WORDS must be untouched by karaoke — only the timing
+        // overrides are added. This is the "captions never regress" guard.
+        let plain = dialogue_texts(&write_ass(&p()));
+        let kara = dialogue_texts(&write_ass_with(&p(), &karaoke_on(KaraokeStyle::Highlight)));
+        for (a, b) in plain.iter().zip(kara.iter()) {
+            assert_eq!(*a, strip_ass_overrides(b));
+        }
+    }
+
+    #[test]
+    fn karaoke_sets_secondary_colour_to_the_pending_colour() {
+        let opts = KaraokeOptions {
+            enabled: true,
+            pending_color: "#102030".into(),
+            ..Default::default()
+        };
+        let ass = write_ass_with(&p(), &opts);
+        // SecondaryColour is the 5th Style field; ASS is BGR → 30,20,10.
+        assert!(
+            ass.contains("&H00FFFFFF,&H00302010,"),
+            "pending colour must land in SecondaryColour: {ass}"
+        );
+        assert!(
+            !ass.contains("&H000000FF"),
+            "the inert placeholder secondary must be gone once karaoke is on"
+        );
+    }
+
+    #[test]
+    fn confidence_tint_is_off_by_default() {
+        let ass = write_ass_with(&p(), &karaoke_on(KaraokeStyle::Highlight));
+        assert!(
+            !ass.contains("\\c&H"),
+            "no inline colour overrides unless the user opts in: {ass}"
+        );
+    }
+
+    #[test]
+    fn confidence_tint_marks_low_confidence_words_and_restates_the_normal_colour() {
+        let mut proj = p();
+        // "world" at 80 stays trusted; drop it below the tier-2 floor.
+        proj.captions[0].words[1].confidence = 30.0;
+        let opts = KaraokeOptions {
+            enabled: true,
+            confidence_tint: true,
+            low_confidence_color: "#FF0000".into(),
+            ..Default::default()
+        };
+        let texts = dialogue_texts(&write_ass_with(&proj, &opts));
+        // Style fg is #FFFFFF → &HFFFFFF&; low colour #FF0000 → &H0000FF&.
+        assert_eq!(
+            texts[0], "{\\k50\\c&HFFFFFF&}Hello {\\k175\\c&H0000FF&}world",
+            "every run restates its colour so a tint cannot bleed forward"
+        );
+    }
+
+    #[test]
+    fn confidence_tint_respects_locked_and_edited_words() {
+        let mut proj = p();
+        proj.captions[0].words[1].confidence = 5.0;
+        proj.captions[0].words[1].locked = true;
+        let opts = KaraokeOptions {
+            enabled: true,
+            confidence_tint: true,
+            low_confidence_color: "#FF0000".into(),
+            ..Default::default()
+        };
+        let texts = dialogue_texts(&write_ass_with(&proj, &opts));
+        assert!(
+            !texts[0].contains("&H0000FF&"),
+            "a user-locked word is trusted and must not be flagged: {}",
+            texts[0]
+        );
+    }
+
+    #[test]
+    fn karaoke_escapes_braces_in_word_text() {
+        // A word containing `{` must not be mistaken for an override block —
+        // otherwise a stray brace swallows the following karaoke tags.
+        let mut proj = p();
+        proj.captions[0].words[0].text = "{oops}".into();
+        let ass = write_ass_with(&proj, &karaoke_on(KaraokeStyle::Highlight));
+        let texts = dialogue_texts(&ass);
+        assert_eq!(texts[0], "{\\k50}\\{oops\\} {\\k175}world");
+    }
+
+    #[test]
+    fn karaoke_handles_a_wordless_caption() {
+        let mut proj = p();
+        proj.captions[0].words.clear();
+        let ass = write_ass_with(&proj, &karaoke_on(KaraokeStyle::Highlight));
+        let texts = dialogue_texts(&ass);
+        // One span covering the whole caption, with empty text.
+        assert_eq!(texts[0], "{\\k225}");
+    }
+
+    #[test]
+    fn karaoke_writer_and_timing_module_agree_word_for_word() {
+        // The seam this module exists to close: the ASS writer must never
+        // re-derive a duration of its own.
+        let opts = karaoke_on(KaraokeStyle::Highlight);
+        let texts = dialogue_texts(&write_ass_with(&p(), &opts));
+        for (text, c) in texts.iter().zip(p().captions.iter()) {
+            let expected: String = karaoke_words(c)
+                .iter()
+                .enumerate()
+                .map(|(i, w)| {
+                    let sep = if i == 0 { "" } else { " " };
+                    format!("{sep}{{\\k{}}}{}", w.duration_cs, w.text)
+                })
+                .collect();
+            assert_eq!(*text, expected);
+        }
+    }
+
+    #[test]
+    fn project_karaoke_defaults_to_disabled_for_pre_e4a_projects() {
+        assert!(!project_karaoke(&p()).enabled);
+    }
+
+    #[test]
+    fn write_ass_reads_the_persisted_project_setting() {
+        let mut proj = p();
+        proj.export_config.karaoke = Some(karaoke_on(KaraokeStyle::Sweep));
+        // burnin.rs and all three compose paths call plain `write_ass` — this
+        // is what makes preview-proxy and final export agree.
+        assert!(write_ass(&proj).contains("{\\kf"));
+    }
+
+    #[test]
+    fn clip_ass_karaoke_uses_clip_relative_timings() {
+        use crate::model::Clip;
+        let mut proj = p();
+        proj.export_config.karaoke = Some(karaoke_on(KaraokeStyle::Highlight));
+        let clip = Clip {
+            id: "clip:0".into(),
+            title: "Grace".into(),
+            hook: "h".into(),
+            caption_ids: vec!["c1".into()],
+            start_ms: 1500,
+            end_ms: 7250,
+        };
+        let ass = write_clip_ass(&proj, &clip, &Style::title_overlay(), 1080, 1920);
+        let texts = dialogue_texts(&ass);
+        // c1 becomes 0..2250 clip-relative; the cut at word 2 (2000 → 500) gives
+        // 50 cs then 175 cs — the same ladder, rebased, still closing exactly.
+        assert_eq!(texts[0], "{\\k50}Hello {\\k175}world");
+        // The Title overlay is NOT karaoke'd.
+        assert!(
+            texts.iter().any(|t| t == "Grace"),
+            "title stays plain: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn hex_to_ass_inline_color_is_six_digits_and_terminated() {
+        assert_eq!(hex_to_ass_inline_color("#FF0000"), "&H0000FF&");
+        assert_eq!(hex_to_ass_inline_color("#102030"), "&H302010&");
+        assert_eq!(hex_to_ass_inline_color("bogus"), "&HFFFFFF&");
+    }
+
+    #[test]
+    fn export_config_without_karaoke_deserializes() {
+        // Pre-E4a persisted JSON must still load — and load as OFF.
+        let cfg: crate::model::ExportConfig = serde_json::from_str(
+            r#"{"format":"srt","burn_in":false,"caption_size_px":24,
+                "caption_color":"white","caption_background":"none",
+                "max_chars_per_line":42}"#,
+        )
+        .expect("pre-E4a ExportConfig JSON still deserializes");
+        assert!(cfg.karaoke.is_none());
     }
 
     #[test]

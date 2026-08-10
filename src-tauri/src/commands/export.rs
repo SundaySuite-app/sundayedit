@@ -4,9 +4,18 @@
 use crate::error::{AppError, AppResult};
 use crate::model::Project;
 use crate::services::export::{
-    build_docx, write_ass, write_json, write_srt, write_txt, write_vtt, JsonOptions, SrtOptions,
-    TxtOptions, VttOptions,
+    build_docx, project_karaoke, write_ass_with, write_json, write_srt, write_txt, write_vtt,
+    JsonOptions, SrtOptions, TxtOptions, VttOptions,
 };
+use crate::services::karaoke::KaraokeOptions;
+
+/// Karaoke options for an ASS write: an explicit per-call override when the UI
+/// passes one (live style preview), otherwise the project's persisted setting —
+/// which is what `burnin`/`compose` read, so the sidecar and the burned frame
+/// agree by construction.
+fn karaoke_for(project: &Project, override_opts: Option<KaraokeOptions>) -> KaraokeOptions {
+    override_opts.unwrap_or_else(|| project_karaoke(project))
+}
 
 #[tauri::command]
 pub fn export_srt(
@@ -38,9 +47,12 @@ pub fn export_vtt(
     ))
 }
 
+/// `karaoke` is optional — omit it (the existing renderer call shape) to use
+/// the project's persisted `export_config.karaoke`.
 #[tauri::command]
-pub fn export_ass(project: Project) -> AppResult<String> {
-    Ok(write_ass(&project))
+pub fn export_ass(project: Project, karaoke: Option<KaraokeOptions>) -> AppResult<String> {
+    let k = karaoke_for(&project, karaoke);
+    Ok(write_ass_with(&project, &k))
 }
 
 #[tauri::command]
@@ -58,6 +70,7 @@ pub fn save_export(
     format: String,
     include_speakers: bool,
     strip_empty: bool,
+    karaoke: Option<KaraokeOptions>,
 ) -> AppResult<()> {
     let bytes: Vec<u8> = match format.as_str() {
         "srt" => write_srt(
@@ -76,7 +89,7 @@ pub fn save_export(
             },
         )
         .into_bytes(),
-        "ass" => write_ass(&project).into_bytes(),
+        "ass" => write_ass_with(&project, &karaoke_for(&project, karaoke)).into_bytes(),
         "txt" => write_txt(
             &project,
             TxtOptions {

@@ -17,6 +17,7 @@
 //!   - `llm`           — Claude API client + AI polish/suggest/translate (Phase 4.1/4.3/7.1)
 //!   - `diarize`       — speaker diarization + roster management (Phase 4.2)
 //!   - `tiles`         — fixed-grid tile addressing for filmstrip/waveform caches (E3)
+//!   - `karaoke`       — SHARED per-word karaoke timing for ASS `\k` + the canvas overlay (E4a)
 
 pub mod asr;
 pub mod burnin;
@@ -30,6 +31,7 @@ pub mod filler;
 pub mod find_replace;
 pub mod glossary;
 pub mod highlight_reel;
+pub mod karaoke;
 pub mod llm;
 pub mod operations;
 pub mod project_file;
