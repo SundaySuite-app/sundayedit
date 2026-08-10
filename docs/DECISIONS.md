@@ -243,6 +243,49 @@ Two further measurements removed the usual argument for (B):
    before the capability gate opens there.
 5. **HDR / >2 layers / 4K** — everything here is 1080p, SDR, two layers.
 
+### Addendum — the user-agent fix as shipped (2026-08-10, E6)
+
+The precondition above is now in the tree. `src-tauri/tauri.macos.conf.json`
+sets
+
+```
+Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15 SundayEdit
+```
+
+Four things about it are deliberate:
+
+- **The stock WKWebView shape is preserved**; a `Version/17.0 Safari/605.1.15`
+  token and a bare product token are _appended_. We do not impersonate a
+  different platform or engine — `AppleWebKit/605.1.15` is what this webview
+  genuinely is. `Version/17.0` is cosmetic (only the `Safari/` token drives
+  `isSafari()`) and is deliberately conservative rather than tracking the host's
+  real Safari version, which would go stale in the config on every macOS
+  release.
+- **macOS only.** Tauri merges `tauri.<platform>.conf.json` over the base file,
+  so Windows/WebView2 keeps its own Chromium UA — where the table above measured
+  no difference between the two upload paths (10.02 vs 10.16 ms) and where a
+  macOS UA would simply be false.
+- **Risk, stated plainly:** a UA is public, and some sites and servers branch on
+  it. In SundayEdit that risk is near zero and worth naming precisely — the
+  **webview makes no external network requests at all**. Every HTTP call
+  (Whisper model download, Claude/OpenAI/AssemblyAI/Deepgram) is made by Rust
+  `reqwest`, which has its own user agent and is untouched by this setting. The
+  string is therefore seen by our own local asset protocol and by PixiJS's
+  feature check, and by nothing else. If a future feature ever loads third-party
+  web content into the webview, revisit this.
+- **It is guarded**, because a config string that silently controls a 42×
+  performance cliff is exactly the kind of implicit dependency that rots:
+  `src-tauri/tests/webview_user_agent.rs` reimplements Pixi's `isSafari()`
+  regex, asserts the configured UA satisfies it, asserts the base config does
+  NOT set one, and asserts the macOS window definition has not drifted from the
+  base one (platform config merging REPLACES arrays — a property added to the
+  base file would otherwise vanish on macOS).
+
+Still not verified, and still listed above under "what was NOT measured": the
+UA as observed in the running SundayEdit.app over `tauri://`. The config is
+correct and the guard is honest about what it checks — a rig test remains the
+only proof that wry applies it end to end.
+
 ## ADR-011 — Protected gaps ride on `TimelineItem.locked`; no gap entity
 
 **Status:** Accepted (2026-08-10) — OSS-integrasjonsprogram E3
@@ -281,3 +324,100 @@ Consequences:
 - **Zooming reuses the centre** — because the boundaries nest, an already-rendered tier-`t` tile is a valid coarse stand-in for its two children while they render (`parent_tile` / `child_tiles`).
 - The scheme is media-agnostic on purpose. `services::video::filmstrip_tile_args` / `extract_filmstrip_tile` consume it today; the waveform cache adopts the same grid later rather than inventing a second one. (This is the one place the upstream inspiration applied the idea to video and forgot its own waveform cache — we do not repeat that.)
 - `tile_key(tier, index)` is opaque and filename-safe; `tile_file_name(media_key, …)` scopes it by content hash, so a moved file keeps its rendered tiles.
+
+## ADR-013 — A curated effect registry, not an effect library
+
+**Status:** Accepted (2026-08-10) — OSS-integrasjonsprogram E6
+
+E6's brief was "install `@clypra-studio/engine`, mount it on the compositor,
+curate a starting subset". We installed `pixi.js@^8` (the compositor ADR-010
+chose) and **did not install the effect engine**.
+
+The reason is the architecture invariant, not the dependency's quality:
+**ffmpeg `filter_complex` is the export truth** (ADR-009). An effect catalogue
+of 233 GPU filters is 229 ways for the preview to promise something the export
+cannot deliver — and "what gets exported matches what the user saw in preview"
+is a product promise, not an implementation detail. A library of preview-only
+effects would have to be hidden behind a second gate anyway; the gate is the
+real deliverable, so we built the gate and skipped the library.
+
+**Decision:** clip effects are a **curated registry** — a small list of effects
+that BOTH the Pixi preview and the ffmpeg export can produce, defined twice
+(`src-tauri/src/services/effects.rs`, `src/features/timeline/effects/
+registry.ts`) and pinned against each other by
+`src-tauri/tests/effects_registry_parity.rs`.
+
+| id           | params                    | ffmpeg              | Pixi                 |
+| ------------ | ------------------------- | ------------------- | -------------------- |
+| `brightness` | `amount` −1…1 (default 0) | `eq=brightness=<a>` | colour-matrix offset |
+| `contrast`   | `amount` 0…3 (default 1)  | `eq=contrast=<a>`   | colour-matrix scale  |
+| `saturation` | `amount` 0…3 (default 1)  | `eq=saturation=<a>` | luma-preserving mix  |
+| `grayscale`  | —                         | `hue=s=0`           | saturation 0         |
+
+Three rules keep the seam shut, each with a test on both sides:
+
+1. **Unknown kinds emit nothing.** A `kind` outside the registry is inert in
+   the export and unselectable in the UI — never an invented filter name that
+   aborts the render, which is precisely how the transition picker broke before
+   (ADR-010's sibling guard, `compose_xfade_vocabulary.rs`).
+2. **Neutral emits nothing.** An enabled effect at its default produces the
+   identical filtergraph to no effect at all.
+3. **Out of range clamps, never rejects** — the `timeline_ops` house rule.
+
+Consequences:
+
+- **No schema change.** `TimelineItem.effects` was already in the model
+  (`Effect { id, kind, params, enabled }`); the registry narrows what may go in
+  it. Old project files keep loading; an unrecognised effect renders as it
+  always did (as nothing).
+- **The Pixi side is an approximation, and says so.** `vf_eq` works in YUV
+  (`v = contrast*(v−0.5) + 0.5 + brightness` on luma, chroma scaled about 128);
+  a WebGL colour matrix works in RGB. The matrices use the same formulas with
+  Rec.601 weights, and the inspector prints the exact ffmpeg fragment the clip
+  will export with, so the user reads the truth rather than trusting the
+  approximation. Exactness, when it is needed, comes from the preview-render
+  proxy — real ffmpeg (ADR-009 §3).
+- **Parity is tested against real ffmpeg, not against a string.**
+  `effects_ffmpeg_parity.rs` renders each effect through the real
+  `build_filter_complex` and MEASURES the output with `signalstats` (YAVG /
+  SATAVG) against a flat colour fixture, so a filter that parses but does
+  nothing — or does the opposite — fails.
+- **Effect order is colour → geometry.** Effects are applied before
+  `transform_filters` in the item chain, and before the sprite transform in the
+  preview. After the opacity mixer the stream is RGBA and a luma filter no
+  longer means what the slider said.
+- **An enabled effect leaves the simple burn-in path**, even a neutral one
+  (`is_pristine_primary_item` still refuses any enabled effect). Deliberately
+  stricter than "emits a filter": the general composite path is correct for
+  everything, and the fast path should only ever be taken when it is provably
+  identical.
+- **Cost of the two implementations:** they can drift. That is bought back by
+  the parity test, which reads the TypeScript literal out of the actual source
+  — the same technique `compose_xfade_vocabulary.rs` uses on the transition
+  picker.
+
+### The compositor flag
+
+The Pixi compositor itself (`src/features/timeline/compositor/`) is **off by
+default** and gated twice: a persisted user setting (`localStorage`, next to
+the locale) AND a runtime capability probe (WebGL2 with
+`failIfMajorPerformanceCaveat` — a SwiftShader context is slower than the
+`<video>` path it would replace). The two are stored separately on purpose: an
+automatic fallback must not rewrite the user's setting, or the toggle appears
+to flip itself and the user never learns why.
+
+- With the flag off, MediaPlayer renders exactly the pre-E6 markup — asserted
+  literally in `MediaPlayer.compositor.test.tsx`, because a stray wrapper or
+  inline style on the default path is the failure no behavioural test notices.
+- `pixi.js` is behind `React.lazy` + a dynamic import, so the renderer chunk
+  (~247 kB gzip for the full barrel — more than the 157 kB ADR-010 measured for
+  a trimmed build) is never fetched by a user who has not opted in.
+- MediaPlayer keeps owning the `<video>`: the compositor never seeks, plays,
+  pauses or loads it. Pixi's `VideoSource` defaults (`autoPlay`/`autoLoad`) are
+  both switched off, and the texture is refreshed explicitly once per rendered
+  frame — the element is usually paused (the reconcile loop scrubs it), and a
+  paused video fires no frame callbacks.
+- What the compositor buys today: the preview finally shows a clip's
+  **transform and effects**, which the `<video>` path cannot. What it does not
+  model: `crop`, and stacked layers (one element, one texture) — both reported
+  as `unsupported` by `describeScene` rather than silently diverging.

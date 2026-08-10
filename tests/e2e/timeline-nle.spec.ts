@@ -403,6 +403,91 @@ test("set-transform op replaces a clip's geometry", async ({ page }) => {
   expect(next.timeline_items[0].transform).toEqual(transform);
 });
 
+// ── curated effects (E6) ─────────────────────────────────────────────────────
+// The registry is the preview↔export parity contract; these pin the IPC half
+// of it — the command names + camelCase args ipc.timeline sends, and the
+// one-entry-per-kind / clamp / reject-non-curated semantics the backend has.
+
+test("set-effect op adds a curated effect with clamped params", async ({
+  page,
+}) => {
+  const next = await invoke<DemoProject>(page, "op_set_effect", {
+    project: demoProject(),
+    itemId: "ti1",
+    kind: "brightness",
+    params: { amount: 9 },
+    enabled: true,
+  });
+  expect(next.timeline_items[0].effects).toEqual([
+    {
+      id: "fx-brightness",
+      kind: "brightness",
+      params: { amount: 1 },
+      enabled: true,
+    },
+  ]);
+});
+
+test("set-effect op updates in place instead of stacking a second entry", async ({
+  page,
+}) => {
+  const once = await invoke<DemoProject>(page, "op_set_effect", {
+    project: demoProject(),
+    itemId: "ti1",
+    kind: "contrast",
+    params: { amount: 1.2 },
+    enabled: true,
+  });
+  const twice = await invoke<DemoProject>(page, "op_set_effect", {
+    project: once,
+    itemId: "ti1",
+    kind: "contrast",
+    params: { amount: 1.8 },
+    enabled: true,
+  });
+  expect(twice.timeline_items[0].effects).toHaveLength(1);
+  expect(twice.timeline_items[0].effects[0].params).toEqual({ amount: 1.8 });
+});
+
+test("set-effect op rejects an effect the export cannot render", async ({
+  page,
+}) => {
+  await expect(
+    invoke<DemoProject>(page, "op_set_effect", {
+      project: demoProject(),
+      itemId: "ti1",
+      kind: "bloom",
+      params: {},
+      enabled: true,
+    }),
+  ).rejects.toThrow(/curated/i);
+});
+
+test("remove-effect op drops only that kind", async ({ page }) => {
+  const gray = await invoke<DemoProject>(page, "op_set_effect", {
+    project: demoProject(),
+    itemId: "ti1",
+    kind: "grayscale",
+    params: {},
+    enabled: true,
+  });
+  const both = await invoke<DemoProject>(page, "op_set_effect", {
+    project: gray,
+    itemId: "ti1",
+    kind: "saturation",
+    params: { amount: 1.5 },
+    enabled: true,
+  });
+  const next = await invoke<DemoProject>(page, "op_remove_effect", {
+    project: both,
+    itemId: "ti1",
+    kind: "grayscale",
+  });
+  expect(next.timeline_items[0].effects.map((e) => e.kind)).toEqual([
+    "saturation",
+  ]);
+});
+
 test("add-text-item op places a standalone text clip (no source media)", async ({
   page,
 }) => {

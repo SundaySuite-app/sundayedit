@@ -419,4 +419,73 @@ describe("useFilmstripTiles", () => {
       expect(t.widthPx).toBeGreaterThan(0);
     }
   });
+
+  it("draws a coarse stand-in at the ANCESTOR's own rect, once", async () => {
+    // The seam between `selectDisplayTiles` (which resolves a still-loading
+    // tile to a ready coarser ANCESTOR) and the geometry the caller paints it
+    // at. The ancestor's JPEG covers 2^n× the source range of the tile it
+    // stands in for, so painting it into the CHILD's slot squeezes the whole
+    // coarse strip into a quarter of the width — the frames shown are not the
+    // frames that belong there, and every sibling child repeats the same
+    // squeezed image (their opacities stacking). A stand-in must be drawn at
+    // ITS OWN rect and let the clip box clip it.
+    tauriEnv = true;
+    const wide = clip({ timeline_start_ms: 0, in_ms: 0, out_ms: 200_000 });
+
+    // Round 1: zoomed out far enough for tier 0 (64 s per tile). Let it land.
+    invoke.mockImplementation((cmd: string, args: Record<string, unknown>) =>
+      cmd === "extract_filmstrip_tile"
+        ? Promise.resolve(args.outPath)
+        : Promise.reject(new Error(`unexpected: ${cmd}`)),
+    );
+    const coarse = renderHook(() =>
+      useFilmstripTiles(MEDIA, wide, 0.005, 0, 64_000),
+    );
+    await waitFor(() =>
+      expect(coarse.result.current.length).toBeGreaterThan(0),
+    );
+    expect(coarse.result.current[0].tier).toBe(0);
+    coarse.unmount();
+
+    // Round 2: zoom in to tier 2 (16 s per tile) and never resolve the finer
+    // tiles, so every wanted tile falls back to the ready tier-0 ancestor.
+    invoke.mockImplementation(() => new Promise(() => {}));
+    const { result } = renderHook(() =>
+      useFilmstripTiles(MEDIA, wide, 0.02, 0, 64_000),
+    );
+    await waitFor(() => expect(result.current.length).toBeGreaterThan(0));
+
+    expect(result.current.every((t) => t.stale)).toBe(true);
+    // One entry PER DISTINCT ancestor, not per wanted tile: the visible window
+    // plus overscan wants five tier-2 tiles, and they share just two tier-0
+    // ancestors. Painting an ancestor once per child would stack its opacity
+    // into a bright band.
+    expect(result.current.map((t) => t.key)).toEqual(["z0i0", "z0i1"]);
+    // Each is laid out at ITS OWN 64 000 ms span — 1280 px at 0.02 px/ms,
+    // abutting — not squeezed into a 320 px tier-2 slot.
+    expect(result.current[0].leftPx).toBeCloseTo(0);
+    expect(result.current[0].widthPx).toBeCloseTo(64_000 * 0.02);
+    expect(result.current[1].leftPx).toBeCloseTo(64_000 * 0.02);
+    expect(result.current[1].widthPx).toBeCloseTo(64_000 * 0.02);
+  });
+
+  it("paints tiles that arrive while nothing else changes", async () => {
+    // The cache settles OUTSIDE React. A paint list memoized only on the
+    // geometry (`media`/`wanted`/`pxPerMs`/`item`) therefore keeps returning
+    // the pre-load answer, and the strip stays blank until an unrelated scroll
+    // or edit invalidates it. This test holds `item` at a STABLE reference —
+    // which is what `ClipBox` actually passes, since the item comes from the
+    // project store and does not change identity while a tile renders.
+    tauriEnv = true;
+    invoke.mockImplementation((cmd: string, args: Record<string, unknown>) =>
+      cmd === "extract_filmstrip_tile"
+        ? Promise.resolve(args.outPath)
+        : Promise.reject(new Error(`unexpected: ${cmd}`)),
+    );
+    const stable = clip();
+    const { result } = renderHook(() =>
+      useFilmstripTiles(MEDIA, stable, 0.1, 1_000, 3_000),
+    );
+    await waitFor(() => expect(result.current.length).toBeGreaterThan(0));
+  });
 });

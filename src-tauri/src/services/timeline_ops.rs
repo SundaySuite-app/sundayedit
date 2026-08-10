@@ -19,8 +19,8 @@ use ts_rs::TS;
 
 use crate::error::{AppError, AppResult};
 use crate::model::{
-    MediaItem, Project, TextSpec, TimelineItem, TimelineItemKind, Track, TrackKind, Transform,
-    Transition,
+    Effect, MediaItem, Project, TextSpec, TimelineItem, TimelineItemKind, Track, TrackKind,
+    Transform, Transition,
 };
 
 // ── finalize ──────────────────────────────────────────────────────────────────
@@ -669,11 +669,7 @@ pub fn insert_gap_with_ripple(
 /// No-op (not an error) when `at_ms` is not inside a gap, or when the gap is
 /// protected. The ripple stops at the first locked clip downstream, which then
 /// keeps its timecode while the material before it packs up against the gap.
-pub fn remove_gap_with_ripple(
-    project: &Project,
-    track_id: &str,
-    at_ms: i64,
-) -> AppResult<Project> {
+pub fn remove_gap_with_ripple(project: &Project, track_id: &str, at_ms: i64) -> AppResult<Project> {
     require_track(project, track_id)?;
     let at = at_ms.max(0);
 
@@ -785,6 +781,83 @@ pub fn set_transform(
     let mut next = project.clone();
     let it = find_item_mut(&mut next, item_id)?;
     it.transform = transform;
+    finalize(next)
+}
+
+// ── curated effects (E6) ──────────────────────────────────────────────────────
+
+/// Add or update ONE curated colour effect on a clip.
+///
+/// The effect `kind` is its identity: setting `brightness` twice moves the
+/// existing entry instead of stacking a second one, so the inspector's "one row
+/// per effect" UI and the stored list cannot drift apart. Params are filtered
+/// to the keys the registry declares and clamped to their ranges (house rule:
+/// clamp, don't reject), so a slider that overshoots — or a hand-edited project
+/// file — lands on a value the export can actually render.
+///
+/// A non-curated `kind` is REJECTED here rather than clamped: unlike a value,
+/// there is no in-range meaning for an effect neither the preview nor the
+/// export can produce, and silently storing it would put something in the
+/// project file that renders as nothing (`effects::filter_fragment` → `None`).
+pub fn set_effect(
+    project: &Project,
+    item_id: &str,
+    kind: &str,
+    params: &serde_json::Value,
+    enabled: bool,
+) -> AppResult<Project> {
+    let def = crate::services::effects::definition(kind).ok_or_else(|| {
+        AppError::Validation(format!(
+            "effect kind `{kind}` is not in the curated registry (preview↔export parity)"
+        ))
+    })?;
+
+    // Keep ONLY declared params, each clamped to its declared range. A probe
+    // Effect carries the caller's bag so `effects::param` does the reading —
+    // one implementation of "what does this param mean", shared with export.
+    let probe = Effect {
+        id: String::new(),
+        kind: kind.to_string(),
+        params: params.clone(),
+        enabled,
+    };
+    let mut clean = serde_json::Map::new();
+    for p in def.params {
+        let v = crate::services::effects::param(&probe, p);
+        clean.insert(
+            p.name.to_string(),
+            serde_json::Number::from_f64(v)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+        );
+    }
+    let params = serde_json::Value::Object(clean);
+
+    let mut next = project.clone();
+    let it = find_item_mut(&mut next, item_id)?;
+    match it.effects.iter_mut().find(|e| e.kind == kind) {
+        Some(existing) => {
+            existing.params = params;
+            existing.enabled = enabled;
+        }
+        None => it.effects.push(Effect {
+            // Deterministic per (item, kind): the pair is already unique, and a
+            // stable id keeps undo/redo snapshots comparable.
+            id: format!("fx-{kind}"),
+            kind: kind.to_string(),
+            params,
+            enabled,
+        }),
+    }
+    finalize(next)
+}
+
+/// Remove a clip's effect of the given kind. Removing one that isn't there is a
+/// no-op, not an error (idempotent, like `clear_transition`).
+pub fn remove_effect(project: &Project, item_id: &str, kind: &str) -> AppResult<Project> {
+    let mut next = project.clone();
+    let it = find_item_mut(&mut next, item_id)?;
+    it.effects.retain(|e| e.kind != kind);
     finalize(next)
 }
 
@@ -1462,6 +1535,158 @@ mod tests {
         assert_eq!(err.code(), "not_found");
     }
 
+    // ── set_effect / remove_effect (E6) ─────────────────────────────────────
+    fn with_one_item() -> Project {
+        let mut p = base();
+        p.timeline_items = vec![item("i1", "v1", Some("m1"), 0, 0, 1000)];
+        p
+    }
+
+    #[test]
+    fn set_effect_adds_a_curated_effect() {
+        let p = with_one_item();
+        let r = set_effect(
+            &p,
+            "i1",
+            "brightness",
+            &serde_json::json!({ "amount": 0.3 }),
+            true,
+        )
+        .unwrap();
+        let fx = &r.timeline_items[0].effects;
+        assert_eq!(fx.len(), 1);
+        assert_eq!(fx[0].kind, "brightness");
+        assert_eq!(fx[0].id, "fx-brightness");
+        assert!(fx[0].enabled);
+        assert_eq!(fx[0].params["amount"].as_f64().unwrap(), 0.3);
+    }
+
+    #[test]
+    fn set_effect_updates_in_place_instead_of_stacking() {
+        let p = with_one_item();
+        let r = set_effect(
+            &p,
+            "i1",
+            "contrast",
+            &serde_json::json!({ "amount": 1.2 }),
+            true,
+        )
+        .unwrap();
+        let r = set_effect(
+            &r,
+            "i1",
+            "contrast",
+            &serde_json::json!({ "amount": 1.8 }),
+            false,
+        )
+        .unwrap();
+        let fx = &r.timeline_items[0].effects;
+        assert_eq!(fx.len(), 1, "one entry per kind");
+        assert_eq!(fx[0].params["amount"].as_f64().unwrap(), 1.8);
+        assert!(!fx[0].enabled);
+    }
+
+    #[test]
+    fn set_effect_clamps_and_drops_undeclared_params() {
+        let p = with_one_item();
+        let r = set_effect(
+            &p,
+            "i1",
+            "saturation",
+            &serde_json::json!({ "amount": 99.0, "radius": 4, "note": "hi" }),
+            true,
+        )
+        .unwrap();
+        let params = &r.timeline_items[0].effects[0].params;
+        assert_eq!(params["amount"].as_f64().unwrap(), 3.0, "clamped to max");
+        assert!(params.get("radius").is_none(), "undeclared key dropped");
+        assert!(params.get("note").is_none(), "undeclared key dropped");
+    }
+
+    #[test]
+    fn set_effect_fills_in_the_neutral_default_for_a_missing_param() {
+        let p = with_one_item();
+        let r = set_effect(&p, "i1", "contrast", &serde_json::json!({}), true).unwrap();
+        assert_eq!(
+            r.timeline_items[0].effects[0].params["amount"]
+                .as_f64()
+                .unwrap(),
+            1.0
+        );
+    }
+
+    #[test]
+    fn set_effect_stores_no_params_for_a_parameterless_effect() {
+        let p = with_one_item();
+        let r = set_effect(&p, "i1", "grayscale", &serde_json::json!({}), true).unwrap();
+        assert_eq!(
+            r.timeline_items[0].effects[0].params,
+            serde_json::json!({}),
+            "grayscale declares no params"
+        );
+    }
+
+    #[test]
+    fn set_effect_rejects_a_non_curated_kind() {
+        let p = with_one_item();
+        let err = set_effect(&p, "i1", "bloom", &serde_json::json!({}), true).unwrap_err();
+        assert_eq!(err.code(), "validation");
+        // …and nothing was written.
+        assert!(p.timeline_items[0].effects.is_empty());
+    }
+
+    #[test]
+    fn set_effect_missing_item_is_not_found() {
+        let p = with_one_item();
+        let err = set_effect(&p, "nope", "grayscale", &serde_json::json!({}), true).unwrap_err();
+        assert_eq!(err.code(), "not_found");
+    }
+
+    #[test]
+    fn remove_effect_drops_only_that_kind() {
+        let p = with_one_item();
+        let p = set_effect(&p, "i1", "grayscale", &serde_json::json!({}), true).unwrap();
+        let p = set_effect(
+            &p,
+            "i1",
+            "brightness",
+            &serde_json::json!({ "amount": 0.5 }),
+            true,
+        )
+        .unwrap();
+        let r = remove_effect(&p, "i1", "grayscale").unwrap();
+        let kinds: Vec<&str> = r.timeline_items[0]
+            .effects
+            .iter()
+            .map(|e| e.kind.as_str())
+            .collect();
+        assert_eq!(kinds, vec!["brightness"]);
+    }
+
+    #[test]
+    fn remove_effect_is_idempotent() {
+        let p = with_one_item();
+        let r = remove_effect(&p, "i1", "grayscale").unwrap();
+        assert!(r.timeline_items[0].effects.is_empty());
+    }
+
+    #[test]
+    fn effect_ops_leave_the_input_project_untouched() {
+        let p = with_one_item();
+        let _ = set_effect(
+            &p,
+            "i1",
+            "brightness",
+            &serde_json::json!({ "amount": 0.5 }),
+            true,
+        )
+        .unwrap();
+        assert!(
+            p.timeline_items[0].effects.is_empty(),
+            "ops are pure (undo depends on it)"
+        );
+    }
+
     // ── add_text_item ───────────────────────────────────────────────────────
     #[test]
     fn add_text_item_builds_text_clip() {
@@ -1837,7 +2062,10 @@ mod tests {
     fn pack_track_never_moves_a_clip_to_the_right() {
         let r = pack_track(&gappy(), "v1").unwrap();
         for id in ["a", "b", "c"] {
-            assert!(start_of(&r, id) <= start_of(&gappy(), id), "{id} moved right");
+            assert!(
+                start_of(&r, id) <= start_of(&gappy(), id),
+                "{id} moved right"
+            );
         }
     }
 

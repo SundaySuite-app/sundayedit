@@ -269,6 +269,23 @@ export const timeline = {
   /** Replace a clip's geometric transform (opacity/scale clamp server-side). */
   setTransform: (project: Project, itemId: string, transform: Transform) =>
     call<Project>("op_set_transform", { project, itemId, transform }),
+  /**
+   * Add or update ONE curated colour effect on a clip (E6). `kind` must be an
+   * id from `features/timeline/effects/registry.ts`; the backend rejects
+   * anything else, because an effect the ffmpeg export cannot render has no
+   * business in a project file. Params are clamped server-side.
+   */
+  setEffect: (
+    project: Project,
+    itemId: string,
+    kind: string,
+    params: Record<string, number>,
+    enabled: boolean,
+  ) =>
+    call<Project>("op_set_effect", { project, itemId, kind, params, enabled }),
+  /** Remove a clip's effect of the given kind (no-op when absent). */
+  removeEffect: (project: Project, itemId: string, kind: string) =>
+    call<Project>("op_remove_effect", { project, itemId, kind }),
   /** Add a standalone text overlay clip (no source media). */
   addTextItem: (
     project: Project,

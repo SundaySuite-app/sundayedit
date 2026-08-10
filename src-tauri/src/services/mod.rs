@@ -18,6 +18,7 @@
 //!   - `diarize`       — speaker diarization + roster management (Phase 4.2)
 //!   - `tiles`         — fixed-grid tile addressing for filmstrip/waveform caches (E3)
 //!   - `karaoke`       — SHARED per-word karaoke timing for ASS `\k` + the canvas overlay (E4a)
+//!   - `effects`       — curated clip effects: the shared preview↔ffmpeg registry (E6)
 
 pub mod asr;
 pub mod burnin;
@@ -25,6 +26,7 @@ pub mod compose;
 pub mod deeplink;
 pub mod diarize;
 pub mod document;
+pub mod effects;
 pub mod export;
 pub mod export_presets;
 pub mod filler;

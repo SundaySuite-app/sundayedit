@@ -415,3 +415,257 @@ describe("ClipInspector — transform sliders vs in-flight commits", () => {
     });
   });
 });
+
+// ── Curated effects (E6) ─────────────────────────────────────────────────────
+// The inspector is the UI half of "non-curated effects must not be selectable":
+// it renders the registry and nothing else, and every edit goes through
+// store.run so effects land on the SAME undo stack as trim/transform.
+describe("ClipInspector — effects section", () => {
+  /** Apply an op_set_effect payload the way the backend would. */
+  function applySetEffect(args: {
+    project: Project;
+    itemId: string;
+    kind: string;
+    params: Record<string, number>;
+    enabled: boolean;
+  }): Project {
+    return {
+      ...args.project,
+      updated_at: args.project.updated_at + 1,
+      timeline_items: args.project.timeline_items.map((ti) =>
+        ti.id === args.itemId
+          ? {
+              ...ti,
+              effects: [
+                ...ti.effects.filter((e) => e.kind !== args.kind),
+                {
+                  id: `fx-${args.kind}`,
+                  kind: args.kind,
+                  params: args.params,
+                  enabled: args.enabled,
+                },
+              ],
+            }
+          : ti,
+      ),
+    };
+  }
+
+  const rowFor = (id: string) => screen.getByTestId(`effect-${id}`);
+  const checkboxIn = (id: string) =>
+    rowFor(id).querySelector("input[type=checkbox]") as HTMLInputElement;
+
+  it("offers exactly the curated effects — no more, no less", () => {
+    renderInspector();
+    for (const id of ["brightness", "contrast", "saturation", "grayscale"]) {
+      expect(rowFor(id)).toBeTruthy();
+    }
+    // An effect nobody curated (and the export cannot render) is not offerable.
+    expect(screen.queryByTestId("effect-bloom")).toBeNull();
+    expect(screen.queryByTestId("effect-blur")).toBeNull();
+  });
+
+  it("shows every effect off for a clip with no effects", () => {
+    renderInspector();
+    expect(checkboxIn("brightness").checked).toBe(false);
+    expect(checkboxIn("grayscale").checked).toBe(false);
+    // No slider until the effect is on.
+    expect(rowFor("brightness").querySelector("input[type=range]")).toBeNull();
+  });
+
+  it("adds an effect at its NEUTRAL default via op_set_effect", async () => {
+    invoke.mockImplementation((_cmd: unknown, rawArgs: unknown) =>
+      Promise.resolve(
+        applySetEffect(rawArgs as Parameters<typeof applySetEffect>[0]),
+      ),
+    );
+    renderInspector();
+
+    await act(async () => {
+      fireEvent.click(checkboxIn("brightness"));
+    });
+
+    expect(invoke).toHaveBeenLastCalledWith("op_set_effect", {
+      project: SAMPLE_PROJECT,
+      itemId: ITEM.id,
+      kind: "brightness",
+      params: { amount: 0 },
+      enabled: true,
+    });
+  });
+
+  it("removes an effect via op_remove_effect when unchecked", async () => {
+    const withEffect: TimelineItem = {
+      ...ITEM,
+      effects: [
+        { id: "fx-grayscale", kind: "grayscale", params: {}, enabled: true },
+      ],
+    };
+    useProjectStore.setState({
+      project: { ...SAMPLE_PROJECT, timeline_items: [withEffect] },
+    });
+    invoke.mockResolvedValue({ ...SAMPLE_PROJECT, updated_at: 9 });
+    render(<ClipInspector item={withEffect} onClose={vi.fn()} />);
+
+    expect(checkboxIn("grayscale").checked).toBe(true);
+    await act(async () => {
+      fireEvent.click(checkboxIn("grayscale"));
+    });
+    expect(invoke).toHaveBeenLastCalledWith("op_remove_effect", {
+      project: { ...SAMPLE_PROJECT, timeline_items: [withEffect] },
+      itemId: ITEM.id,
+      kind: "grayscale",
+    });
+  });
+
+  it("commits a slider change with the parameter's value", async () => {
+    const withEffect: TimelineItem = {
+      ...ITEM,
+      effects: [
+        {
+          id: "fx-contrast",
+          kind: "contrast",
+          params: { amount: 1 },
+          enabled: true,
+        },
+      ],
+    };
+    useProjectStore.setState({
+      project: { ...SAMPLE_PROJECT, timeline_items: [withEffect] },
+    });
+    invoke.mockImplementation((_cmd: unknown, rawArgs: unknown) =>
+      Promise.resolve(
+        applySetEffect(rawArgs as Parameters<typeof applySetEffect>[0]),
+      ),
+    );
+    render(<ClipInspector item={withEffect} onClose={vi.fn()} />);
+
+    const slider = rowFor("contrast").querySelector(
+      "input[type=range]",
+    ) as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(slider, { target: { value: "1.75" } });
+    });
+
+    expect(invoke).toHaveBeenLastCalledWith("op_set_effect", {
+      project: { ...SAMPLE_PROJECT, timeline_items: [withEffect] },
+      itemId: ITEM.id,
+      kind: "contrast",
+      params: { amount: 1.75 },
+      enabled: true,
+    });
+  });
+
+  it("shows the exact ffmpeg filter the clip will export with", () => {
+    // The preview is an approximation (registry.ts); showing the real filter
+    // is how the panel stays honest about what the export will do.
+    const withEffect: TimelineItem = {
+      ...ITEM,
+      effects: [
+        {
+          id: "fx-saturation",
+          kind: "saturation",
+          params: { amount: 1.4 },
+          enabled: true,
+        },
+      ],
+    };
+    useProjectStore.setState({
+      project: { ...SAMPLE_PROJECT, timeline_items: [withEffect] },
+    });
+    render(<ClipInspector item={withEffect} onClose={vi.fn()} />);
+    expect(screen.getByTestId("effect-saturation-fragment").textContent).toBe(
+      "eq=saturation=1.4",
+    );
+  });
+
+  it("says so when an enabled effect is parked at a value that changes nothing", () => {
+    const withEffect: TimelineItem = {
+      ...ITEM,
+      effects: [
+        {
+          id: "fx-brightness",
+          kind: "brightness",
+          params: { amount: 0 },
+          enabled: true,
+        },
+      ],
+    };
+    useProjectStore.setState({
+      project: { ...SAMPLE_PROJECT, timeline_items: [withEffect] },
+    });
+    render(<ClipInspector item={withEffect} onClose={vi.fn()} />);
+    expect(screen.getByTestId("effect-brightness-fragment").textContent).toBe(
+      "No change at this value",
+    );
+  });
+
+  it("is not offered on a clip the export will not grade", () => {
+    // `compose::is_visual` runs the per-item effect chain only on clips backed
+    // by VIDEO media. Offering effects on a text overlay would store an `eq=`
+    // the render then ignores — exactly the promise-the-export-can't-keep the
+    // curated registry exists to prevent.
+    const textItem: TimelineItem = {
+      ...ITEM,
+      id: "tx1",
+      kind: "text",
+      source_media_id: null,
+      text: { text: "Lower third", style_id: null },
+    };
+    useProjectStore.setState({
+      project: { ...SAMPLE_PROJECT, timeline_items: [textItem] },
+    });
+    render(<ClipInspector item={textItem} onClose={vi.fn()} />);
+    expect(screen.queryByTestId("effect-brightness")).toBeNull();
+    // The rest of the panel is unaffected.
+    expect(screen.getByTestId("clip-inspector")).toBeTruthy();
+  });
+
+  it("restores the stored value when a disabled effect is re-enabled", async () => {
+    // A project file can carry `enabled: false` with real params; re-checking
+    // the box must not silently reset the user's grade to neutral.
+    const withDisabled: TimelineItem = {
+      ...ITEM,
+      effects: [
+        {
+          id: "fx-saturation",
+          kind: "saturation",
+          params: { amount: 2.5 },
+          enabled: false,
+        },
+      ],
+    };
+    useProjectStore.setState({
+      project: { ...SAMPLE_PROJECT, timeline_items: [withDisabled] },
+    });
+    invoke.mockImplementation((_cmd: unknown, rawArgs: unknown) =>
+      Promise.resolve(
+        applySetEffect(rawArgs as Parameters<typeof applySetEffect>[0]),
+      ),
+    );
+    render(<ClipInspector item={withDisabled} onClose={vi.fn()} />);
+
+    await act(async () => {
+      fireEvent.click(checkboxIn("saturation"));
+    });
+    expect(invoke).toHaveBeenLastCalledWith(
+      "op_set_effect",
+      expect.objectContaining({
+        kind: "saturation",
+        params: { amount: 2.5 },
+        enabled: true,
+      }),
+    );
+  });
+
+  it("leaves the project untouched when the backend rejects the edit", async () => {
+    invoke.mockRejectedValue(new Error("validation"));
+    renderInspector();
+    await act(async () => {
+      fireEvent.click(checkboxIn("grayscale"));
+    });
+    expect(
+      useProjectStore.getState().project?.timeline_items[0].effects,
+    ).toEqual([]);
+  });
+});

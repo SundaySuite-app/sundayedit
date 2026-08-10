@@ -108,6 +108,44 @@ waveform, and burn-in work without a system ffmpeg:
 > 10.15-capable Intel Mac has — see
 > `src-tauri/cmake/ggml-ci-portable.cmake`.
 
+## macOS ships a custom webview user agent
+
+`src-tauri/tauri.macos.conf.json` overrides the window's user agent on **macOS
+only**:
+
+```
+Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15 SundayEdit
+```
+
+**Why it exists.** Tauri's WKWebView reports no `Safari` token, and PixiJS
+detects WebKit by user-agent regex to decide how it uploads video frames to the
+GPU. Without the token it takes the `texSubImage2D` path, which ADR-010
+measured at **42×** the cost of `texImage2D` in this webview (28.92 ms vs
+0.69 ms per frame, two 1080p layers) — enough to drop the GPU preview from
+30 fps to 20. Adding the token restores Pixi's own workaround without patching
+Pixi internals. Full measurements: `docs/DECISIONS.md`, ADR-010 and its
+addendum.
+
+**Scope and risk.**
+
+- **macOS only.** Tauri merges `tauri.<platform>.conf.json` over the base
+  config, and the base config sets no `userAgent`, so Windows/WebView2 keeps its
+  native Chromium UA (where ADR-010 measured no difference between the upload
+  paths).
+- A user agent is public, and some sites and servers branch on it. Here the
+  exposure is essentially nil: **the webview makes no external network
+  requests.** Every HTTP call — Whisper model download, Claude / OpenAI /
+  AssemblyAI / Deepgram — is made from Rust with `reqwest`, which has its own
+  user agent and is unaffected. If a future feature ever loads third-party web
+  content inside the webview, re-evaluate this.
+- The value is guarded by `src-tauri/tests/webview_user_agent.rs`, which
+  reimplements Pixi's `isSafari()` regex and also asserts that the macOS window
+  definition has not drifted from the base one — platform config merging
+  **replaces** the `windows` array, so a property added to `tauri.conf.json`
+  silently disappears on macOS unless it is copied across.
+- **Not yet verified on the rig:** that wry applies the value in the shipped
+  app over `tauri://`. Check `navigator.userAgent` once in a real build.
+
 ## Deferred — required before a real public 1.0
 
 These are intentionally **not** wired yet (they need binaries/infra, not just

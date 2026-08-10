@@ -225,7 +225,10 @@ mod tests {
     #[test]
     fn file_name_is_media_scoped() {
         assert_eq!(tile_file_name("abc123", 2, 5), "abc123_z2i5.jpg");
-        assert_ne!(tile_file_name("abc123", 2, 5), tile_file_name("def456", 2, 5));
+        assert_ne!(
+            tile_file_name("abc123", 2, 5),
+            tile_file_name("def456", 2, 5)
+        );
     }
 
     // ── covering ────────────────────────────────────────────────────────────
@@ -270,7 +273,10 @@ mod tests {
         let a = tiles_covering(10_000, 90_000, 0);
         let b = tiles_covering(50_000, 130_000, 0);
         let keys_a: Vec<&str> = a.iter().map(|t| t.key.as_str()).collect();
-        let shared = b.iter().filter(|t| keys_a.contains(&t.key.as_str())).count();
+        let shared = b
+            .iter()
+            .filter(|t| keys_a.contains(&t.key.as_str()))
+            .count();
         assert!(shared >= 2, "panning must reuse tiles, got {shared}");
     }
 

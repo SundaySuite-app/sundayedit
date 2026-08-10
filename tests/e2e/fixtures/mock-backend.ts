@@ -709,6 +709,78 @@ function backend(): void {
     );
     return { ...project, timeline_items: next };
   }
+  /**
+   * Mirror of `timeline_ops::set_effect` (E6): one entry per KIND, params
+   * clamped to the curated registry's ranges, a non-curated kind rejected.
+   */
+  function setEffect(
+    project: Project,
+    itemId: string,
+    kind: string,
+    params: Record<string, number>,
+    enabled: boolean,
+  ): Project {
+    // Inlined, not imported: this whole function is serialised into the page,
+    // so it may not reference anything outside itself. Kept in step with
+    // src/features/timeline/effects/registry.ts (and its Rust mirror).
+    const curated: Array<{
+      id: string;
+      params: Array<{
+        name: string;
+        min: number;
+        max: number;
+        default: number;
+      }>;
+    }> = [
+      {
+        id: "brightness",
+        params: [{ name: "amount", min: -1, max: 1, default: 0 }],
+      },
+      {
+        id: "contrast",
+        params: [{ name: "amount", min: 0, max: 3, default: 1 }],
+      },
+      {
+        id: "saturation",
+        params: [{ name: "amount", min: 0, max: 3, default: 1 }],
+      },
+      { id: "grayscale", params: [] },
+    ];
+    const def = curated.find((d) => d.id === kind);
+    if (!def)
+      throw new Error(`validation: effect kind \`${kind}\` is not curated`);
+    const clean: Record<string, number> = {};
+    for (const pd of def.params) {
+      const raw = params?.[pd.name];
+      const n =
+        typeof raw === "number" && Number.isFinite(raw) ? raw : pd.default;
+      clean[pd.name] = Math.min(pd.max, Math.max(pd.min, n));
+    }
+    const next = items(project).map((it) => {
+      if (it.id !== itemId) return it;
+      const others = it.effects.filter((e) => e.kind !== kind);
+      return {
+        ...it,
+        effects: [
+          ...others,
+          { id: `fx-${kind}`, kind, params: clean, enabled },
+        ],
+      };
+    });
+    return { ...project, timeline_items: next };
+  }
+  function removeEffect(
+    project: Project,
+    itemId: string,
+    kind: string,
+  ): Project {
+    const next = items(project).map((it) =>
+      it.id === itemId
+        ? { ...it, effects: it.effects.filter((e) => e.kind !== kind) }
+        : it,
+    );
+    return { ...project, timeline_items: next };
+  }
   function addTextItem(
     project: Project,
     trackId: string,
@@ -945,6 +1017,20 @@ function backend(): void {
             args.itemId as string,
             args.transform as Transform,
           ),
+        );
+      case "op_set_effect":
+        return Promise.resolve(
+          setEffect(
+            project,
+            args.itemId as string,
+            args.kind as string,
+            args.params as Record<string, number>,
+            args.enabled as boolean,
+          ),
+        );
+      case "op_remove_effect":
+        return Promise.resolve(
+          removeEffect(project, args.itemId as string, args.kind as string),
         );
       case "op_add_text_item":
         return Promise.resolve(

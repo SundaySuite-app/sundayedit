@@ -27,12 +27,13 @@
  * warning rather than silently fighting them.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import type { Project } from "@/lib/bindings/Project";
 import { useT } from "@/lib/i18n";
+import { selectCompositorActive, useCompositorFlag } from "./compositor";
 import { KaraokeOverlay } from "./KaraokeOverlay";
 import { isUserGesture } from "./mediaSync";
 import {
@@ -88,6 +89,18 @@ interface Props {
  * element that produced the snapshot.
  */
 const PREVIEW_ITEM_ID = "preview";
+
+/**
+ * The GPU compositor (E6), loaded ONLY when the capability flag is on —
+ * `pixi.js` is 157 kB min+gzip (ADR-010) and must not reach a default install.
+ * `React.lazy` keeps the import out of this module's dependency graph until
+ * the element is actually rendered.
+ */
+const PixiCompositor = lazy(() =>
+  import("./compositor/PixiCompositor").then((m) => ({
+    default: m.PixiCompositor,
+  })),
+);
 
 /** `HTMLMediaElement.HAVE_METADATA` — below this, seeking is meaningless. */
 const READY_METADATA = 1;
@@ -148,6 +161,19 @@ export function MediaPlayer({
   // cleared whenever the element's SOURCE changes (rAF clip swap, proxy load,
   // legacy src change) so a stale error never covers a healthy source.
   const [unavailable, setUnavailable] = useState(false);
+
+  // ── GPU compositor (E6), default OFF ───────────────────────────────────────
+  // `compositorRequested` is the flag (user setting AND nothing has
+  // disqualified it this session); `compositorDrawing` only goes true once the
+  // compositor has actually put a canvas up. Until then — and forever, with the
+  // flag off — everything below is byte-for-byte the pre-E6 preview.
+  const compositorRequested = useCompositorFlag(selectCompositorActive);
+  const [compositorDrawing, setCompositorDrawing] = useState(false);
+  // A flag turned off mid-session must not leave the element hidden behind a
+  // canvas that is on its way out.
+  useEffect(() => {
+    if (!compositorRequested) setCompositorDrawing(false);
+  }, [compositorRequested]);
 
   // NLE mode is active only when a project with placed clips is supplied AND no
   // preview proxy is loaded; else we fall back to the single-source element
@@ -355,6 +381,16 @@ export function MediaPlayer({
           // single-source mode this is either the rendered proxy or the legacy src.
           src={mappingMode ? undefined : singleSrc}
           className="max-h-full max-w-full"
+          // While the compositor draws, the element becomes a pure TEXTURE
+          // SOURCE: taken out of flow and made transparent, but still laid out,
+          // decoded and audible — `display:none` would let the browser stop
+          // decoding, and there would be nothing to upload. With the flag off
+          // this is `undefined`, i.e. no style attribute at all.
+          style={
+            compositorDrawing
+              ? { position: "absolute", opacity: 0, pointerEvents: "none" }
+              : undefined
+          }
           // Timeline owns transport; the element is driven, not user-controlled.
           controls={false}
           muted={false}
@@ -368,6 +404,18 @@ export function MediaPlayer({
           onPause={onMaybeUserGesture}
           onSeeking={onMaybeUserGesture}
         />
+        {/* E6: the GPU stage sits between the element and the caption overlay,
+            so karaoke keeps rendering ON TOP of whichever surface is showing
+            the picture. Nothing here exists with the flag off. */}
+        {compositorRequested && (
+          <Suspense fallback={null}>
+            <PixiCompositor
+              videoRef={videoRef}
+              project={project}
+              onActiveChange={setCompositorDrawing}
+            />
+          </Suspense>
+        )}
         <KaraokeOverlay project={project} />
       </div>
       {unavailable && (

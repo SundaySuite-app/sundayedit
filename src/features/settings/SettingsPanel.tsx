@@ -14,10 +14,12 @@ import {
   Save,
   Languages,
   Highlighter,
+  MonitorPlay,
 } from "lucide-react";
 
 import { ipc, IPCError } from "@/lib/ipc";
 import type { SecretProvider } from "@/lib/bindings";
+import { useCompositorFlag } from "@/features/timeline/compositor";
 import { useT, useLocale, LANGS, LANG_NAMES, type TKey } from "@/lib/i18n";
 import { cn } from "@/lib/cn";
 
@@ -85,6 +87,7 @@ export function SettingsPanel() {
   return (
     <div className="mx-auto max-w-2xl p-6">
       <LanguagePicker />
+      <PreviewSettings />
 
       <div className="mb-1 flex items-center gap-2">
         <KeyRound size={18} className="text-[var(--color-accent-400)]" />
@@ -203,6 +206,68 @@ function AboutConfidence() {
         <p className="mt-2 text-[10px] text-[var(--color-fg-subtle)]">
           {t("settingsConfidenceCaveat")}
         </p>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * The GPU preview compositor's opt-in (E6; ADR-013).
+ *
+ * Two independent facts are shown: the SETTING (what the user chose,
+ * persisted) and the RUNTIME (whether this machine can honour it). They are
+ * never conflated — an automatic fallback leaves the checkbox where the user
+ * put it and explains itself underneath, instead of appearing to flip itself.
+ */
+function PreviewSettings() {
+  const t = useT();
+  const enabled = useCompositorFlag((s) => s.enabled);
+  const setEnabled = useCompositorFlag((s) => s.setEnabled);
+  const unavailableReason = useCompositorFlag((s) => s.unavailableReason);
+
+  const notice =
+    enabled && unavailableReason !== null
+      ? unavailableReason === "no-webgl2"
+        ? t("settingsGpuUnavailableNoWebgl2")
+        : t("settingsGpuUnavailableFailed")
+      : null;
+
+  return (
+    <section className="mb-8">
+      <div className="mb-1 flex items-center gap-2">
+        <MonitorPlay size={18} className="text-[var(--color-accent-400)]" />
+        <h2 className="text-[var(--text-ui-lg)] font-semibold">
+          {t("settingsPreviewTitle")}
+        </h2>
+      </div>
+      <p className="mb-3 text-[var(--text-ui-sm)] text-[var(--color-fg-muted)]">
+        {t("settingsPreviewIntro")}
+      </p>
+      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-elevated)] p-3">
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            data-testid="gpu-compositor-toggle"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+            className="accent-[var(--color-accent-500)]"
+          />
+          <span className="text-[var(--text-ui-sm)] font-medium">
+            {t("settingsGpuCompositor")}
+          </span>
+        </label>
+        <p className="mt-2 text-[10px] text-[var(--color-fg-subtle)]">
+          {t("settingsGpuCompositorNote")}
+        </p>
+        {notice && (
+          <p
+            data-testid="gpu-compositor-unavailable"
+            role="status"
+            className="mt-2 text-[10px] text-[var(--color-fg-muted)]"
+          >
+            {notice}
+          </p>
+        )}
       </div>
     </section>
   );
