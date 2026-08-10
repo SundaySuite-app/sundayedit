@@ -12,7 +12,7 @@ samme stack som oss — CapCut-klone). Kvalitetsbilde: AI-assistert kodebase
 med gjentakende mønster «backend komplett, UI-wiring fraværende» (keyframes
 ødelagte, drag omgår undo, fake cloud-eksport) — MEN med flere genuint
 utmerkede, rene, testede moduler. Sekundærkilder: **bilibili/WebAV** (MIT,
-WebCodecs-kompositor), **jassub** (MIT, WebGL-libass), **@clypra-studio/
+WebCodecs-kompositor), **jassub** (WebGL-libass — **LGPL-2.1+/FTL, ikke MIT**, se E4), **@clypra-studio/
 engine** (MIT på npm, 233 effekter/overganger, krever pixi.js@^8),
 **mediabunny** (MPL-2.0). Full analyse i agent-rapportene (se git-historikk
 for denne fila + memory).
@@ -77,13 +77,31 @@ gjenbrukes på tvers av zoomsteg (test); full gate.
 
 ### E4 — Karaoke-captions 🏆 _(M · Opus — flaggskipet)_
 
-`write_ass` utvides med karaoke-tags (`\k`/`\kf`) fra word-timings vi allerede
-har + valgfri confidence-farging. **jassub** (MIT WebGL-libass) rendrer samme
-ASS i preview → ekte WYSIWYG (libass er motoren begge veier). Stil-UI:
-karaoke av/på + highlight-stil per stilpreset. **DoD:** ASS-snapshot-tester;
-jassub-preview mot eksportert burn-in visuelt verifisert (ekte-ffmpeg-test +
-screenshot-sammenligning); HELE caption-suiten grønn (flaggskip-gate);
-ytelse: jassub belaster ikke playhead-loopen (>30 fps preview).
+> ⚠️ **Lisenskorreksjon 08-09 (viktig):** programmet oppga først jassub som
+> MIT. Det er FEIL — npm-metadata sier `LGPL-2.1-or-later AND (FTL OR
+GPL-2.0-or-later) AND MIT AND …` fordi pakken bunter libass + FreeType +
+> fribidi. For et lukket kommersielt produkt betyr LGPL konkrete plikter
+> (erstattbar/dynamisk lenket komponent, kildetilbud, attribusjon). Vi har
+> allerede samme kategori via ffmpeg-sidecar, men å legge til en LGPL-
+> avhengighet er en **eierbeslutning**, ikke en nattbeslutning.
+
+**Derfor todelt E4:**
+
+- **E4a (kjøres — null lisensrisiko):** `write_ass` får karaoke-tags
+  (`\k`/`\kf`) generert fra word-timings vi allerede har, + valgfri
+  confidence-farging. Preview-siden rendrer karaoke i VÅRT eget
+  canvas-overlegg direkte fra de samme word-timingene (vi eier begge
+  sider). Paritet sikres med felles ren timing-funksjon (én kilde til
+  `word → (start,varighet,tilstand)`) + ekte-ffmpeg-test som brenner ASS
+  og sammenligner mot forventet frame-tilstand. Stil-UI: karaoke av/på +
+  highlight-stil per stilpreset.
+- **E4b (FORBEREDES, ikke installert):** jassub som eksakt-libass-preview
+  bak et flagg — dokumenter LGPL-pliktene og la eier bestemme. Vår
+  ffmpeg-preview-proxy gir allerede ekte libass-fasit ved behov.
+
+**DoD (E4a):** ASS-snapshot-tester; canvas↔ASS-paritet testet via den delte
+timing-funksjonen; ekte-ffmpeg burn-in-test; HELE caption-suiten grønn
+(flaggskip-gate); ytelse: karaoke-rendring belaster ikke playhead-loopen.
 
 ### E5 — GPU-kompositor-spike _(M · Opus — beslutningsetappe)_
 
@@ -130,14 +148,15 @@ full gate; rapport.
 
 ## Kildekart (løft → fil)
 
-| Vi bygger         | Fra                                                                 | Lisens      |
-| ----------------- | ------------------------------------------------------------------- | ----------- |
-| Tidslinje-klokke  | `Clypra src/core/playback/PlaybackClock.ts`                         | MIT         |
-| Sync-policy-form  | `Clypra src/core/playback/PreviewPlaybackScheduler.ts` (kun formen) | MIT         |
-| Keyframe-matte    | `Clypra src/core/evaluation/animation.ts`                           | MIT         |
-| Gizmo-matte       | `Clypra src/components/editor/transform/calculator.ts`              | MIT         |
-| Gap-semantikk     | `Clypra src/lib/timeline/gapEngine.ts` (imiteres i Rust)            | idé         |
-| Tile-grid-innsikt | `Clypra` thumbnail-system (imiteres)                                | idé         |
-| Karaoke-rendring  | `ThaUnknown/jassub` (npm-avhengighet)                               | MIT         |
-| Effektmotor       | `@clypra-studio/engine` (npm-avhengighet, E6)                       | MIT         |
-| WebCodecs-kilde   | `bilibili/WebAV` / `Vanilagy/mediabunny` (E5-spike)                 | MIT/MPL-2.0 |
+| Vi bygger              | Fra                                                                      | Lisens      |
+| ---------------------- | ------------------------------------------------------------------------ | ----------- |
+| Tidslinje-klokke       | `Clypra src/core/playback/PlaybackClock.ts`                              | MIT         |
+| Sync-policy-form       | `Clypra src/core/playback/PreviewPlaybackScheduler.ts` (kun formen)      | MIT         |
+| Keyframe-matte         | `Clypra src/core/evaluation/animation.ts`                                | MIT         |
+| Gizmo-matte            | `Clypra src/components/editor/transform/calculator.ts`                   | MIT         |
+| Gap-semantikk          | `Clypra src/lib/timeline/gapEngine.ts` (imiteres i Rust)                 | idé         |
+| Tile-grid-innsikt      | `Clypra` thumbnail-system (imiteres)                                     | idé         |
+| Karaoke-rendring       | eget canvas-overlegg + `write_ass` (E4a) — INGEN ny avhengighet          | —           |
+| ~~Karaoke via libass~~ | `ThaUnknown/jassub` — **LGPL-2.1+/FTL, IKKE MIT** (E4b = eierbeslutning) | LGPL m.fl.  |
+| Effektmotor            | `@clypra-studio/engine` (npm-avhengighet, E6)                            | MIT         |
+| WebCodecs-kilde        | `bilibili/WebAV` / `Vanilagy/mediabunny` (E5-spike)                      | MIT/MPL-2.0 |
