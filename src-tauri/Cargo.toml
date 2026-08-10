@@ -20,7 +20,7 @@ tauri-plugin-opener = "2"
 # (see sunday-platform README) so each app builds standalone in CI — a path dep
 # would break the single-repo checkout. For local sunday-auth co-dev, override
 # with a `[patch]` in .cargo/config.toml.
-sunday-auth = { git = "https://github.com/richardfossland/sunday-platform.git", tag = "v0.3.0" }
+sunday-auth = { git = "https://github.com/richardfossland/sunday-platform.git", tag = "v0.4.1" }
 # Canonical cross-app wire contracts (Rust mirror of @sunday/contracts). We adopt
 # its full `MediaHandoff` superset for deep-link parsing so Rec→Edit and Edit
 # handoffs carry the complete field set; same git-tag distribution as sunday-auth.
