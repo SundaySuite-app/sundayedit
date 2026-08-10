@@ -49,7 +49,7 @@ regex = "1"
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 
 # Phase 6.1 — DOCX export is an OOXML zip; we hand-build a minimal valid one.
-zip = { version = "4", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # Type generation for the frontend
 ts-rs = { version = "12", features = ["serde-compat", "chrono-impl", "uuid-impl"] }
