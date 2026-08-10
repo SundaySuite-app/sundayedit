@@ -100,6 +100,149 @@ Real-time multi-track compositing in the browser is expensive and not yet portab
 
 This keeps "what you export matches what you saw" (Tech principles) honest: export is the ground truth, and preview fidelity improves in stages without blocking the NLE.
 
+## ADR-010 — PixiJS 8 fed by hidden `<video>` is the compositor; WebCodecs is deferred
+
+**Status:** Accepted (2026-08-10) — OSS-integrasjonsprogram E5 (spike)
+
+ADR-009 deferred "a real-time WebCodecs compositor, gated behind a runtime
+capability check". E5 was the spike that had to choose between two ways of
+building it:
+
+- **(A) PixiJS 8** compositing hidden `<video>` elements (Clypra's model, and
+  the prerequisite for E6 — `@clypra-studio/engine` peer-depends on
+  `pixi.js@^8`).
+- **(B) WebCodecs** — `VideoDecoder` via bilibili/WebAV or mediabunny, decoding
+  into frames we composite ourselves.
+
+**Decision:** the compositor is **PixiJS 8 fed by hidden `<video>` elements**.
+WebCodecs is **not** adopted as the frame source now; it is kept as a targeted
+upgrade for frame-exactness, behind the same capability gate. The current
+`<video>`-plus-canvas preview stays the fallback and stays the default until
+E6 gives the GPU compositor something to do.
+
+### What was measured, and where
+
+Target runtime probed directly in **macOS WKWebView** — the engine Tauri
+actually uses — with a throwaway Swift harness (`wkrun.swift`) that hosts a
+bare `WKWebView` and posts results back over a script message handler. Machine:
+macOS 26.5.2 (25F84), Safari/WebKit 26.5.2, Apple Silicon, WebGL renderer
+reported as "Apple GPU". Scene: two 1080p30 H.264 layers, top layer scaled
+0.55 / rotated 8° / alpha 0.85, into a 1920×1080 target, paced at 30 fps.
+
+**WKWebView supports WebCodecs.** `VideoDecoder`, `VideoEncoder`,
+`AudioDecoder`, `AudioEncoder`, `VideoFrame`, `EncodedVideoChunk` all present;
+`VideoDecoder.isConfigSupported` returns true for `avc1.42E01E`, `avc1.640028`,
+`hvc1.1.6.L120.90` and `vp09.00.10.08` at 1080p, and `VideoEncoder` for
+`avc1.640028`. Absent: `ImageDecoder`, `MediaStreamTrackProcessor`,
+`SharedArrayBuffer` (`crossOriginIsolated` false), `performance.memory`.
+WebGL2 and WebGPU are both available. So availability is not the reason
+WebCodecs loses — it is available, and it still is not worth taking yet.
+
+| WKWebView, 2×1080p30 + transform | C: `<video>`+canvas2d (no dep) | A: PixiJS 8 **as shipped** | A′: PixiJS 8 **+ UA fix** | B: WebAV `MP4Clip`+canvas2d |
+| -------------------------------- | ------------------------------ | -------------------------- | ------------------------- | --------------------------- |
+| startup → first composited frame | 53 ms                          | 481 ms                     | 139 ms                    | 79 ms                       |
+| sustained fps (target 30)        | 30.0, 0 late                   | **20.2, 43 late**          | 30.0, 0 late              | 30.0, 0 late                |
+| composite mean / p95             | 0.5 / 1 ms                     | **24.3 / 25 ms**           | 0.4 / 1 ms                | 0.1 / 1 ms                  |
+| random seek mean / p95           | 12.2 / 22 ms                   | 63 / 73 ms                 | 15.1 / 27 ms              | **65.1 / 125 ms**           |
+| ±1 frame step, mean              | 2.2 ms                         | 52.8 ms                    | 3.4 ms                    | ~0 ms (prefetched)          |
+| peak WebContent RSS              | 37 MB                          | 354 MB                     | 61 MB                     | 93 MB (10 s clip)           |
+| bundle cost (min+gzip)           | 0                              | 157.2 kB                   | 157.2 kB                  | 45.7 kB                     |
+
+### The finding that decided it
+
+PixiJS **as shipped is 12× too slow in our runtime, for a reason that is one
+config line to fix.** Pixi's `glUploadVideoResource` passes
+`forceAllocation = isSafari()`, and `isSafari()` is a userAgent regex
+(`/^((?!chrome|android).)*safari/i`). Tauri's WKWebView reports
+`Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)`
+— **no `Safari` token** — because wry only calls `setCustomUserAgent` when
+`user_agent` is configured, and `src-tauri/tauri.conf.json` does not set it. So
+Pixi's WebKit workaround never fires and every frame uploads via
+`texSubImage2D`.
+
+Measured on raw WebGL, uploading both 1080p layers, drawing them and forcing
+completion with a 1-pixel `readPixels` each frame:
+
+| WKWebView, per frame, 2 layers    | Chromium (headless, SwiftShader) |
+| --------------------------------- | -------------------------------- |
+| `texImage2D(video)` — 0.69 ms     | 10.02 ms                         |
+| `texSubImage2D(video)` — 28.92 ms | 10.16 ms                         |
+
+A **42×** cliff in WebKit; no difference at all in Chromium. This is why
+Chromium benchmarking would have missed it entirely. Pinning
+`forceAllocation = true` on Pixi's video uploader took the same scene from
+25.64 ms to 0.59 ms per frame; setting a UA that carries a `Safari` token gets
+the same result without touching Pixi internals.
+
+Two further measurements removed the usual argument for (B):
+
+- **The frame source is not the bottleneck.** In the same hand-rolled WebGL
+  compositor, uploading from `<video>` cost 1.82 ms/frame and uploading from a
+  WebCodecs `VideoFrame` cost 1.86 ms/frame. WebCodecs buys frame-exactness,
+  not throughput.
+- **WebAV's decoded-frame cache does not scale for free.** Walking a 60 s 1080p
+  clip end to end: `MP4Clip` peaked at 235 MB RSS, the `<video>` element at
+  48 MB — per clip, on a multi-track timeline.
+
+### Consequences
+
+- E6 is unblocked on its own terms: `@clypra-studio/engine` gets the `pixi.js@^8`
+  it peer-depends on, and the compositor holds 30 fps at 1080p with two layers
+  and 24 ms of headroom per frame.
+- **We must own the WKWebView upload workaround, and guard it.** Preferred form:
+  set `app.windows[].userAgent` in `src-tauri/tauri.conf.json` to a string that
+  ends in a `Safari/605.1.15` token plus our own product token (validated: 0.4 ms
+  composite, 30 fps, 61 MB). It is public config rather than Pixi internals — but
+  it is _implicit_, so it needs a comment pointing here and a startup assertion
+  that fails loudly if a Pixi frame costs more than a frame budget. The
+  alternative (overriding `renderer.texture._uploads.video` to force allocation)
+  is explicit but reaches into a private field.
+- Preview stays a **fallback ladder**, per ADR-009: no WebGL2 → current
+  `<video>`+canvas path; WebGL2 → Pixi compositor; neither ever becomes the
+  export truth. ffmpeg `filter_complex` remains authoritative (ADR-009 is
+  unchanged by this ADR).
+- No dependency was added by the spike. `package.json` and `package-lock.json`
+  are byte-identical to before it; pixi.js, `@webav/av-cliper` and mp4box were
+  installed in a scratch project outside the repo and removed with it.
+
+### What was NOT measured (and must not be reported as if it were)
+
+- **Frame fidelity.** Latency and throughput were measured; whether the
+  `<video>` element lands on the _exact_ frame the timeline asked for was not.
+  That is the real argument for WebCodecs and it is still open.
+- **The shipped binary.** All WKWebView numbers come from a bare `WKWebView`
+  in `wkrun.swift` served over `http://127.0.0.1`, not from SundayEdit.app over
+  the `tauri://` protocol. The UA claim is read from wry 0.55.1 + our config, not
+  observed in the running app — verify it in the app before relying on it.
+- **`@clypra-studio/engine` itself.** Not installed, not benchmarked. Its 233
+  effects are filters over render textures, but nothing here proves they keep
+  the fast upload path.
+- **Chromium as a performance reference.** The Playwright run was headless with
+  SwiftShader (software GL); its absolute numbers mean nothing. It is cited
+  only to show the `texSubImage2D` cliff is WebKit-specific.
+- **Windows/Linux.** WebView2 and WebKitGTK were not probed at all.
+- **Audio.** Out of scope here; the clock and A/V drift belong to E2.
+- Timing granularity: WebKit clamps `performance.now()` to ~1 ms, so sub-ms
+  figures are means over 90–150 frames, never single-frame truth.
+
+### What would change this decision
+
+1. **E6 turns out not to need Pixi** — if the curated effect subset is small
+   enough to express as our own shaders, control C (no dependency, 0.5 ms
+   composite, 37 MB) beats both candidates on every axis measured here, and the
+   157 kB and the WebKit workaround buy nothing. _On the evidence in this ADR,
+   preview performance alone does not justify a GPU compositor; E6 does._
+2. **Frame-exactness fails a real test** — if `<video>` seeking proves not
+   frame-accurate for our footage, WebCodecs becomes the frame source feeding
+   the same Pixi compositor (measured: same upload cost), with a bounded frame
+   cache instead of `MP4Clip`'s.
+3. **Pixi fixes `isSafari()` upstream**, or starts detecting WebKit by feature
+   rather than UA — then the workaround is deleted and the guard test becomes a
+   regression test for the upstream fix.
+4. **We ship to Windows/Linux** — WebView2 and WebKitGTK must be measured
+   before the capability gate opens there.
+5. **HDR / >2 layers / 4K** — everything here is 1080p, SDR, two layers.
+
 ## ADR-011 — Protected gaps ride on `TimelineItem.locked`; no gap entity
 
 **Status:** Accepted (2026-08-10) — OSS-integrasjonsprogram E3

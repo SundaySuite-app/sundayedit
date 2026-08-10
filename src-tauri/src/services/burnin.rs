@@ -417,6 +417,135 @@ mod tests {
         }
     }
 
+    // ── Karaoke burn-in (E4a) ──────────────────────────────────────────────
+
+    /// Build a one-video project whose single caption carries per-word timing.
+    fn karaoke_project(video_path: &str) -> crate::model::Project {
+        use crate::model::{Caption, ExportConfig, Project, ProjectMeta, Style, Word};
+        Project {
+            id: "p".into(),
+            name: "karaoke".into(),
+            video_path: video_path.into(),
+            video_content_hash: "h".into(),
+            video_duration_ms: 4_000,
+            video_width: 320,
+            video_height: 180,
+            video_fps: 25.0,
+            audio_wav_path: None,
+            language: "no".into(),
+            default_style: Style::broadcast_news(),
+            context_description: None,
+            captions: vec![Caption {
+                id: "c1".into(),
+                start_ms: 200,
+                end_ms: 3_600,
+                words: vec![
+                    Word::new("Nåde", 200, 900, 96.0),
+                    Word::new("og", 950, 1_400, 88.0),
+                    // Deliberately low confidence — exercises the tint branch.
+                    Word::new("fred", 1_500, 3_600, 31.0),
+                ],
+                speaker_id: None,
+                style_id: None,
+                notes: None,
+                ai_generated: true,
+                last_edited_at: 0,
+                track_id: None,
+            }],
+            speakers: vec![],
+            glossary: vec![],
+            clips: vec![],
+            talk_summary: None,
+            export_config: ExportConfig {
+                karaoke: Some(crate::services::karaoke::KaraokeOptions {
+                    enabled: true,
+                    style: crate::services::karaoke::KaraokeStyle::Sweep,
+                    confidence_tint: true,
+                    ..Default::default()
+                }),
+                ..ExportConfig::default()
+            },
+            project_meta: ProjectMeta::default(),
+            created_at: 0,
+            updated_at: 0,
+            media: vec![],
+            tracks: vec![],
+            timeline_items: vec![],
+        }
+    }
+
+    /// Live end-to-end: libass must ACCEPT our karaoke ASS. The `\k`/`\kf`
+    /// grammar is not validated by any unit test — a malformed tag makes libass
+    /// drop the line (or the whole script) SILENTLY, and ffmpeg still exits 0
+    /// with a clean-looking video. So this test drives the real
+    /// `burnin::render` (which writes the sidecar from `export::write_ass`,
+    /// i.e. the production path) over a synthesised source and proves ffmpeg
+    /// accepted the filtergraph and produced a video stream.
+    ///
+    /// Visual correctness (which word is lit at which frame) is asserted
+    /// structurally by the ASS snapshot tests in `services::export` plus the
+    /// timing invariants in `services::karaoke` — not by sampling pixels.
+    ///
+    /// Synthesises its own input, so no sample asset is needed:
+    /// ```sh
+    /// cargo test karaoke_captions_burn_in_with_real_ffmpeg -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs ffmpeg/ffprobe on PATH"]
+    fn karaoke_captions_burn_in_with_real_ffmpeg() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x180:rate=25:duration=4",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+            ])
+            .arg(&src)
+            .status()
+            .expect("spawn ffmpeg");
+        assert!(status.success(), "could not synthesise the test source");
+
+        let project = karaoke_project(&src.to_string_lossy());
+        // Premise: the sidecar this render writes really is karaoke'd.
+        let ass = crate::services::export::write_ass(&project);
+        assert!(
+            ass.contains("{\\kf"),
+            "the project must render karaoke tags: {ass}"
+        );
+
+        let out = dir.path().join("burned.mp4");
+        render(
+            &project,
+            &out,
+            &BurnInOptions {
+                encoder: Encoder::Cpu,
+                ..Default::default()
+            },
+        )
+        .expect("ffmpeg burn-in of a karaoke caption succeeds");
+        assert!(out.exists(), "burn-in wrote {}", out.display());
+
+        let probe = Command::new("ffprobe")
+            .args(["-v", "error", "-print_format", "json", "-show_streams"])
+            .arg(&out)
+            .output()
+            .expect("spawn ffprobe");
+        let meta =
+            crate::services::video::parse_ffprobe_json(&String::from_utf8_lossy(&probe.stdout))
+                .expect("ffprobe json parses");
+        assert!(
+            meta.video_codec.is_some(),
+            "the burned output must carry a video stream"
+        );
+        assert_eq!(meta.width, 320);
+        assert_eq!(meta.height, 180);
+    }
+
     // helper: value following a flag in the arg vector
     fn arg_after(args: &[String], flag: &str) -> Option<String> {
         args.iter()

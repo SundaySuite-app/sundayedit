@@ -33,6 +33,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 
 import type { Project } from "@/lib/bindings/Project";
 import { useT } from "@/lib/i18n";
+import { KaraokeOverlay } from "./KaraokeOverlay";
 import { isUserGesture } from "./mediaSync";
 import {
   reconcileMedia,
@@ -343,8 +344,10 @@ export function MediaPlayer({
         className="grid h-full w-full place-items-center overflow-hidden"
         style={stageStyle}
       >
-        {/* Captions are the timeline's job; this is a driven preview surface,
-            not delivered media, so it carries no <track>. */}
+        {/* This is a driven preview surface, not delivered media, so the
+            <video> itself carries no <track>. The karaoke overlay below is a
+            separate DOM layer sharing this grid cell (E4a) — off by default,
+            and rendered only when the project's Style has karaoke enabled. */}
         <video
           ref={videoRef}
           // In NLE mode the rAF loop sets `.src` imperatively (per active clip),
@@ -365,6 +368,7 @@ export function MediaPlayer({
           onPause={onMaybeUserGesture}
           onSeeking={onMaybeUserGesture}
         />
+        <KaraokeOverlay project={project} />
       </div>
       {unavailable && (
         <div

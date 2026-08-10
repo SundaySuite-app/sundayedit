@@ -292,6 +292,18 @@ pub struct ExportConfig {
     pub caption_background: String,
     /// Maximum characters per caption line: 32 | 42 | 52
     pub max_chars_per_line: i32,
+    /// Karaoke (per-word `\k` highlighting) settings for the ASS sidecar AND
+    /// every burn-in path. Persisted here — not on `Style` — because this is
+    /// the container that already carries burn-in preferences, so the sidecar
+    /// export, the final render and the preview proxy all read one value and
+    /// cannot disagree.
+    ///
+    /// `Option` + `#[serde(default)]` so pre-E4a `.sundayedit` files (and the
+    /// existing frontend `ExportConfig` literals) stay valid; `None` means the
+    /// same thing as `KaraokeOptions::disabled()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub karaoke: Option<crate::services::karaoke::KaraokeOptions>,
 }
 
 impl Default for ExportConfig {
@@ -303,6 +315,7 @@ impl Default for ExportConfig {
             caption_color: "white".into(),
             caption_background: "semitransparent".into(),
             max_chars_per_line: 42,
+            karaoke: None,
         }
     }
 }

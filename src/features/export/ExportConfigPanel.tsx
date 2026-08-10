@@ -13,7 +13,13 @@
 
 import { Settings2 } from "lucide-react";
 
-import type { ExportConfig, Project } from "@/lib/bindings";
+import type {
+  ExportConfig,
+  KaraokeOptions,
+  KaraokeStyle,
+  Project,
+} from "@/lib/bindings";
+import { effectiveKaraokeOptions } from "./karaokeOptions";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/cn";
 
@@ -29,9 +35,18 @@ function patch(project: Project, delta: Partial<ExportConfig>): Project {
   };
 }
 
+function patchKaraoke(
+  project: Project,
+  delta: Partial<KaraokeOptions>,
+): Project {
+  const current = effectiveKaraokeOptions(project.export_config);
+  return patch(project, { karaoke: { ...current, ...delta } });
+}
+
 export function ExportConfigPanel({ project, onProjectChange }: Props) {
   const t = useT();
   const cfg = project.export_config;
+  const karaoke = effectiveKaraokeOptions(cfg);
 
   return (
     <div className="space-y-6 p-4">
@@ -84,6 +99,80 @@ export function ExportConfigPanel({ project, onProjectChange }: Props) {
         <p className="mt-1 pl-7 text-[10px] text-[var(--color-fg-muted)]">
           {t("exportConfigBurnInHint")}
         </p>
+      </section>
+
+      {/* ── Karaoke (E4a) — per-word `\k`/`\kf` highlighting. Read/written on
+          `export_config.karaoke` so the sidecar `.ass`, the final burn-in
+          and the live preview overlay all agree (KaraokeOptions doc). ── */}
+      <section>
+        <label className="flex cursor-pointer items-center gap-3">
+          <input
+            type="checkbox"
+            checked={karaoke.enabled}
+            onChange={(e) =>
+              onProjectChange(
+                patchKaraoke(project, { enabled: e.target.checked }),
+              )
+            }
+            className="h-4 w-4 rounded border-[var(--color-border)] accent-[var(--color-accent-500)]"
+          />
+          <span className="text-[var(--text-ui-sm)]">
+            {t("exportConfigKaraokeLabel")}
+          </span>
+        </label>
+        <p className="mt-1 pl-7 text-[10px] text-[var(--color-fg-muted)]">
+          {t("exportConfigKaraokeHint")}
+        </p>
+
+        {karaoke.enabled && (
+          <div className="mt-3 pl-7">
+            <label className="mb-1.5 block text-[var(--text-ui-xs)] font-semibold uppercase tracking-wider text-[var(--color-fg-subtle)]">
+              {t("exportConfigKaraokeStyleLabel")}
+            </label>
+            <div className="flex gap-2">
+              {(["highlight", "sweep"] as KaraokeStyle[]).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() =>
+                    onProjectChange(patchKaraoke(project, { style: s }))
+                  }
+                  className={cn(
+                    "rounded-md border px-3 py-1.5 text-[var(--text-ui-xs)] transition-colors",
+                    karaoke.style === s
+                      ? "border-[var(--color-accent-500)] bg-[var(--color-accent-500)]/12 text-[var(--color-accent-300)]"
+                      : "border-[var(--color-border)] hover:border-[var(--color-border-strong)]",
+                  )}
+                >
+                  {s === "highlight"
+                    ? t("exportConfigKaraokeStyleHighlight")
+                    : t("exportConfigKaraokeStyleSweep")}
+                </button>
+              ))}
+            </div>
+
+            <label className="mt-3 flex cursor-pointer items-center gap-3">
+              <input
+                type="checkbox"
+                checked={karaoke.confidence_tint}
+                onChange={(e) =>
+                  onProjectChange(
+                    patchKaraoke(project, {
+                      confidence_tint: e.target.checked,
+                    }),
+                  )
+                }
+                className="h-4 w-4 rounded border-[var(--color-border)] accent-[var(--color-accent-500)]"
+              />
+              <span className="text-[var(--text-ui-sm)]">
+                {t("exportConfigKaraokeTintLabel")}
+              </span>
+            </label>
+            <p className="mt-1 pl-7 text-[10px] text-[var(--color-fg-muted)]">
+              {t("exportConfigKaraokeTintHint")}
+            </p>
+          </div>
+        )}
       </section>
 
       {/* ── Caption size ── */}

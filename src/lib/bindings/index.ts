@@ -75,6 +75,13 @@ export type { WaveformData }     from "./WaveformData";
 export type { WhisperModel }     from "./WhisperModel";
 export type { WhisperModelInfo } from "./WhisperModelInfo";
 export type { Word }             from "./Word";
+// Karaoke (E4a) — the SHARED per-word timing shape. `KaraokeWord`/`WordState`
+// come from src-tauri/src/services/karaoke.rs, which is the single source of
+// truth the ASS `\k` writer AND the canvas overlay both derive from.
+export type { KaraokeWord }      from "./KaraokeWord";
+export type { WordState }        from "./WordState";
+export type { KaraokeStyle }     from "./KaraokeStyle";
+export type { KaraokeOptions }   from "./KaraokeOptions";
 
 /** Error shape returned by every Tauri command (see error.rs). */
 export interface AppError {

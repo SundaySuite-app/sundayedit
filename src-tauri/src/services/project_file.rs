@@ -582,6 +582,11 @@ mod tests {
                 caption_color: "yellow".into(),
                 caption_background: "black".into(),
                 max_chars_per_line: 52,
+                karaoke: Some(crate::services::karaoke::KaraokeOptions {
+                    enabled: true,
+                    style: crate::services::karaoke::KaraokeStyle::Sweep,
+                    ..Default::default()
+                }),
             },
             project_meta: ProjectMeta {
                 title: "Grace: A Sermon".into(),
@@ -786,6 +791,16 @@ mod tests {
         assert_eq!(loaded.export_config.format, "vtt");
         assert_eq!(loaded.export_config.caption_color, "yellow");
         assert_eq!(loaded.export_config.max_chars_per_line, 52);
+        // Karaoke settings persist with the rest of the burn-in preferences —
+        // otherwise the sidecar, the render and the preview proxy would drift
+        // apart across a save/open cycle (E4a).
+        let k = loaded
+            .export_config
+            .karaoke
+            .as_ref()
+            .expect("karaoke options survive the round trip");
+        assert!(k.enabled);
+        assert_eq!(k.style, crate::services::karaoke::KaraokeStyle::Sweep);
         assert_eq!(loaded.project_meta.title, "Grace: A Sermon");
         assert_eq!(
             loaded.project_meta.proper_nouns,
@@ -833,6 +848,10 @@ mod tests {
         // Should default gracefully
         assert_eq!(loaded.export_config.format, "srt");
         assert!(!loaded.export_config.burn_in);
+        assert!(
+            loaded.export_config.karaoke.is_none(),
+            "a pre-E4a file must open with karaoke OFF, not silently enabled"
+        );
         assert_eq!(loaded.project_meta.title, "");
         assert_eq!(loaded.project_meta.language, "auto");
     }

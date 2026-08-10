@@ -346,6 +346,15 @@ const en = {
   stylePosition: "Position",
   styleBackgroundBox: "Background box",
   styleBackgroundToggle: "Show a semi-transparent box behind the text",
+  exportConfigKaraokeLabel: "Karaoke highlighting",
+  exportConfigKaraokeHint:
+    "Highlights each word as it's spoken, in the preview and in ASS/burn-in export.",
+  exportConfigKaraokeStyleLabel: "Fill style",
+  exportConfigKaraokeStyleHighlight: "Highlight",
+  exportConfigKaraokeStyleSweep: "Sweep",
+  exportConfigKaraokeTintLabel: "Tint by confidence",
+  exportConfigKaraokeTintHint:
+    "Colours low-confidence words the same way the editor does, so you can spot them during playback.",
 
   // ── Caption editor ──────────────────────────────────────────────────────
   editorUndo: "Undo (⌘Z)",
@@ -845,6 +854,15 @@ const no: Catalog = {
   stylePosition: "Plassering",
   styleBackgroundBox: "Bakgrunnsboks",
   styleBackgroundToggle: "Vis halvgjennomsiktig boks bak teksten",
+  exportConfigKaraokeLabel: "Slå på karaoke-fremheving",
+  exportConfigKaraokeHint:
+    "Fremhever hvert ord idet det sies, i forhåndsvisningen og i ASS/brenn-inn-eksport.",
+  exportConfigKaraokeStyleLabel: "Fyllstil",
+  exportConfigKaraokeStyleHighlight: "Fremhev",
+  exportConfigKaraokeStyleSweep: "Feiing",
+  exportConfigKaraokeTintLabel: "Fargelegg etter sikkerhet",
+  exportConfigKaraokeTintHint:
+    "Farger ord med lav sikkerhet på samme måte som redigeringsvinduet, så du oppdager dem under avspilling.",
 
   // ── Caption editor ──────────────────────────────────────────────────────
   editorUndo: "Angre (⌘Z)",
@@ -1319,6 +1337,15 @@ const sv: Catalog = {
   stylePosition: "Position",
   styleBackgroundBox: "Bakgrundsruta",
   styleBackgroundToggle: "Visa en halvgenomskinlig ruta bakom texten",
+  exportConfigKaraokeLabel: "Aktivera karaokemarkering",
+  exportConfigKaraokeHint:
+    "Markerar varje ord när det sägs, i förhandsvisningen och i ASS/inbränd export.",
+  exportConfigKaraokeStyleLabel: "Fyllstil",
+  exportConfigKaraokeStyleHighlight: "Markera",
+  exportConfigKaraokeStyleSweep: "Svep",
+  exportConfigKaraokeTintLabel: "Färgtona efter säkerhet",
+  exportConfigKaraokeTintHint:
+    "Färgar ord med låg säkerhet på samma sätt som redigeraren, så du upptäcker dem under uppspelning.",
   editorUndo: "Ångra (⌘Z)",
   editorRedo: "Gör om (⌘⇧Z)",
   editorFixTerms: "Rätta termer",
@@ -1773,6 +1800,15 @@ const da: Catalog = {
   stylePosition: "Position",
   styleBackgroundBox: "Baggrundsboks",
   styleBackgroundToggle: "Vis en halvgennemsigtig boks bag teksten",
+  exportConfigKaraokeLabel: "Aktivér karaokefremhævning",
+  exportConfigKaraokeHint:
+    "Fremhæver hvert ord, mens det siges, i forhåndsvisningen og i ASS/brænd-ind-eksport.",
+  exportConfigKaraokeStyleLabel: "Udfyldningsstil",
+  exportConfigKaraokeStyleHighlight: "Fremhæv",
+  exportConfigKaraokeStyleSweep: "Fejning",
+  exportConfigKaraokeTintLabel: "Farvelæg efter sikkerhed",
+  exportConfigKaraokeTintHint:
+    "Farver ord med lav sikkerhed på samme måde som redigeringsvinduet, så du opdager dem under afspilning.",
   editorUndo: "Fortryd (⌘Z)",
   editorRedo: "Gentag (⌘⇧Z)",
   editorFixTerms: "Ret termer",
@@ -2231,6 +2267,15 @@ const de: Catalog = {
   stylePosition: "Position",
   styleBackgroundBox: "Hintergrundfeld",
   styleBackgroundToggle: "Ein halbtransparentes Feld hinter dem Text anzeigen",
+  exportConfigKaraokeLabel: "Karaoke-Hervorhebung aktivieren",
+  exportConfigKaraokeHint:
+    "Hebt jedes Wort hervor, während es gesprochen wird – in der Vorschau und im ASS-/Einbrennen-Export.",
+  exportConfigKaraokeStyleLabel: "Füllstil",
+  exportConfigKaraokeStyleHighlight: "Hervorheben",
+  exportConfigKaraokeStyleSweep: "Wischen",
+  exportConfigKaraokeTintLabel: "Nach Konfidenz einfärben",
+  exportConfigKaraokeTintHint:
+    "Färbt Wörter mit niedriger Konfidenz wie im Editor ein, damit sie bei der Wiedergabe auffallen.",
   editorUndo: "Rückgängig (⌘Z)",
   editorRedo: "Wiederherstellen (⌘⇧Z)",
   editorFixTerms: "Begriffe korrigieren",
@@ -2692,6 +2737,15 @@ const fr: Catalog = {
   stylePosition: "Position",
   styleBackgroundBox: "Cadre d'arrière-plan",
   styleBackgroundToggle: "Afficher un cadre semi-transparent derrière le texte",
+  exportConfigKaraokeLabel: "Activer la surbrillance karaoké",
+  exportConfigKaraokeHint:
+    "Met en surbrillance chaque mot au moment où il est prononcé, dans l'aperçu et lors de l'export ASS/incrusté.",
+  exportConfigKaraokeStyleLabel: "Style de remplissage",
+  exportConfigKaraokeStyleHighlight: "Surbrillance",
+  exportConfigKaraokeStyleSweep: "Balayage",
+  exportConfigKaraokeTintLabel: "Teinter selon la confiance",
+  exportConfigKaraokeTintHint:
+    "Colore les mots à faible confiance comme dans l'éditeur, pour les repérer pendant la lecture.",
   editorUndo: "Annuler (⌘Z)",
   editorRedo: "Rétablir (⌘⇧Z)",
   editorFixTerms: "Corriger les termes",
@@ -3150,6 +3204,15 @@ const pl: Catalog = {
   stylePosition: "Pozycja",
   styleBackgroundBox: "Tło napisu",
   styleBackgroundToggle: "Pokaż półprzezroczyste tło za tekstem",
+  exportConfigKaraokeLabel: "Włącz podświetlanie karaoke",
+  exportConfigKaraokeHint:
+    "Podświetla każde słowo w momencie jego wypowiedzenia, w podglądzie i w eksporcie ASS/wypalonym.",
+  exportConfigKaraokeStyleLabel: "Styl wypełnienia",
+  exportConfigKaraokeStyleHighlight: "Podświetlenie",
+  exportConfigKaraokeStyleSweep: "Zamiatanie",
+  exportConfigKaraokeTintLabel: "Zabarw według pewności",
+  exportConfigKaraokeTintHint:
+    "Koloruje słowa o niskiej pewności tak samo jak edytor, dzięki czemu łatwo je zauważyć podczas odtwarzania.",
   editorUndo: "Cofnij (⌘Z)",
   editorRedo: "Ponów (⌘⇧Z)",
   editorFixTerms: "Popraw terminy",
