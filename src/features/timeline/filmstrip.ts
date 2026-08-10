@@ -317,6 +317,21 @@ export function __resetFilmstripCacheForTests() {
 
 const OVERSCAN_PX = 200;
 
+/** One tile image to paint, already resolved to what actually exists. */
+export interface FilmstripPaint {
+  /** The DISPLAYED tile's key — stable React key, unique within the list. */
+  key: string;
+  /** The displayed tile's own grid address (a stand-in reports the ancestor's). */
+  tier: number;
+  index: number;
+  /** Screen px relative to the clip box's left edge, for the tile's OWN range. */
+  leftPx: number;
+  widthPx: number;
+  url: string;
+  /** True when this is a coarse ancestor standing in for a still-loading tile. */
+  stale: boolean;
+}
+
 /**
  * React hook: the filmstrip tiles to paint across a video clip box right now.
  * Empty off-Tauri (browser/e2e) or for non-video media — `ClipBox` falls back
@@ -329,14 +344,14 @@ export function useFilmstripTiles(
   pxPerMs: number,
   visStartMs: number,
   visEndMs: number,
-): {
-  key: string;
-  leftPx: number;
-  widthPx: number;
-  url: string;
-  stale: boolean;
-}[] {
-  const [, forceRender] = useReducer((n: number) => n + 1, 0);
+): FilmstripPaint[] {
+  // Advances every time one of THIS clip's tiles settles. It has to be a real
+  // dependency of the paint list below, not just a re-render trigger: the tile
+  // cache lives OUTSIDE React, so none of the geometric inputs (`media`,
+  // `wanted`, `pxPerMs`, `item`) change when a tile becomes available. A memo
+  // keyed only on those keeps handing back the pre-load answer — the strip
+  // stays blank until an unrelated scroll or edit happens to invalidate it.
+  const [cacheEpoch, bumpCacheEpoch] = useReducer((n: number) => n + 1, 0);
 
   const wanted = useMemo(() => {
     if (!media || media.kind !== "video" || !isTauri()) return [];
@@ -372,7 +387,7 @@ export function useFilmstripTiles(
     let cancelled = false;
     for (const w of wanted) {
       void requestFilmstripTile(media!, w.tier, w.index).then(() => {
-        if (!cancelled) forceRender();
+        if (!cancelled) bumpCacheEpoch();
       });
     }
     return () => {
@@ -388,37 +403,43 @@ export function useFilmstripTiles(
       // resolve readiness through the same cache key shape directly.
       return cache.get(`${media.id}:${key}`)?.status === "ready";
     });
-    const out: {
-      key: string;
-      leftPx: number;
-      widthPx: number;
-      url: string;
-      stale: boolean;
-    }[] = [];
+    const out: FilmstripPaint[] = [];
+    // A coarse ancestor covers SEVERAL of the wanted tiles at once, so the same
+    // stand-in is selected by each of them. Paint it once: repeating it would
+    // stack its opacity into a visible bright band.
+    const painted = new Set<string>();
     for (const s of selected) {
-      if (!s.displayKey) continue;
-      // Parse the display tile's own tier/index back out of its key so its
-      // screen rect (and cache lookup) use ITS range, not the wanted tile's.
+      if (!s.displayKey || painted.has(s.displayKey)) continue;
+      // Parse the display tile's own tier/index back out of its key: an
+      // ancestor's JPEG holds 2^n× the source range of the tile it stands in
+      // for, so it must be laid out at ITS OWN rect. Squeezing it into the
+      // wanted tile's narrower slot would show the wrong frames at the wrong
+      // positions — blocky is fine, misplaced is not. The clip box's
+      // `overflow-hidden` trims whatever hangs past the edges.
       const m = /^z(\d+)i(\d+)$/.exec(s.displayKey);
       if (!m) continue;
       const dTier = Number(m[1]);
       const dIndex = Number(m[2]);
       const url = tileUrl(media.id, dTier, dIndex);
       if (!url) continue;
+      painted.add(s.displayKey);
       const [dStart, dEnd] = tileRangeMs(dTier, dIndex);
       const { leftPx, widthPx } = tileScreenRect(
         item,
-        { startMs: s.startMs, endMs: s.endMs },
+        { startMs: dStart, endMs: dEnd },
         pxPerMs,
       );
       out.push({
-        key: s.key,
+        key: s.displayKey,
+        tier: dTier,
+        index: dIndex,
         leftPx,
         widthPx,
         url,
-        stale: s.stale || dStart !== s.startMs || dEnd !== s.endMs,
+        stale: s.displayKey !== s.key,
       });
     }
     return out;
-  }, [media, wanted, pxPerMs, item]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [media, wanted, pxPerMs, item, cacheEpoch]);
 }

@@ -37,5 +37,36 @@ round-trip needs the native app (`npm run tauri dev`) and a real video file.
 | N6  | Track flags in export     | Disable one track, mute another, solo an audio track; export.                                       | Disabled track absent from the picture, muted track silent, solo isolates audio — export matches the flag state.                                    | ☐      |
 | N7  | Remove-track/media guards | Try removing a track that still holds clips, and a media item still referenced by the timeline.     | Both are rejected with a clear surfaced message (no silent no-op, no crash); removal succeeds after the references are gone.                        | ☐      |
 
+## GPU preview + clip effects — E6 (real WebKit only)
+
+The compositor cannot run in the automated suite at all: jsdom has no WebGL2
+and Playwright runs headless Chromium, so **every claim ADR-010 makes about
+performance is only proven inside the real macOS WKWebView**. These rows are
+the proof. Run them in `npm run tauri dev` (or a built app) on a real video.
+
+| #   | Area                     | What to do                                                                                                        | Expected                                                                                                                                                             | Status |
+| --- | ------------------------ | ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| E6a | User agent applied       | Open the devtools console in the running app and read `navigator.userAgent`.                                      | It ends with `Version/17.0 Safari/605.1.15 SundayEdit` — i.e. wry actually applied `tauri.macos.conf.json`. If not, the compositor will be ~42× slower per frame.    | ☐      |
+| E6b | Flag off = no change     | With the GPU preview OFF (default), play, scrub and shuttle a project.                                            | The preview behaves exactly as in v0.7.0. No canvas in the DOM, no `pixi` chunk in the network panel.                                                                | ☐      |
+| E6c | Flag on, healthy machine | Settings → Preview → enable the GPU compositor. Play a 1080p clip.                                                | The picture keeps playing (now drawn on a canvas), audio unaffected, karaoke captions still render ON TOP, and it holds 30 fps.                                      | ☐      |
+| E6d | Transform + effects live | With the flag ON, scale/move/rotate a clip and add brightness/contrast/saturation/black & white in the inspector. | The preview shows them immediately — this is the whole point of the compositor. Compare against an export of the same frame: same direction and roughly same amount. | ☐      |
+| E6e | Effects reach the export | With the flag OFF, add each curated effect and export.                                                            | The exported MP4 shows the effect (the export never depended on the preview path).                                                                                   | ☐      |
+| E6f | Fallback is invisible    | Force a failure (disable hardware acceleration, or run over a remote session) with the flag ON.                   | The preview falls back to `<video>` with no black frame and no crash; Settings shows the "unavailable" note and the checkbox stays where you left it.                | ☐      |
+| E6g | Toggle mid-session       | Turn the flag on and off a few times while playing.                                                               | No leaked WebGL contexts (the app keeps working after ~10 cycles), no audio glitch, playhead stays in sync.                                                          | ☐      |
+
+## Seam-round fixes — E8 (things the suite proved, that only a human can see)
+
+Each row below is a bug that WAS shipped in the E1–E6 work and is now fixed
+with a regression test. The tests prove the logic; these rows prove the pixels.
+Full write-up: `docs/OSS-PROGRAM-REPORT.md` §3.
+
+| #   | Area                       | What to do                                                                                      | Expected                                                                                                                                                                            | Status |
+| --- | -------------------------- | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| E8a | Filmstrip appears unaided  | Open a project with a video clip and DO NOTHING — don't scroll, zoom or edit.                   | Source frames fill the clip box within a couple of seconds, on their own. (Before the fix the paint list was memoized on inputs that never changed when a tile finished rendering.) | ☐      |
+| E8b | Coarse stand-in placement  | Zoom in quickly on a long clip and watch while the finer tiles render.                          | The placeholder is a blockier image in the RIGHT place — not the same image repeated and squeezed into each slot, and no bright band where several copies overlapped.               | ☐      |
+| E8c | "Preview is approximate"   | With the GPU flag ON: crop a clip; then stack two clips on two video tracks under the playhead. | A small badge bottom-left names what the preview is not drawing (crop / only the top clip). It DISAPPEARS again when the crop or the stack is removed.                              | ☐      |
+| E8d | Karaoke preview vs burn-in | Enable karaoke ("sweep"), burn in the same caption, and step a line frame by frame in both.     | The lit word changes on the SAME frame all the way through the line, not just on the first word — the `\k` ladder is cumulative, so a late drift is the failure mode.               | ☐      |
+| E8e | Ladder never costs export  | Export once while playing back, and once parked.                                                | Both files have identical resolution and bitrate — the preview quality ladder only ever touches the preview proxy.                                                                  | ☐      |
+
 Rows marked ☐ are P2c — see `docs/NEEDS-RICHARD.md` for what Richard needs to
 supply (model download, API keys, a real video) and the exact commands.

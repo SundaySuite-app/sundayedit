@@ -41,6 +41,16 @@ history lives in the git log and `docs/ARCHITECTURE.md`'s phase table.)
   in the UI.
 - NLE i18n completed: the media-bin/track/inspector keys translated across all
   7 locales (sv/da/de/fr/pl were falling back to English).
+- **Clip effects** — brightness, contrast, saturation and black & white, in the
+  Clip Inspector, undoable like every other edit. The list is a _curated
+  registry_: only effects the ffmpeg export can actually render are offerable,
+  and the panel shows the exact filter each clip will export with. Colour is
+  applied before geometry in the export chain (ADR-013).
+- **GPU preview compositor (experimental, off by default)** — Settings →
+  Preview turns on a PixiJS stage that finally shows a clip's transform and
+  effects live in the preview instead of only at export. Requires WebGL2 and
+  switches itself off, with an explanation, on machines that cannot run it;
+  with the flag off the preview is unchanged.
 
 ### Changed
 
@@ -50,10 +60,31 @@ history lives in the git log and `docs/ARCHITECTURE.md`'s phase table.)
   `validate_timeline` guarded by a 5000-clip stress test.
 - Dependencies: npm/cargo/actions minor-patch groups bumped; `quinn-proto`
   0.11.14 → 0.11.16 (RUSTSEC advisory); `zip` 2 → 4, `sqlx` 0.8 → 0.9,
-  `ts-rs` 11 → 12.
+  `ts-rs` 11 → 12; added `pixi.js` 8 (MIT, lazy-loaded — only fetched when the
+  GPU preview flag is on).
+- macOS builds now set a custom webview user agent that carries a `Safari`
+  token. PixiJS detects WebKit by user agent to pick its GPU upload path, and
+  without the token the preview compositor ran 42× slower per frame. macOS
+  only; the webview makes no external network requests, so nothing else sees
+  it. See `docs/DISTRIBUTION.md` and ADR-010's addendum.
 
-Gates: vitest 318 · cargo ~635 (clippy `-D warnings`) · Playwright 49/49 ·
-18 real-ffmpeg integration tests.
+- Seam-hardening round over the E1–E6 work (`docs/OSS-PROGRAM-REPORT.md`):
+  - The **filmstrip now appears on its own.** Its paint list was memoized on
+    inputs that never change when a tile finishes rendering, so the strip
+    stayed blank until an unrelated scroll or edit happened to invalidate it.
+  - While finer tiles render, the **coarse stand-in is drawn in the right
+    place** and once — it was being squeezed into each child's slot and
+    repeated per sibling, stacking its opacity into a bright band.
+  - The GPU preview now **says when it is approximate** (a cropped clip, a
+    stacked composite). The scene already computed this and nothing showed it,
+    so the preview drew those frames silently wrong until export.
+  - New executable mirror-parity guard: the Rust karaoke ladder, tile grid and
+    effect registry are run over an adversarial table, frozen to a fixture, and
+    replayed through the TypeScript mirrors — 199 assertions replacing three
+    "keep these in lockstep" comments. No drift was found.
+
+Gates: vitest 916 · cargo 792 (clippy `-D warnings`) · Playwright 58/58 ·
+29 real-ffmpeg integration tests.
 
 ## [0.7.0] — 2026-07-15
 

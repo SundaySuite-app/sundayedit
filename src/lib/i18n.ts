@@ -528,6 +528,32 @@ const en = {
   inspectorY: "Y",
   inspectorClose: "Close inspector",
 
+  // ── Curated clip effects (E6) ───────────────────────────────────────────
+  inspectorEffectsHeader: "Effects",
+  inspectorEffectsIntro:
+    "Only effects the export can render are offered — the preview approximates them, the exported file is the truth.",
+  inspectorEffectAmount: "Amount",
+  inspectorEffectNeutral: "No change at this value",
+  effectBrightness: "Brightness",
+  effectContrast: "Contrast",
+  effectSaturation: "Saturation",
+  effectGrayscale: "Black & white",
+
+  // ── GPU preview compositor (E6) ─────────────────────────────────────────
+  settingsPreviewTitle: "Preview",
+  settingsPreviewIntro:
+    "How the preview draws the picture while you edit. Nothing here changes the exported file.",
+  settingsGpuCompositor: "GPU preview compositor (experimental)",
+  settingsGpuCompositorNote:
+    "Draws the preview on the graphics card so clip transforms and effects show up live. Needs WebGL2; turns itself off if your machine can't run it. Off by default.",
+  settingsGpuUnavailableNoWebgl2:
+    "Unavailable on this machine: no hardware-accelerated WebGL2. The standard preview is being used.",
+  settingsGpuUnavailableFailed:
+    "The GPU preview failed to start and was switched off for this session. The standard preview is being used.",
+  previewApproximate: "Preview is approximate here",
+  previewApproxCrop: "crop is not drawn",
+  previewApproxStack: "only the top clip is drawn",
+
   // ── Import screen ───────────────────────────────────────────────────────
   importFilterName: "Video & audio",
   importFileMissing: "The file no longer exists.",
@@ -1000,6 +1026,32 @@ const no: Catalog = {
   inspectorY: "Y",
   inspectorClose: "Lukk inspektør",
 
+  // ── Kuraterte klippeffekter (E6) ────────────────────────────────────────
+  inspectorEffectsHeader: "Effekter",
+  inspectorEffectsIntro:
+    "Bare effekter eksporten kan gjengi tilbys — forhåndsvisningen er en tilnærming, eksportfila er fasiten.",
+  inspectorEffectAmount: "Mengde",
+  inspectorEffectNeutral: "Ingen endring ved denne verdien",
+  effectBrightness: "Lysstyrke",
+  effectContrast: "Kontrast",
+  effectSaturation: "Metning",
+  effectGrayscale: "Svart-hvitt",
+
+  // ── GPU-forhåndsvisning (E6) ────────────────────────────────────────────
+  settingsPreviewTitle: "Forhåndsvisning",
+  settingsPreviewIntro:
+    "Hvordan forhåndsvisningen tegner bildet mens du redigerer. Ingenting her endrer eksportfila.",
+  settingsGpuCompositor: "GPU-forhåndsvisning (eksperimentell)",
+  settingsGpuCompositorNote:
+    "Tegner forhåndsvisningen på skjermkortet, slik at transform og effekter vises direkte. Krever WebGL2; slår seg av selv om maskinen ikke klarer det. Av som standard.",
+  settingsGpuUnavailableNoWebgl2:
+    "Utilgjengelig på denne maskinen: ingen maskinvareakselerert WebGL2. Vanlig forhåndsvisning brukes.",
+  settingsGpuUnavailableFailed:
+    "GPU-forhåndsvisningen startet ikke og ble slått av for denne økta. Vanlig forhåndsvisning brukes.",
+  previewApproximate: "Forhåndsvisningen er omtrentlig her",
+  previewApproxCrop: "beskjæring vises ikke",
+  previewApproxStack: "bare det øverste klippet vises",
+
   // ── Import screen ───────────────────────────────────────────────────────
   importFilterName: "Video & lyd",
   importFileMissing: "Filen finnes ikke lenger.",
@@ -1470,6 +1522,32 @@ const sv: Catalog = {
   inspectorX: "X",
   inspectorY: "Y",
   inspectorClose: "Stäng inspektör",
+
+  // ── Kurerade klippeffekter (E6) ─────────────────────────────────────────
+  inspectorEffectsHeader: "Effekter",
+  inspectorEffectsIntro:
+    "Endast effekter som exporten kan återge erbjuds — förhandsvisningen är en approximation, exportfilen är facit.",
+  inspectorEffectAmount: "Mängd",
+  inspectorEffectNeutral: "Ingen ändring vid detta värde",
+  effectBrightness: "Ljusstyrka",
+  effectContrast: "Kontrast",
+  effectSaturation: "Mättnad",
+  effectGrayscale: "Svartvitt",
+
+  // ── GPU-förhandsvisning (E6) ────────────────────────────────────────────
+  settingsPreviewTitle: "Förhandsvisning",
+  settingsPreviewIntro:
+    "Hur förhandsvisningen ritar bilden medan du redigerar. Inget här ändrar exportfilen.",
+  settingsGpuCompositor: "GPU-förhandsvisning (experimentell)",
+  settingsGpuCompositorNote:
+    "Ritar förhandsvisningen på grafikkortet så att transform och effekter syns direkt. Kräver WebGL2; stänger av sig själv om datorn inte klarar det. Av som standard.",
+  settingsGpuUnavailableNoWebgl2:
+    "Otillgänglig på den här datorn: ingen hårdvaruaccelererad WebGL2. Vanlig förhandsvisning används.",
+  settingsGpuUnavailableFailed:
+    "GPU-förhandsvisningen startade inte och stängdes av för den här sessionen. Vanlig förhandsvisning används.",
+  previewApproximate: "Förhandsvisningen är ungefärlig här",
+  previewApproxCrop: "beskärning visas inte",
+  previewApproxStack: "bara det översta klippet visas",
   importFilterName: "Video & ljud",
   importFileMissing: "Filen finns inte längre.",
   importReadError: "Kunde inte läsa filen: {error}",
@@ -1932,6 +2010,32 @@ const da: Catalog = {
   inspectorX: "X",
   inspectorY: "Y",
   inspectorClose: "Luk inspektør",
+
+  // ── Kuraterede klipeffekter (E6) ────────────────────────────────────────
+  inspectorEffectsHeader: "Effekter",
+  inspectorEffectsIntro:
+    "Kun effekter, som eksporten kan gengive, tilbydes — forhåndsvisningen er en tilnærmelse, eksportfilen er facit.",
+  inspectorEffectAmount: "Mængde",
+  inspectorEffectNeutral: "Ingen ændring ved denne værdi",
+  effectBrightness: "Lysstyrke",
+  effectContrast: "Kontrast",
+  effectSaturation: "Mætning",
+  effectGrayscale: "Sort-hvid",
+
+  // ── GPU-forhåndsvisning (E6) ────────────────────────────────────────────
+  settingsPreviewTitle: "Forhåndsvisning",
+  settingsPreviewIntro:
+    "Hvordan forhåndsvisningen tegner billedet, mens du redigerer. Intet her ændrer eksportfilen.",
+  settingsGpuCompositor: "GPU-forhåndsvisning (eksperimentel)",
+  settingsGpuCompositorNote:
+    "Tegner forhåndsvisningen på grafikkortet, så transform og effekter vises direkte. Kræver WebGL2; slår sig selv fra, hvis maskinen ikke kan. Fra som standard.",
+  settingsGpuUnavailableNoWebgl2:
+    "Utilgængelig på denne maskine: ingen hardwareaccelereret WebGL2. Almindelig forhåndsvisning bruges.",
+  settingsGpuUnavailableFailed:
+    "GPU-forhåndsvisningen startede ikke og blev slået fra i denne session. Almindelig forhåndsvisning bruges.",
+  previewApproximate: "Forhåndsvisningen er omtrentlig her",
+  previewApproxCrop: "beskæring vises ikke",
+  previewApproxStack: "kun det øverste klip vises",
   importFilterName: "Video & lyd",
   importFileMissing: "Filen findes ikke længere.",
   importReadError: "Kunne ikke læse filen: {error}",
@@ -2403,6 +2507,32 @@ const de: Catalog = {
   inspectorX: "X",
   inspectorY: "Y",
   inspectorClose: "Inspektor schließen",
+
+  // ── Kuratierte Clip-Effekte (E6) ────────────────────────────────────────
+  inspectorEffectsHeader: "Effekte",
+  inspectorEffectsIntro:
+    "Angeboten werden nur Effekte, die der Export darstellen kann — die Vorschau ist eine Annäherung, die Exportdatei ist maßgeblich.",
+  inspectorEffectAmount: "Stärke",
+  inspectorEffectNeutral: "Bei diesem Wert keine Änderung",
+  effectBrightness: "Helligkeit",
+  effectContrast: "Kontrast",
+  effectSaturation: "Sättigung",
+  effectGrayscale: "Schwarzweiß",
+
+  // ── GPU-Vorschau (E6) ───────────────────────────────────────────────────
+  settingsPreviewTitle: "Vorschau",
+  settingsPreviewIntro:
+    "Wie die Vorschau das Bild beim Bearbeiten zeichnet. Nichts davon verändert die Exportdatei.",
+  settingsGpuCompositor: "GPU-Vorschau (experimentell)",
+  settingsGpuCompositorNote:
+    "Zeichnet die Vorschau auf der Grafikkarte, sodass Transformationen und Effekte sofort sichtbar sind. Benötigt WebGL2; schaltet sich selbst ab, wenn der Rechner das nicht kann. Standardmäßig aus.",
+  settingsGpuUnavailableNoWebgl2:
+    "Auf diesem Rechner nicht verfügbar: kein hardwarebeschleunigtes WebGL2. Es wird die normale Vorschau verwendet.",
+  settingsGpuUnavailableFailed:
+    "Die GPU-Vorschau ließ sich nicht starten und wurde für diese Sitzung abgeschaltet. Es wird die normale Vorschau verwendet.",
+  previewApproximate: "Vorschau ist hier nur eine Näherung",
+  previewApproxCrop: "Zuschnitt wird nicht gezeichnet",
+  previewApproxStack: "nur der oberste Clip wird gezeichnet",
   importFilterName: "Video & Audio",
   importFileMissing: "Die Datei existiert nicht mehr.",
   importReadError: "Datei konnte nicht gelesen werden: {error}",
@@ -2872,6 +3002,32 @@ const fr: Catalog = {
   inspectorX: "X",
   inspectorY: "Y",
   inspectorClose: "Fermer l’inspecteur",
+
+  // ── Effets de clip sélectionnés (E6) ────────────────────────────────────
+  inspectorEffectsHeader: "Effets",
+  inspectorEffectsIntro:
+    "Seuls les effets que l’export sait rendre sont proposés — l’aperçu est une approximation, le fichier exporté fait foi.",
+  inspectorEffectAmount: "Intensité",
+  inspectorEffectNeutral: "Aucun changement à cette valeur",
+  effectBrightness: "Luminosité",
+  effectContrast: "Contraste",
+  effectSaturation: "Saturation",
+  effectGrayscale: "Noir et blanc",
+
+  // ── Aperçu GPU (E6) ─────────────────────────────────────────────────────
+  settingsPreviewTitle: "Aperçu",
+  settingsPreviewIntro:
+    "La façon dont l’aperçu dessine l’image pendant le montage. Rien ici ne modifie le fichier exporté.",
+  settingsGpuCompositor: "Aperçu GPU (expérimental)",
+  settingsGpuCompositorNote:
+    "Dessine l’aperçu sur la carte graphique, pour voir les transformations et les effets en direct. Nécessite WebGL2 ; se désactive tout seul si la machine n’y arrive pas. Désactivé par défaut.",
+  settingsGpuUnavailableNoWebgl2:
+    "Indisponible sur cette machine : pas de WebGL2 accéléré matériellement. L’aperçu standard est utilisé.",
+  settingsGpuUnavailableFailed:
+    "L’aperçu GPU n’a pas démarré et a été désactivé pour cette session. L’aperçu standard est utilisé.",
+  previewApproximate: "L’aperçu est approximatif ici",
+  previewApproxCrop: "le recadrage n’est pas dessiné",
+  previewApproxStack: "seul le clip du dessus est dessiné",
   importFilterName: "Vidéo et audio",
   importFileMissing: "Le fichier n'existe plus.",
   importReadError: "Impossible de lire le fichier : {error}",
@@ -3335,6 +3491,32 @@ const pl: Catalog = {
   inspectorX: "X",
   inspectorY: "Y",
   inspectorClose: "Zamknij inspektora",
+
+  // ── Wyselekcjonowane efekty klipu (E6) ──────────────────────────────────
+  inspectorEffectsHeader: "Efekty",
+  inspectorEffectsIntro:
+    "Oferowane są tylko efekty, które potrafi wyrenderować eksport — podgląd jest przybliżeniem, plik wynikowy jest rozstrzygający.",
+  inspectorEffectAmount: "Natężenie",
+  inspectorEffectNeutral: "Przy tej wartości bez zmian",
+  effectBrightness: "Jasność",
+  effectContrast: "Kontrast",
+  effectSaturation: "Nasycenie",
+  effectGrayscale: "Czarno-biały",
+
+  // ── Podgląd na GPU (E6) ─────────────────────────────────────────────────
+  settingsPreviewTitle: "Podgląd",
+  settingsPreviewIntro:
+    "Jak podgląd rysuje obraz podczas montażu. Nic tutaj nie zmienia pliku wynikowego.",
+  settingsGpuCompositor: "Podgląd na GPU (eksperymentalny)",
+  settingsGpuCompositorNote:
+    "Rysuje podgląd na karcie graficznej, dzięki czemu transformacje i efekty widać na żywo. Wymaga WebGL2; wyłącza się sam, gdy komputer sobie nie radzi. Domyślnie wyłączony.",
+  settingsGpuUnavailableNoWebgl2:
+    "Niedostępne na tym komputerze: brak sprzętowo akcelerowanego WebGL2. Używany jest zwykły podgląd.",
+  settingsGpuUnavailableFailed:
+    "Podgląd na GPU nie uruchomił się i został wyłączony na czas tej sesji. Używany jest zwykły podgląd.",
+  previewApproximate: "Podgląd jest tu przybliżony",
+  previewApproxCrop: "kadrowanie nie jest rysowane",
+  previewApproxStack: "rysowany jest tylko górny klip",
   importFilterName: "Wideo i audio",
   importFileMissing: "Plik już nie istnieje.",
   importReadError: "Nie można odczytać pliku: {error}",

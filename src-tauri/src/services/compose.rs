@@ -329,6 +329,14 @@ pub fn build_filter_complex(
             format!("trim=start={}:end={}", secs(it.in_ms), secs(it.out_ms)),
             setpts,
         ];
+        // COLOUR first, GEOMETRY second (E6). Grading the source before it is
+        // scaled/rotated/faded keeps `eq`/`hue` working on the clip's own
+        // pixels: after `transform_filters` the stream may already be RGBA with
+        // a premultiplied-looking alpha from the opacity mixer, where a luma
+        // filter no longer means what the slider said. It is also the cheaper
+        // order when the transform scales down. The Pixi preview applies the
+        // same order (texture → colour matrix → sprite transform).
+        crate::services::effects::effect_filters(&it.effects, &mut chain);
         transform_filters(&it.transform, &mut chain);
         nodes.push(format!("[{src}:v]{}[pv{n}]", chain.join(",")));
     }
@@ -1423,6 +1431,87 @@ mod tests {
         assert!(g.contains("crop=iw*0.5:ih*0.5"), "got {g}");
         assert!(g.contains("rotate=90*PI/180"), "got {g}");
         assert!(g.contains("colorchannelmixer=aa=0.5"), "got {g}");
+    }
+
+    // ── Curated effects (E6) ────────────────────────────────────────────────
+
+    fn fx(kind: &str, params: serde_json::Value) -> crate::model::Effect {
+        crate::model::Effect {
+            id: format!("fx-{kind}"),
+            kind: kind.into(),
+            params,
+            enabled: true,
+        }
+    }
+
+    /// The per-item chain for a project holding exactly one clip.
+    fn one_item_chain(it: TimelineItem) -> String {
+        let p = project(
+            vec![media("m1", "/a.mp4", false)],
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![it],
+            vec![],
+        );
+        let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+        g.split(';')
+            .find(|n| n.contains("[pv0]"))
+            .expect("the item's own node")
+            .to_string()
+    }
+
+    #[test]
+    fn curated_effects_land_in_the_item_chain() {
+        let mut it = item("i0", "v1", "m1", 0, 0, 5000);
+        it.effects = vec![
+            fx("brightness", serde_json::json!({ "amount": 0.2 })),
+            fx("saturation", serde_json::json!({ "amount": 1.4 })),
+        ];
+        let node = one_item_chain(it);
+        assert!(node.contains("eq=brightness=0.2"), "got {node}");
+        assert!(node.contains("eq=saturation=1.4"), "got {node}");
+    }
+
+    #[test]
+    fn effects_are_applied_before_the_geometric_transform() {
+        // Colour first, geometry second — see the comment at the call site.
+        let mut it = item("i0", "v1", "m1", 0, 0, 5000);
+        it.effects = vec![fx("grayscale", serde_json::json!({}))];
+        it.transform = Transform {
+            scale: 0.5,
+            ..Transform::default()
+        };
+        let node = one_item_chain(it);
+        let fx_at = node.find("hue=s=0").expect("effect emitted");
+        let tf_at = node.find("scale=iw*0.5").expect("transform emitted");
+        assert!(fx_at < tf_at, "effects must precede the transform: {node}");
+    }
+
+    #[test]
+    fn disabled_and_unknown_effects_leave_the_graph_untouched() {
+        // The seam that matters: an effect kind we do not render must produce
+        // BYTE-IDENTICAL argv to no effect at all — never an invented filter.
+        let base = one_item_chain(item("i0", "v1", "m1", 0, 0, 5000));
+
+        let mut off = item("i0", "v1", "m1", 0, 0, 5000);
+        let mut disabled = fx("brightness", serde_json::json!({ "amount": 0.9 }));
+        disabled.enabled = false;
+        off.effects = vec![
+            disabled,
+            fx("bloom", serde_json::json!({ "radius": 4 })),
+            fx("contrast", serde_json::json!({ "amount": 1.0 })), // neutral
+        ];
+        assert_eq!(one_item_chain(off), base);
+    }
+
+    #[test]
+    fn an_enabled_effect_takes_the_project_off_the_simple_burn_in_path() {
+        // `is_pristine_primary_item` refuses any enabled effect — deliberately
+        // stricter than "emits a filter", so the general (correct) composite
+        // path is what renders anything the burn-in shortcut wasn't built for.
+        let mut p = baseline_project();
+        assert!(is_simple_timeline(&p));
+        p.timeline_items[0].effects = vec![fx("grayscale", serde_json::json!({}))];
+        assert!(!is_simple_timeline(&p));
     }
 
     #[test]

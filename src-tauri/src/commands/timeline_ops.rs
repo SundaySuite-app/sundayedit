@@ -210,6 +210,25 @@ pub fn op_set_transform(
     timeline_ops::set_transform(&project, &item_id, transform)
 }
 
+/// Add or update ONE curated colour effect on a clip. A non-curated `kind` is
+/// rejected — the registry is the preview↔export parity contract (E6).
+#[tauri::command]
+pub fn op_set_effect(
+    project: Project,
+    item_id: String,
+    kind: String,
+    params: serde_json::Value,
+    enabled: bool,
+) -> AppResult<Project> {
+    timeline_ops::set_effect(&project, &item_id, &kind, &params, enabled)
+}
+
+/// Remove a clip's effect of the given kind (no-op when absent).
+#[tauri::command]
+pub fn op_remove_effect(project: Project, item_id: String, kind: String) -> AppResult<Project> {
+    timeline_ops::remove_effect(&project, &item_id, &kind)
+}
+
 #[tauri::command]
 pub fn op_add_text_item(
     project: Project,

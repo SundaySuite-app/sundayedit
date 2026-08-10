@@ -72,11 +72,65 @@ MIT-Modern-Variant AND ISC AND NTP AND Zlib AND BSL-1.0` — it bundles
   owner decision (E4b).
 - **mediabunny** (media demux/decode, MPL-2.0) — candidate for stage E5, not
   yet vendored or installed.
-- **@clypra-studio/*** packages (MIT, requires `pixi.js@^8`) — candidate for
-  stage E6, gated on the E5 compositor decision (ADR-010). Not yet installed.
+- **@clypra-studio/*** packages (MIT, requires `pixi.js@^8`) — **NOT
+  installed, and no longer planned for the curated-effects path.** Stage E6
+  installed `pixi.js` (the compositor, see below) but deliberately declined the
+  233-effect catalogue: an effect the ffmpeg export cannot render breaks the
+  "what you export matches what you saw" promise, so effects are a small
+  curated registry with an ffmpeg equivalent per entry instead (ADR-013).
+  Revisit if stage E7's hybrid export makes preview-only effects renderable.
 
 This section will be updated with license text and vendoring details when
 each of those lands.
+
+---
+
+## PixiJS
+
+- **Project**: [PixiJS](https://github.com/pixijs/pixijs)
+- **License**: MIT
+- **Version**: `pixi.js@8.19.0`
+- **Copyright**: Copyright (c) 2013-2023 Mathew Groves, Chad Engler
+
+**Installed as an npm dependency, not vendored** — no PixiJS source is copied
+into this repository. It is listed here because it is redistributed inside the
+shipped application bundle (stage E6, ADR-010/ADR-013).
+
+Used by `src/features/timeline/compositor/` as the optional GPU preview
+compositor. It is behind a runtime capability flag that is **off by default**
+and is loaded through a dynamic import, so it is only fetched when a user opts
+in — but it is present in the bundle either way, hence this notice.
+
+Note for the record: PixiJS detects WebKit by user-agent regex
+(`isSafari()`), which is why `src-tauri/tauri.macos.conf.json` sets a custom
+window user agent. That is our configuration, not a modification of PixiJS —
+see ADR-010's addendum and `docs/DISTRIBUTION.md`.
+
+### MIT License text (PixiJS)
+
+```
+The MIT License
+
+Copyright (c) 2013-2023 Mathew Groves, Chad Engler
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ---
 

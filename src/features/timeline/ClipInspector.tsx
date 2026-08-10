@@ -12,6 +12,10 @@
  *   - Transition — leading-edge type (none/fade/crossfade/dip) + duration.
  *     `setTransition` / `clearTransition`.
  *   - Transform — scale / x / y for overlay/PiP clips. `setTransform`.
+ *   - Effects — the CURATED colour effects (E6). The list is
+ *     `CURATED_EFFECTS` verbatim: only effects that both the Pixi preview and
+ *     the ffmpeg export can produce are offerable, which is the whole reason
+ *     the registry exists. `setEffect` / `removeEffect`.
  *
  * The panel reads the live item out of the project each render (so committed
  * ops reflect immediately), while numeric trim fields keep a local buffer so
@@ -21,10 +25,16 @@
 import { useEffect, useState } from "react";
 import { Scissors, Trash2, X } from "lucide-react";
 
-import type { Project, TimelineItem, Transform } from "@/lib/bindings";
+import type { Effect, Project, TimelineItem, Transform } from "@/lib/bindings";
 import { ipc } from "@/lib/ipc";
 import { useProjectStore } from "@/lib/useProjectStore";
 import { useT, type TKey } from "@/lib/i18n";
+import {
+  CURATED_EFFECTS,
+  effectParam,
+  ffmpegFragment,
+  type EffectDef,
+} from "./effects/registry";
 import { itemSpan } from "./laneLayout";
 import { getPlayheadMs, usePlayheadInsideSpan } from "./playhead";
 
@@ -109,6 +119,21 @@ export function ClipInspector({
     : "";
   const transform = item.transform;
 
+  // Effects are offered ONLY on clips the export will actually grade: the
+  // compose builder's per-item filter chain (and therefore the whole effect
+  // registry) runs on VISUAL items — `compose::is_visual`, i.e. clips backed by
+  // video-kind media. A text overlay or an audio clip would happily store an
+  // `eq=` effect that the render then ignores, which is the same "the UI
+  // promises what the export can't deliver" failure the curated registry exists
+  // to prevent (ADR-013). Mirrors `previewMap.activeVideoItem`'s media check.
+  const isVisualClip = useProjectStore(
+    (s) =>
+      item.kind === "av" &&
+      (s.project?.media.find((m) => m.id === item.source_media_id)?.kind ===
+        "video" ||
+        false),
+  );
+
   const [durBuf, setDurBuf] = useState(String(transition?.duration_ms ?? ""));
   useEffect(
     () => setDurBuf(String(transition?.duration_ms ?? "")),
@@ -166,6 +191,14 @@ export function ClipInspector({
   function commitTransform(patch: Partial<Transform>) {
     const next: Transform = { ...transform, ...patch };
     commit((p) => ipc.timeline.setTransform(p, item.id, next));
+  }
+
+  function commitEffect(kind: string, params: Record<string, number>) {
+    commit((p) => ipc.timeline.setEffect(p, item.id, kind, params, true));
+  }
+
+  function removeEffect(kind: string) {
+    commit((p) => ipc.timeline.removeEffect(p, item.id, kind));
   }
 
   return (
@@ -300,8 +333,115 @@ export function ClipInspector({
             onChange={(v) => commitTransform({ y: v })}
           />
         </Section>
+
+        {/* Effects (E6) — the curated registry, and nothing else, and only on
+            clips the export will actually grade. */}
+        {isVisualClip && (
+          <Section title={t("inspectorEffectsHeader")}>
+            <p className="text-[10px] text-[var(--color-fg-subtle)]">
+              {t("inspectorEffectsIntro")}
+            </p>
+            {CURATED_EFFECTS.map((def) => (
+              <EffectRow
+                key={def.id}
+                def={def}
+                effect={item.effects.find((e) => e.kind === def.id)}
+                onEnable={(params) => commitEffect(def.id, params)}
+                onDisable={() => removeEffect(def.id)}
+              />
+            ))}
+          </Section>
+        )}
       </div>
     </aside>
+  );
+}
+
+/**
+ * One curated effect: a checkbox that adds/removes it, plus a slider per
+ * declared parameter. The ffmpeg fragment the clip will export with is shown
+ * verbatim — the preview is an approximation (see effects/registry.ts), so the
+ * honest thing is to let the user read the filter that will actually run.
+ */
+function EffectRow({
+  def,
+  effect,
+  onEnable,
+  onDisable,
+}: {
+  def: EffectDef;
+  effect: Effect | undefined;
+  onEnable: (params: Record<string, number>) => void;
+  onDisable: () => void;
+}) {
+  const t = useT();
+  const on = effect?.enabled ?? false;
+
+  /** Current value of a parameter — the stored one, or the neutral default. */
+  const valueOf = (name: string): number => {
+    const p = def.params.find((q) => q.name === name);
+    if (!p) return 0;
+    return effect ? effectParam(effect, p) : p.default;
+  };
+
+  /** Commit a single-parameter change, carrying the other params along. */
+  const setParam = (name: string, value: number) => {
+    const params: Record<string, number> = {};
+    for (const p of def.params)
+      params[p.name] = p.name === name ? value : valueOf(p.name);
+    onEnable(params);
+  };
+
+  const fragment = effect ? ffmpegFragment(effect) : null;
+
+  return (
+    <div
+      data-testid={`effect-${def.id}`}
+      className="rounded-md border border-[var(--color-border)] px-2 py-1.5"
+    >
+      <label className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={on}
+          onChange={(e) => {
+            if (e.target.checked) {
+              // `valueOf` returns the STORED value when the clip already
+              // carries this effect (a project file can hold one with
+              // `enabled: false`), so re-enabling restores the user's setting
+              // instead of silently resetting it to neutral.
+              const params: Record<string, number> = {};
+              for (const p of def.params) params[p.name] = valueOf(p.name);
+              onEnable(params);
+            } else {
+              onDisable();
+            }
+          }}
+          className="accent-[var(--color-accent-500)]"
+        />
+        <span className="text-[var(--text-ui-sm)]">{t(def.labelKey)}</span>
+      </label>
+      {on &&
+        def.params.map((p) => (
+          <SliderField
+            key={p.name}
+            label={t("inspectorEffectAmount")}
+            min={p.min}
+            max={p.max}
+            step={p.step}
+            value={valueOf(p.name)}
+            onChange={(v) => setParam(p.name, v)}
+          />
+        ))}
+      {on && (
+        <p
+          data-testid={`effect-${def.id}-fragment`}
+          className="mt-1 truncate font-mono text-[10px] text-[var(--color-fg-subtle)]"
+          title={fragment ?? t("inspectorEffectNeutral")}
+        >
+          {fragment ?? t("inspectorEffectNeutral")}
+        </p>
+      )}
+    </div>
   );
 }
 
