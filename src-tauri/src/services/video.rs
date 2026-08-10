@@ -345,6 +345,99 @@ pub fn extract_thumbnail(media_path: &str, at_ms: i64, out_path: &str) -> AppRes
     Ok(out_path.to_string())
 }
 
+// ── Filmstrip tiles ─────────────────────────────────────────────────────────────
+//
+// A filmstrip tile is ONE jpeg holding `cols` frames side by side, covering a
+// fixed slice of the timeline. The slices are addressed on the absolute grid
+// in `services::tiles`, so scrolling and zooming reuse already-rendered tiles
+// instead of re-rendering a viewport-shaped strip every time.
+
+/// Build the ffmpeg argument vector for one filmstrip tile: `cols` frames
+/// evenly spaced across `[start_ms, end_ms)`, scaled to `height` px tall
+/// (even width), tiled horizontally into a single image.
+///
+/// Clamps rather than rejects — a negative start snaps to 0, a non-positive
+/// range becomes 1 ms, `cols` lands in `1..=64` and `height` in `8..=512`.
+/// Pure — no IO — so it's unit-testable without ffmpeg installed.
+pub fn filmstrip_tile_args(
+    media_path: &str,
+    start_ms: i64,
+    end_ms: i64,
+    cols: u32,
+    height: u32,
+    out_path: &str,
+) -> Vec<String> {
+    let start = start_ms.max(0);
+    let dur_ms = (end_ms - start).max(1);
+    let cols = cols.clamp(1, 64);
+    // Even height keeps the scaler happy for every codec we accept.
+    let height = height.clamp(8, 512) & !1;
+
+    // `cols` frames across `dur_ms` → an exact rational frame rate, so the
+    // sampled instants are deterministic (and identical for the same tile on
+    // any machine): cols / (dur_ms / 1000) = cols*1000 / dur_ms.
+    let vf = format!(
+        "fps={}/{},scale=-2:{},tile={}x1",
+        cols as i64 * 1000,
+        dur_ms,
+        height,
+        cols
+    );
+
+    vec![
+        // Input-side seek + duration limit: ffmpeg only decodes the slice.
+        "-ss".into(),
+        format!("{:.3}", start as f64 / 1000.0),
+        "-t".into(),
+        format!("{:.3}", dur_ms as f64 / 1000.0),
+        "-i".into(),
+        media_path.into(),
+        "-an".into(),
+        "-vf".into(),
+        vf,
+        "-frames:v".into(),
+        "1".into(),
+        "-y".into(),
+        out_path.into(),
+    ]
+}
+
+/// Render one filmstrip tile — `cols` frames from `[start_ms, end_ms)` of
+/// `media_path` into a single horizontal-strip JPEG at `out_path`. Returns
+/// `out_path` on success. Spawns the bundled ffmpeg.
+pub fn extract_filmstrip_tile(
+    media_path: &str,
+    start_ms: i64,
+    end_ms: i64,
+    cols: u32,
+    out_path: &str,
+) -> AppResult<String> {
+    // Same guard as extract_thumbnail — ffmpeg won't create the cache dir.
+    if let Some(parent) = std::path::Path::new(out_path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let args = filmstrip_tile_args(
+        media_path,
+        start_ms,
+        end_ms,
+        cols,
+        crate::services::tiles::TILE_HEIGHT_PX,
+        out_path,
+    );
+    let status = Command::new(ffmpeg_path())
+        .args(&args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| AppError::Internal(format!("failed to launch ffmpeg for filmstrip: {e}")))?;
+    if !status.success() {
+        return Err(AppError::Internal(format!(
+            "ffmpeg filmstrip tile extraction failed for '{media_path}'"
+        )));
+    }
+    Ok(out_path.to_string())
+}
+
 // ── Binary resolution ──────────────────────────────────────────────────────────
 //
 // Resolution order (first hit wins):
@@ -591,6 +684,148 @@ mod tests {
         let args = thumbnail_args("/m.mp4", -1000, "/o.jpg");
         let ss = args.iter().position(|a| a == "-ss").unwrap();
         assert_eq!(args[ss + 1], "0.000");
+    }
+
+    // ── Filmstrip tiles ────────────────────────────────────────────────────
+    fn vf_of(args: &[String]) -> String {
+        let i = args.iter().position(|a| a == "-vf").unwrap();
+        args[i + 1].clone()
+    }
+
+    #[test]
+    fn filmstrip_args_seek_duration_and_single_output() {
+        let args = filmstrip_tile_args("/media/clip.mp4", 4_000, 8_000, 8, 72, "/out/t.jpg");
+        let ss = args.iter().position(|a| a == "-ss").unwrap();
+        assert_eq!(args[ss + 1], "4.000");
+        let t = args.iter().position(|a| a == "-t").unwrap();
+        assert_eq!(args[t + 1], "4.000");
+        // Input options must precede -i so ffmpeg only decodes the slice.
+        let i = args.iter().position(|a| a == "-i").unwrap();
+        assert!(ss < i && t < i);
+        assert!(args.windows(2).any(|w| w[0] == "-frames:v" && w[1] == "1"));
+        assert!(args.iter().any(|a| a == "-an"));
+        assert!(args.iter().any(|a| a == "-y"));
+        assert_eq!(args.last().unwrap(), "/out/t.jpg");
+    }
+
+    #[test]
+    fn filmstrip_args_build_exact_rational_fps_and_tile() {
+        // 8 frames across 4000 ms → 8000/4000 fps, tiled 8 wide, 1 tall.
+        let args = filmstrip_tile_args("/m.mp4", 0, 4_000, 8, 72, "/o.jpg");
+        assert_eq!(vf_of(&args), "fps=8000/4000,scale=-2:72,tile=8x1");
+    }
+
+    #[test]
+    fn filmstrip_args_use_the_tile_grid_span() {
+        use crate::services::tiles::{tile_range_ms, TILE_COLS_DEFAULT, TILE_HEIGHT_PX};
+        let (s, e) = tile_range_ms(4, 3); // 4 s tiles at tier 4
+        let args = filmstrip_tile_args("/m.mp4", s, e, TILE_COLS_DEFAULT, TILE_HEIGHT_PX, "/o.jpg");
+        assert_eq!(vf_of(&args), "fps=8000/4000,scale=-2:72,tile=8x1");
+    }
+
+    #[test]
+    fn filmstrip_args_clamp_negative_start_and_empty_range() {
+        let args = filmstrip_tile_args("/m.mp4", -500, -500, 8, 72, "/o.jpg");
+        let ss = args.iter().position(|a| a == "-ss").unwrap();
+        assert_eq!(args[ss + 1], "0.000");
+        let t = args.iter().position(|a| a == "-t").unwrap();
+        assert_eq!(args[t + 1], "0.001");
+    }
+
+    #[test]
+    fn filmstrip_args_clamp_cols_and_height() {
+        let low = filmstrip_tile_args("/m.mp4", 0, 1_000, 0, 1, "/o.jpg");
+        assert_eq!(vf_of(&low), "fps=1000/1000,scale=-2:8,tile=1x1");
+        let high = filmstrip_tile_args("/m.mp4", 0, 1_000, 9_999, 9_999, "/o.jpg");
+        assert_eq!(vf_of(&high), "fps=64000/1000,scale=-2:512,tile=64x1");
+    }
+
+    #[test]
+    fn filmstrip_args_force_even_height() {
+        let args = filmstrip_tile_args("/m.mp4", 0, 1_000, 4, 73, "/o.jpg");
+        assert_eq!(vf_of(&args), "fps=4000/1000,scale=-2:72,tile=4x1");
+    }
+
+    /// Real ffmpeg: render one tile from a synthetic source and prove the
+    /// geometry — ONE image, `cols` frames wide, `TILE_HEIGHT_PX` tall.
+    /// Synthesises its own input (`testsrc`), so no sample asset is needed.
+    #[test]
+    #[ignore = "needs ffmpeg/ffprobe on PATH"]
+    fn filmstrip_tile_renders_a_single_strip_of_cols_frames() {
+        use crate::services::tiles::{tile_range_ms, TILE_HEIGHT_PX};
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x180:rate=25:duration=10",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+            ])
+            .arg(&src)
+            .status()
+            .expect("spawn ffmpeg");
+        assert!(status.success(), "could not synthesise the test source");
+
+        // Tier 4 = 4 s tiles; take tile 1 → [4000..8000).
+        let (start, end) = tile_range_ms(4, 1);
+        let out = dir.path().join("tile.jpg");
+        let cols = 8;
+        extract_filmstrip_tile(
+            &src.to_string_lossy(),
+            start,
+            end,
+            cols,
+            &out.to_string_lossy(),
+        )
+        .expect("filmstrip tile renders");
+        assert!(out.exists(), "tile file written");
+
+        let probe = Command::new("ffprobe")
+            .args(["-v", "error", "-print_format", "json", "-show_streams"])
+            .arg(&out)
+            .output()
+            .expect("spawn ffprobe");
+        let meta = parse_ffprobe_json(&String::from_utf8_lossy(&probe.stdout))
+            .expect("ffprobe json parses");
+        assert_eq!(meta.height, TILE_HEIGHT_PX as i32, "one row, tile-tall");
+        // 320x180 scaled to 72 tall → 128 wide (even), times 8 columns.
+        assert_eq!(meta.width, 128 * cols as i32, "cols frames side by side");
+    }
+
+    /// The cache dir is created on demand, exactly like `extract_thumbnail`.
+    #[test]
+    #[ignore = "needs ffmpeg on PATH"]
+    fn filmstrip_tile_creates_the_cache_directory() {
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.mp4");
+        let status = Command::new("ffmpeg")
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=160x90:rate=25:duration=2",
+                "-pix_fmt",
+                "yuv420p",
+                "-y",
+            ])
+            .arg(&src)
+            .status()
+            .expect("spawn ffmpeg");
+        assert!(status.success());
+
+        let out = dir.path().join("nested/filmstrip/tile.jpg");
+        assert!(!out.parent().unwrap().exists());
+        extract_filmstrip_tile(&src.to_string_lossy(), 0, 1_000, 4, &out.to_string_lossy())
+            .expect("renders into a freshly created dir");
+        assert!(out.exists());
     }
 
     #[test]

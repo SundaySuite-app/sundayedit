@@ -635,6 +635,38 @@ function backend(): void {
     );
     return { ...project, timeline_items: next };
   }
+  /**
+   * Close every gap on a track (mirrors services::timeline_ops::pack_track):
+   * clips slide back against their predecessor, left to right; a locked clip
+   * is an anchor — it keeps its timecode and the clips after it pack against
+   * its end instead of sliding past it.
+   */
+  function packTrack(project: Project, trackId: string): Project {
+    const onTrack = items(project)
+      .filter((it) => it.track_id === trackId)
+      .sort((a, b) =>
+        a.timeline_start_ms !== b.timeline_start_ms
+          ? a.timeline_start_ms - b.timeline_start_ms
+          : a.id.localeCompare(b.id),
+      );
+    let cursor = 0;
+    const starts = new Map<string, number>();
+    for (const it of onTrack) {
+      const { start, end } = itemSpan(it);
+      if (it.locked) {
+        cursor = Math.max(cursor, end);
+        continue;
+      }
+      const dur = end - start;
+      const newStart = Math.min(cursor, start);
+      starts.set(it.id, newStart);
+      cursor = newStart + dur;
+    }
+    const next = items(project).map((it) =>
+      starts.has(it.id) ? { ...it, timeline_start_ms: starts.get(it.id)! } : it,
+    );
+    return { ...project, timeline_items: next };
+  }
   function rippleDeleteItem(project: Project, itemId: string): Project {
     const gone = findItem(project, itemId);
     const gap = itemSpan(gone).end - itemSpan(gone).start;
@@ -893,6 +925,8 @@ function backend(): void {
         return Promise.resolve(
           rippleDeleteItem(project, args.itemId as string),
         );
+      case "op_pack_track":
+        return Promise.resolve(packTrack(project, args.trackId as string));
       case "op_set_transition":
         return Promise.resolve(
           setTransition(

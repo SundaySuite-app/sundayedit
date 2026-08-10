@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::error::AppResult;
 use crate::model::{MediaItem, Project, TimelineItemKind, TrackKind, Transform};
+use crate::services::timeline_ops::Gap;
 use crate::services::{timeline_ops, video};
 
 fn now_ms() -> i64 {
@@ -151,6 +152,36 @@ pub fn op_move_timeline_item(
 #[tauri::command]
 pub fn op_ripple_delete_item(project: Project, item_id: String) -> AppResult<Project> {
     timeline_ops::ripple_delete_item(&project, &item_id)
+}
+
+// ── gap engine ─────────────────────────────────────────────────────────────────
+
+/// Query the empty stretches on one track. A gap is flagged `protected` when
+/// the clip after it is locked — ripples stop there. Read-only: no Project
+/// comes back, so the caller does not touch undo history.
+#[tauri::command]
+pub fn timeline_detect_gaps(project: Project, track_id: String) -> AppResult<Vec<Gap>> {
+    timeline_ops::detect_gaps(&project, &track_id)
+}
+
+#[tauri::command]
+pub fn op_insert_gap(
+    project: Project,
+    track_id: String,
+    at_ms: i64,
+    duration_ms: i64,
+) -> AppResult<Project> {
+    timeline_ops::insert_gap_with_ripple(&project, &track_id, at_ms, duration_ms)
+}
+
+#[tauri::command]
+pub fn op_remove_gap(project: Project, track_id: String, at_ms: i64) -> AppResult<Project> {
+    timeline_ops::remove_gap_with_ripple(&project, &track_id, at_ms)
+}
+
+#[tauri::command]
+pub fn op_pack_track(project: Project, track_id: String) -> AppResult<Project> {
+    timeline_ops::pack_track(&project, &track_id)
 }
 
 // ── transitions / transform ─────────────────────────────────────────────────────

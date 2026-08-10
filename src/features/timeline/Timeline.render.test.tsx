@@ -49,6 +49,11 @@ class ResizeObserverStub {
 
 // Capture rAF callbacks so the test drives the playback clock frame by frame.
 let rafQueue: FrameRequestCallback[] = [];
+// The PlaybackClock reads its position from a monotonic clock (an AudioContext
+// in the app, `performance.now()` in jsdom) rather than from rAF deltas — so
+// driving frames alone would not move it. Owning `performance.now()` here makes
+// "10 frames, 16 ms apart" mean exactly 160 ms of playback, deterministically.
+let clockNowMs = 0;
 
 beforeEach(() => {
   invoke.mockReset();
@@ -57,6 +62,8 @@ beforeEach(() => {
   );
   useThumbnail.mockClear();
   rafQueue = [];
+  clockNowMs = 0;
+  vi.spyOn(performance, "now").mockImplementation(() => clockNowMs);
   vi.stubGlobal("ResizeObserver", ResizeObserverStub);
   vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
     rafQueue.push(cb);
@@ -81,10 +88,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** Run every queued animation frame once, at the given timestamp. */
+/** Advance the clock to `now` and run every queued animation frame once. */
 function runFrames(now: number) {
   const cbs = rafQueue;
   rafQueue = [];
+  clockNowMs = now;
   act(() => {
     for (const cb of cbs) cb(now);
   });
@@ -105,13 +113,13 @@ describe("Timeline — lanes do not re-render on playback ticks", () => {
     });
     const rendersBeforePlayback = useThumbnail.mock.calls.length;
 
-    // Drive ~10 frames of the playback clock (16 ms apart). The first frame
-    // seeds `last`; each subsequent one advances playheadMs → Timeline state
-    // update → full Timeline function re-run.
+    // Drive 10 frames of the playback clock, 16 ms apart. The clock is read
+    // (not accumulated) each frame, so after 160 ms the playhead stands at
+    // 160 ms → 160 × 0.05 px/ms = 8 px.
     for (let frame = 1; frame <= 10; frame++) runFrames(frame * 16);
 
     // The playhead genuinely moved (so Timeline DID re-render per tick)…
-    expect(parseFloat(playheadLine().style.left)).toBeGreaterThan(0);
+    expect(parseFloat(playheadLine().style.left)).toBeCloseTo(8, 5);
     // …but the memoized lane subtree bailed out on every one of those renders:
     // not a single additional ClipBox render across 10 playback frames.
     expect(useThumbnail.mock.calls.length).toBe(rendersBeforePlayback);

@@ -35,6 +35,7 @@ vi.mock("@/lib/composeEngine", () => ({
 }));
 
 import { Timeline } from "./Timeline";
+import { renderPreviewProxy } from "@/lib/composeEngine";
 import { SAMPLE_PROJECT } from "@/lib/sampleProject";
 import { useProjectStore } from "@/lib/useProjectStore";
 import { useLocale } from "@/lib/i18n";
@@ -259,6 +260,90 @@ describe("Timeline — rendered preview proxy is invalidated on edit", () => {
   });
 });
 
+// ── preview quality ladder ──────────────────────────────────────────────────
+// One rung serves the whole preview stack (previewQuality.ts): the live surface
+// and any flatten asked for from the same state. Parked, nothing is degraded —
+// the ladder must not quietly cost the user resolution on a still frame.
+
+describe("Timeline — preview quality ladder", () => {
+  it("renders the preview surface full-size while parked and smaller while rolling", () => {
+    tauriEnv = true;
+    const { container } = render(
+      <Timeline project={structuredClone(SAMPLE_PROJECT)} />,
+    );
+    const surface = container.firstElementChild as HTMLElement;
+    const stage = () =>
+      container.querySelector('[data-testid="preview-stage"]') as HTMLElement;
+
+    expect(stage().style.transform).toBe(""); // idle → 100 %
+
+    fireEvent.keyDown(surface, { key: " " }); // play → 50 %
+    expect(stage().style.width).toBe("50%");
+    expect(stage().style.transform).toBe("scale(2)");
+
+    fireEvent.keyDown(surface, { key: " " }); // stop → back to full
+    expect(stage().style.transform).toBe("");
+  });
+
+  it("drops to the interaction rung while a clip is being dragged", () => {
+    tauriEnv = true;
+    const { container } = render(
+      <Timeline project={structuredClone(SAMPLE_PROJECT)} />,
+    );
+    const stage = () =>
+      container.querySelector('[data-testid="preview-stage"]') as HTMLElement;
+    const clip = screen.getByTitle("sermon.mp4");
+
+    fireEvent.pointerDown(clip, {
+      pointerId: 1,
+      button: 0,
+      buttons: 1,
+      clientX: 100,
+      clientY: 10,
+    });
+    fireEvent.pointerMove(clip, {
+      pointerId: 1,
+      buttons: 1,
+      clientX: 150,
+      clientY: 10,
+    });
+    expect(stage().style.width).toBe("25%");
+
+    fireEvent.pointerCancel(clip, { pointerId: 1 });
+    expect(stage().style.transform).toBe("");
+  });
+
+  it("asks for the proxy flatten at full geometry from a parked timeline", async () => {
+    tauriEnv = true;
+    const proxy = vi.mocked(renderPreviewProxy);
+    proxy.mockClear();
+    const { getByRole } = render(
+      <Timeline project={structuredClone(SAMPLE_PROJECT)} />,
+    );
+    act(() => {
+      getByRole("button", { name: "Render preview" }).click();
+    });
+    await waitFor(() => expect(proxy).toHaveBeenCalled());
+    // The normal case, and byte-identical to the pre-ladder behaviour.
+    expect(proxy.mock.calls[0][2]).toBe(100);
+  });
+
+  it("asks for a smaller proxy when the flatten is requested mid-shuttle", async () => {
+    tauriEnv = true;
+    const proxy = vi.mocked(renderPreviewProxy);
+    proxy.mockClear();
+    const { container, getByRole } = render(
+      <Timeline project={structuredClone(SAMPLE_PROJECT)} />,
+    );
+    fireEvent.keyDown(container.firstElementChild as HTMLElement, { key: "l" });
+    act(() => {
+      getByRole("button", { name: "Render preview" }).click();
+    });
+    await waitFor(() => expect(proxy).toHaveBeenCalled());
+    expect(proxy.mock.calls[0][2]).toBe(50);
+  });
+});
+
 // ── blade + delete keyboard ops ─────────────────────────────────────────────
 // B splits the selected clip at the playhead (S is taken by snap); Delete/
 // Backspace ripple-deletes it. Both commit through the shared store.
@@ -346,6 +431,81 @@ describe("Timeline — remove track surfaces backend rejections", () => {
     await waitFor(() =>
       expect(screen.getByRole("alert").textContent).toContain("is not empty"),
     );
+  });
+});
+
+// ── gap engine UI (E3-UI) ────────────────────────────────────────────────────
+// The track header's "close gaps" button commits op_pack_track through the
+// shared undo stack. Hidden on caption tracks (gaps there aren't TimelineItems
+// — see Timeline.tsx's `canPackGaps`) and on locked tracks.
+
+describe("Timeline — close-gaps track action", () => {
+  beforeEach(() => {
+    invoke.mockImplementation((cmd: unknown, rawArgs: unknown) =>
+      cmd === "waveform_compute"
+        ? Promise.reject(new Error("no waveform under vitest"))
+        : Promise.resolve((rawArgs as { project: Project }).project),
+    );
+  });
+
+  it("commits op_pack_track for the clicked track", async () => {
+    render(<Timeline project={SAMPLE_PROJECT} />);
+    const header = screen.getByTestId("track-header-tv");
+    fireEvent.click(within(header).getByTestId("pack-track-tv"));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "op_pack_track",
+        expect.objectContaining({ trackId: "tv" }),
+      ),
+    );
+  });
+
+  it("is not offered on a caption track (gaps live in TimelineItems, not captions)", () => {
+    render(<Timeline project={SAMPLE_PROJECT} />);
+    const header = screen.getByTestId("track-header-tc");
+    expect(within(header).queryByTestId("pack-track-tc")).toBeNull();
+  });
+
+  it("is not offered on a locked track", () => {
+    const locked: Project = {
+      ...SAMPLE_PROJECT,
+      tracks: SAMPLE_PROJECT.tracks.map((t) =>
+        t.id === "tv" ? { ...t, locked: true } : t,
+      ),
+    };
+    render(<Timeline project={locked} />);
+    const header = screen.getByTestId("track-header-tv");
+    expect(within(header).queryByTestId("pack-track-tv")).toBeNull();
+  });
+});
+
+// ── anchored zoom ────────────────────────────────────────────────────────────
+// zoomAround must pin the PLAYHEAD (not the viewport centre) for the +/-
+// buttons — the standard "zoom toward what I'm looking at" affordance when
+// there's no pointer to anchor on.
+
+describe("Timeline — zoom buttons anchor on the playhead", () => {
+  it("keeps the playhead's on-screen pixel fixed across a zoom-in click", () => {
+    const { container } = render(<Timeline project={SAMPLE_PROJECT} />);
+    const canvas = container.querySelector("canvas")!;
+
+    // Seek the playhead to 3000ms (pxPerMs 0.05 → x=150 at scrollMs 0).
+    fireEvent.pointerDown(canvas, { clientX: 150 });
+
+    const playheadLineBefore = container.querySelector(
+      ".bg-white\\/90",
+    ) as HTMLElement;
+    const xBefore = parseFloat(playheadLineBefore.style.left);
+    expect(xBefore).toBeCloseTo(150, 0);
+
+    fireEvent.click(screen.getByLabelText("Zoom in"));
+
+    const playheadLineAfter = container.querySelector(
+      ".bg-white\\/90",
+    ) as HTMLElement;
+    const xAfter = parseFloat(playheadLineAfter.style.left);
+    // The playhead's SCREEN position must not have moved — only pxPerMs did.
+    expect(xAfter).toBeCloseTo(xBefore, 0);
   });
 });
 

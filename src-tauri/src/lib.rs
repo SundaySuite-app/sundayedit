@@ -82,6 +82,11 @@ pub fn run() {
             commands::timeline_ops::op_trim_timeline_item,
             commands::timeline_ops::op_move_timeline_item,
             commands::timeline_ops::op_ripple_delete_item,
+            // Gap engine (E3) — detect/insert/remove/pack with protected gaps
+            commands::timeline_ops::timeline_detect_gaps,
+            commands::timeline_ops::op_insert_gap,
+            commands::timeline_ops::op_remove_gap,
+            commands::timeline_ops::op_pack_track,
             commands::timeline_ops::op_set_transition,
             commands::timeline_ops::op_clear_transition,
             commands::timeline_ops::op_set_transform,
@@ -103,6 +108,7 @@ pub fn run() {
             // Project lifecycle + video import (Phase 1)
             commands::project::video_probe,
             commands::project::extract_thumbnail,
+            commands::project::extract_filmstrip_tile,
             commands::project::project_create_from_video,
             commands::project::project_save,
             commands::project::project_open,

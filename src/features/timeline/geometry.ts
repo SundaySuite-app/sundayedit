@@ -59,6 +59,31 @@ export function snapToFrame(ms: number, fps: number): number {
   return Math.round((frame / fps) * 1000);
 }
 
+/**
+ * Fixed SCREEN-pixel width of a clip/caption box's trim hit-zone, on EACH
+ * edge, independent of zoom. Clip geometry (left/width) is computed in
+ * screen px from `pxPerMs` already, so a caller just needs to know how much
+ * of that width to carve off the two ends for "grab the edge to trim" versus
+ * the middle "grab to move" — this is that one number, named so both edges
+ * agree and a zoom step can't silently drift them apart.
+ */
+export const CLIP_EDGE_HIT_PX = 8;
+
+/**
+ * How wide (screen px) ONE trim edge's hit-zone should render at `clipWidthPx`.
+ * Normally `edgePx`, but a clip narrower than `2×edgePx` would otherwise have
+ * its two edge zones overlap and cover the box entirely — with no zone left to
+ * grab-and-move a fully zoomed-out sliver of a clip. Below that width the
+ * zones shrink to exactly half each, so the two together still tile the whole
+ * box (trim-only, no dead move region, but never MORE than the box).
+ */
+export function edgeHitWidthPx(
+  clipWidthPx: number,
+  edgePx: number = CLIP_EDGE_HIT_PX,
+): number {
+  return Math.max(0, Math.min(edgePx, clipWidthPx / 2));
+}
+
 /** Top shuttle speed (×) reachable by repeated J/L taps. */
 export const MAX_SHUTTLE = 8;
 

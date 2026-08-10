@@ -83,14 +83,46 @@ export function subscribeComposeProgress(
  * single place the command name is defined). No-op resolving `false` off-Tauri
  * so the browser/demo degrades gracefully; resolves `true` when a proxy was
  * produced.
+ *
+ * `scalePct` is the preview quality ladder's rung (see
+ * `features/timeline/previewQuality.ts`) — the proxy's frame geometry is the
+ * project's own, scaled by that percentage. Rust's `compose::proxy_settings`
+ * derives the render size from the project geometry it is handed (and still
+ * caps height at 480 on top), so this is the one lever the ladder has over
+ * proxy resolution without a backend change. The default, 100, hands the
+ * project through UNMODIFIED — byte-identical to the previous behaviour.
+ *
+ * The final export never comes through here: it runs `compose.render` with
+ * `defaultComposeSettings(project)`, derived from the untouched project.
  */
 export async function renderPreviewProxy(
   project: Project,
   output: string,
+  scalePct = 100,
 ): Promise<boolean> {
   if (!isTauri()) return false;
-  await compose.previewProxy(project, output);
+  await compose.previewProxy(scaledForPreview(project, scalePct), output);
   return true;
+}
+
+/**
+ * A copy of `project` whose frame geometry is scaled to `scalePct`, or the
+ * project itself (same reference) at full scale. Only the canvas dimensions
+ * move: item transforms are stored as fractions of the canvas
+ * (`compose.rs`: `settings.width * transform.x`), so a smaller canvas keeps
+ * every clip in the same relative place.
+ */
+function scaledForPreview(project: Project, scalePct: number): Project {
+  if (!Number.isFinite(scalePct) || scalePct >= 100 || scalePct <= 0) {
+    return project;
+  }
+  const width = project.video_width > 0 ? project.video_width : 1920;
+  const height = project.video_height > 0 ? project.video_height : 1080;
+  return {
+    ...project,
+    video_width: evenUp((width * scalePct) / 100),
+    video_height: evenUp((height * scalePct) / 100),
+  };
 }
 
 /**

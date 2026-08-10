@@ -8,6 +8,8 @@ import {
   itemSpan,
   stackedTracks,
   trackAtY,
+  trackAtYSticky,
+  TRACK_SWITCH_HYSTERESIS_PX,
   timelineDurationMs,
 } from "./laneLayout";
 
@@ -93,6 +95,67 @@ describe("trackAtY", () => {
     expect(trackAtY(2 * 48, tracks, 48)).toBeNull(); // just past the last lane
     expect(trackAtY(0, [], 48)).toBeNull();
     expect(trackAtY(0, tracks, 0)).toBeNull();
+  });
+});
+
+describe("trackAtYSticky", () => {
+  // tracks stack as [b(top, lane 0, y 0..48), a(lane 1, y 48..96)].
+  const tracks = [track("a", 0), track("b", 1)];
+  const laneH = 48;
+
+  it("matches trackAtY when there is no current track to anchor to", () => {
+    expect(trackAtYSticky(0, tracks, laneH, null)?.id).toBe("b");
+    expect(trackAtYSticky(60, tracks, laneH, null)?.id).toBe("a");
+  });
+
+  it("falls back to trackAtY when the current track id no longer exists", () => {
+    expect(trackAtYSticky(60, tracks, laneH, "gone")?.id).toBe("a");
+  });
+
+  it("holds the current lane just past the boundary, inside the hysteresis band", () => {
+    // Boundary is y=48. Anchored on "b" (lane 0), 1px past the boundary
+    // should still resolve to "b" — the pointer hasn't cleared the band yet.
+    expect(trackAtYSticky(49, tracks, laneH, "b")?.id).toBe("b");
+    expect(
+      trackAtYSticky(48 + TRACK_SWITCH_HYSTERESIS_PX - 1, tracks, laneH, "b")
+        ?.id,
+    ).toBe("b");
+  });
+
+  it("switches once the pointer clears the hysteresis band", () => {
+    expect(
+      trackAtYSticky(48 + TRACK_SWITCH_HYSTERESIS_PX, tracks, laneH, "b")?.id,
+    ).toBe("a");
+    expect(trackAtYSticky(70, tracks, laneH, "b")?.id).toBe("a");
+  });
+
+  it("holds against a crossing from the other direction too", () => {
+    // Anchored on "a" (lane 1), just above the boundary is inside the band.
+    expect(trackAtYSticky(47, tracks, laneH, "a")?.id).toBe("a");
+    expect(
+      trackAtYSticky(48 - TRACK_SWITCH_HYSTERESIS_PX + 1, tracks, laneH, "a")
+        ?.id,
+    ).toBe("a");
+    // Exactly `hysteresisPx` past the boundary clears the band — switches,
+    // symmetric with the other direction's boundary at the band's far edge.
+    expect(
+      trackAtYSticky(48 - TRACK_SWITCH_HYSTERESIS_PX, tracks, laneH, "a")?.id,
+    ).toBe("b");
+  });
+
+  it("landing back inside the current lane always holds, hysteresis or not", () => {
+    expect(trackAtYSticky(20, tracks, laneH, "b")?.id).toBe("b");
+  });
+
+  it("a big jump past the neighbour still resolves normally (no band beyond one lane)", () => {
+    const three = [track("a", 0), track("b", 1), track("c", 2)];
+    // Stacked [c(0), b(1), a(2)]; anchored on c, jump straight to lane 2.
+    expect(trackAtYSticky(2 * laneH + 5, three, laneH, "c")?.id).toBe("a");
+  });
+
+  it("degenerate inputs behave like trackAtY", () => {
+    expect(trackAtYSticky(-1, tracks, laneH, "b")).toBeNull();
+    expect(trackAtYSticky(0, tracks, 0, "b")).toBeNull();
   });
 });
 

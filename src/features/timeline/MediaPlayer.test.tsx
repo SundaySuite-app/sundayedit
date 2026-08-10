@@ -18,13 +18,33 @@ vi.mock("@tauri-apps/api/core", () => ({
 // stubbed to throw "Not implemented", and currentTime/duration/paused are not
 // wired to a media clock. We mock the bits MediaPlayer reconciles against so we
 // can observe the calls it makes (offline — no real video is loaded).
-let mockState: { currentTime: number; paused: boolean; duration: number };
+let mockState: {
+  currentTime: number;
+  paused: boolean;
+  duration: number;
+  /** The element's own `seeking` flag — the policy's seek-storm guard. */
+  seeking: boolean;
+  playbackRate: number;
+};
 let playSpy: ReturnType<typeof vi.spyOn>;
 let pauseSpy: ReturnType<typeof vi.spyOn>;
 
 function installVideoMock() {
-  mockState = { currentTime: 0, paused: true, duration: 60 };
+  mockState = {
+    currentTime: 0,
+    paused: true,
+    duration: 60,
+    seeking: false,
+    playbackRate: 1,
+  };
   const proto = window.HTMLMediaElement.prototype;
+  vi.spyOn(proto, "seeking", "get").mockImplementation(() => mockState.seeking);
+  vi.spyOn(proto, "playbackRate", "get").mockImplementation(
+    () => mockState.playbackRate,
+  );
+  vi.spyOn(proto, "playbackRate", "set").mockImplementation((v: number) => {
+    mockState.playbackRate = v;
+  });
   playSpy = vi.spyOn(proto, "play").mockImplementation(() => {
     mockState.paused = false;
     return Promise.resolve();
@@ -203,6 +223,78 @@ describe("MediaPlayer", () => {
     expect(onConflict).not.toHaveBeenCalled();
   });
 
+  // ── the reconcile policy, as executed against a real element (E2) ─────────
+  // MediaPlayer no longer decides seek-or-play itself: it snapshots the
+  // element, calls the pure `reconcileMedia` policy and applies the actions.
+  // These pin the behaviours that snapshot brings which the old single-epsilon
+  // `mediaSync.reconcile` did not have.
+
+  it("issues no seek while the element is still serving one (seek-storm guard)", () => {
+    // A slow decoder can be seconds behind the playhead. Handing it a fresh
+    // currentTime every frame while it is still seeking is how a scrub turns
+    // into a stall — the element itself says it is busy, so we wait.
+    mockState.currentTime = 0;
+    mockState.seeking = true;
+    render(
+      <MediaPlayer
+        src="asset://x.mp4"
+        playheadMs={9000}
+        rate={0}
+        durationMs={60_000}
+        fps={30}
+      />,
+    );
+    pumpFrame();
+    expect(mockState.currentTime).toBe(0); // untouched
+
+    // The element finishes; the next frame corrects it in one seek.
+    mockState.seeking = false;
+    pumpFrame();
+    expect(mockState.currentTime).toBeCloseTo(9.0);
+  });
+
+  it("corrects sub-frame drift with a rate nudge instead of a seek", () => {
+    // 10 ms behind at 30 fps is a third of a frame — under the one-frame seek
+    // budget but over the quarter-frame dead band. Seeking there would restart
+    // decode for an error no viewer can see; a +2 % rate closes it silently.
+    mockState.currentTime = 1.99;
+    mockState.paused = false;
+    render(
+      <MediaPlayer
+        src="asset://x.mp4"
+        playheadMs={2000}
+        rate={1}
+        durationMs={60_000}
+        fps={30}
+      />,
+    );
+    pumpFrame();
+    expect(mockState.currentTime).toBeCloseTo(1.99); // no seek
+    expect(mockState.playbackRate).toBeCloseTo(1.02);
+
+    // Once it is back in sync the nudge is undone rather than left standing.
+    mockState.currentTime = 2.0;
+    pumpFrame();
+    expect(mockState.playbackRate).toBeCloseTo(1.0);
+  });
+
+  it("seeks rather than nudges once drift exceeds a whole frame", () => {
+    mockState.currentTime = 1.8; // 200 ms ≈ 6 frames behind
+    mockState.paused = false;
+    render(
+      <MediaPlayer
+        src="asset://x.mp4"
+        playheadMs={2000}
+        rate={1}
+        durationMs={60_000}
+        fps={30}
+      />,
+    );
+    pumpFrame();
+    expect(mockState.currentTime).toBeCloseTo(2.0);
+    expect(mockState.playbackRate).toBeCloseTo(1.0);
+  });
+
   it("shows the unavailable overlay when the video errors", () => {
     const { container, queryByTestId } = render(
       <MediaPlayer
@@ -298,6 +390,100 @@ function nleProject(
     timeline_items: items,
   } as unknown as Project;
 }
+
+describe("MediaPlayer — NLE mapping", () => {
+  it("holds the element paused in a gap between clips, without seeking", () => {
+    // Clip spans [0, 2000); the playhead stands at 3000 — nothing to show. The
+    // element must keep its last frame rather than chase an empty gap.
+    const p = nleProject(
+      [track("t", 0)],
+      [item("i", "t", "m", 0, 0, 2000)],
+      [media("m", "/ok/clip.mp4")],
+    );
+    mockState.paused = false;
+    mockState.currentTime = 1.5;
+    render(
+      <MediaPlayer
+        project={p}
+        playheadMs={3000}
+        rate={1}
+        durationMs={4000}
+        fps={30}
+      />,
+    );
+    pumpFrame();
+    expect(pauseSpy).toHaveBeenCalled();
+    expect(mockState.currentTime).toBeCloseTo(1.5); // no seek into the gap
+  });
+
+  it("plays a speed-changed clip at its own rate instead of scrubbing it", () => {
+    // A 2× clip advances two seconds of source per timeline second. The old
+    // single-rate reconciler pinned `playbackRate` at 1 and papered over the
+    // difference with a seek every frame; the policy knows the clip's speed.
+    const p = nleProject(
+      [track("t", 0)],
+      [{ ...item("i", "t", "m", 0, 0, 20_000), speed: 2 }],
+      [media("m", "/ok/clip.mp4")],
+    );
+    // Source time at playhead 1000 ms with speed 2 is 2000 ms — in sync.
+    mockState.currentTime = 2.0;
+    mockState.paused = false;
+    render(
+      <MediaPlayer
+        project={p}
+        playheadMs={1000}
+        rate={1}
+        durationMs={10_000}
+        fps={30}
+      />,
+    );
+    pumpFrame();
+    expect(mockState.playbackRate).toBeCloseTo(2.0);
+    expect(mockState.currentTime).toBeCloseTo(2.0);
+  });
+});
+
+describe("MediaPlayer — preview quality ladder", () => {
+  function stage(container: HTMLElement): HTMLElement {
+    return container.querySelector(
+      '[data-testid="preview-stage"]',
+    ) as HTMLElement;
+  }
+
+  it("leaves the surface untouched at full scale", () => {
+    const { container } = render(
+      <MediaPlayer
+        src="asset://x.mp4"
+        playheadMs={0}
+        rate={0}
+        durationMs={1000}
+        fps={30}
+        scalePct={100}
+      />,
+    );
+    expect(stage(container).style.transform).toBe("");
+    expect(stage(container).dataset.previewScale).toBeUndefined();
+  });
+
+  it("composites a smaller surface and upscales it below full scale", () => {
+    const { container } = render(
+      <MediaPlayer
+        src="asset://x.mp4"
+        playheadMs={0}
+        rate={1}
+        durationMs={1000}
+        fps={30}
+        scalePct={25}
+      />,
+    );
+    const el = stage(container);
+    expect(el.style.width).toBe("25%");
+    expect(el.style.height).toBe("25%");
+    // Scaled back over the same visual area — a quarter of the pixels, same size.
+    expect(el.style.transform).toBe("scale(4)");
+    expect(el.dataset.previewScale).toBe("25");
+  });
+});
 
 // Regression (state-mediaplayer-unavailable-never-reset /
 // diff-unavailable-overlay-latched): the "media missing" overlay used to latch

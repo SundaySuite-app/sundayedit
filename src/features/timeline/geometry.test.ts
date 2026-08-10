@@ -12,6 +12,8 @@ import {
   tickIntervalMs,
   rulerTicks,
   formatTimecode,
+  edgeHitWidthPx,
+  CLIP_EDGE_HIT_PX,
   MIN_PX_PER_MS,
   MAX_PX_PER_MS,
   MAX_SHUTTLE,
@@ -51,6 +53,39 @@ describe("zoom", () => {
   it("never scrolls before zero", () => {
     const z = zoomAround({ ...view, scrollMs: 0 }, 0.5, 0);
     expect(z.scrollMs).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("edgeHitWidthPx", () => {
+  it("is the fixed constant on a comfortably wide clip", () => {
+    expect(edgeHitWidthPx(400)).toBe(CLIP_EDGE_HIT_PX);
+  });
+
+  it("stays fixed regardless of the clip's own width, above the halfway point", () => {
+    // 8px is unaffected all the way down to width=16 (half=8).
+    expect(edgeHitWidthPx(16)).toBe(8);
+    expect(edgeHitWidthPx(20)).toBe(8);
+  });
+
+  it("shrinks to exactly half the clip below 2×edgePx, so zones tile with no gap", () => {
+    expect(edgeHitWidthPx(10)).toBe(5);
+    expect(edgeHitWidthPx(2)).toBe(1);
+  });
+
+  it("two edge zones never exceed the clip's own width", () => {
+    for (const w of [0, 1, 2, 5, 8, 10, 16, 100]) {
+      expect(edgeHitWidthPx(w) * 2).toBeLessThanOrEqual(w + 1e-9);
+    }
+  });
+
+  it("never goes negative on a degenerate zero/negative width", () => {
+    expect(edgeHitWidthPx(0)).toBe(0);
+    expect(edgeHitWidthPx(-5)).toBe(0);
+  });
+
+  it("honours a custom edgePx", () => {
+    expect(edgeHitWidthPx(100, 20)).toBe(20);
+    expect(edgeHitWidthPx(10, 20)).toBe(5);
   });
 });
 

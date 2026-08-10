@@ -11,7 +11,10 @@
  * both commit through the pure backend ops on the shared undo stack.
  *
  * Transport is J/K/L shuttle (reverse/stop/forward, doubling on repeat) plus
- * Space; an internal playhead clock advances by the signed rate. Drags snap to
+ * Space, driven by a `PlaybackClock` (E2): the playhead is READ from a
+ * monotonic audio/wall clock rather than accumulated from rAF deltas, so a
+ * throttled background tab, a decode stall or a long session can no longer
+ * make it drift away from the media. rAF only decides when we look. Drags snap to
  * neighbouring edges, the playhead and the bounds (S toggles snapping). B
  * blades the selected clip at the playhead; Delete/Backspace ripple-deletes
  * it. Media dragged from the bin drops onto a lane to become a new clip.
@@ -44,6 +47,7 @@ import {
   Clapperboard,
   Loader2,
   RotateCcw,
+  FoldHorizontal,
   X,
 } from "lucide-react";
 
@@ -65,14 +69,17 @@ import { clipDragToOp } from "./clipDrag";
 import {
   itemSpan,
   stackedTracks,
-  trackAtY,
+  trackAtYSticky,
   timelineDurationMs,
 } from "./laneLayout";
 import { MediaPlayer } from "./MediaPlayer";
 import { publishPlayheadMs } from "./playhead";
+import { PlaybackClock, type PlaybackSnapshot } from "./playbackClock";
+import { qualityFor, renderStride, shouldRenderFrame } from "./previewQuality";
 import { renderPreviewProxy } from "@/lib/composeEngine";
 import { MEDIA_DND_MIME } from "@/features/media/MediaBin";
 import { useThumbnail } from "@/features/media/thumbnails";
+import { useFilmstripTiles } from "./filmstrip";
 
 interface Props {
   project: Project;
@@ -88,7 +95,11 @@ interface Props {
 const RULER_H = 22;
 const WAVE_H = 72;
 const LANE_H = 52;
-const GUTTER_W = 150;
+// Widened from 150 (E3-UI): the "close gaps" button adds a 7th icon to an
+// audible track's header row (chevrons + mute + solo + lock + pack + remove),
+// and 150px squeezed the name label to zero width — invisible per Playwright,
+// truncated-to-nothing for real users.
+const GUTTER_W = 184;
 
 /** Caption move/resize drag (flagship captions on a caption track). */
 type CaptionDrag = {
@@ -177,11 +188,19 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     scrollMs: 0,
     widthPx: 800,
   });
+  // Both mirror the playback clock (the authority) into React state. Handlers
+  // read the refs, which the clock's subscriber updates synchronously — React
+  // state lags a render behind and a shuttle tap must never see a stale rate.
   const [playheadMs, setPlayheadMs] = useState(0);
+  const playheadRef = useRef(0);
   // Signed playback rate (J/K/L shuttle): <0 reverse, 0 stopped, 1 realtime.
   const [rate, setRate] = useState(0);
+  const rateRef = useRef(0);
   const playing = rate !== 0;
   const [snapEnabled, setSnapEnabled] = useState(true);
+  // A pointer is down on the time surface (ruler / waveform / lane) — the
+  // preview quality ladder's "interaction" rung, alongside the two drags.
+  const [scrubbing, setScrubbing] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [drag, setDrag] = useState<CaptionDrag | null>(null);
@@ -260,32 +279,126 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     };
   }, [project.video_path]);
 
-  // Internal playback clock — advances the playhead by the shuttle `rate`
-  // (direction + speed) in real time. Stops cleanly at either bound.
+  // ── playback clock ─────────────────────────────────────────────────────────
+  // The clock owns the playhead; this component only publishes what it reads.
+  // Duration/fps are handed in through refs so the clock is created ONCE per
+  // mount (recreating it on a project edit would restart playback).
+  const clockRef = useRef<PlaybackClock | null>(null);
+  const durationRef = useRef(durationMs);
+  durationRef.current = durationMs;
+  const fpsRef = useRef(fps);
+  fpsRef.current = fps;
+  // Counts published frames of the current shuttle run — the frame-skip index.
+  const frameCountRef = useRef(0);
+
+  /** Publish a clock snapshot into React state. Called on every clock frame. */
+  const applySnapshot = useCallback((snap: PlaybackSnapshot) => {
+    const isPlaying = snap.status === "playing";
+
+    // `rate` is the TRANSPORT rate the rest of the UI reads: 0 whenever we are
+    // not actually rolling. (The clock keeps its last rate through a pause so
+    // J/L can resume it, and pauses itself at either bound — where the badge
+    // and the play/pause button must both read "stopped".)
+    const nextRate = isPlaying ? snap.rate : 0;
+    if (nextRate !== rateRef.current) frameCountRef.current = 0;
+    rateRef.current = nextRate;
+    setRate(nextRate);
+
+    // Parked, the clock has already snapped to a frame boundary; re-apply
+    // geometry's snap so the value lands on the exact integer-ms grid every
+    // other timeline path uses (`clientXToMs`, `step`, the drag commits). The
+    // two agree on the frame and differ only in rounding — clamped, because
+    // the nearest frame to the very end can sit past it.
+    const ms = isPlaying
+      ? snap.timeMs
+      : Math.min(snap.durationMs, tl.snapToFrame(snap.timeMs, snap.fps));
+
+    // Frame skipping above 1×: the playhead covers |rate| frames of content per
+    // displayed frame, so publishing every one of them would pile |rate|× the
+    // React/preview work into the same wall-clock second. Transport changes
+    // reset the counter (see above), so a stop/seek always lands.
+    const index = frameCountRef.current++;
+    if (!shouldRenderFrame(index, renderStride(nextRate))) return;
+
+    playheadRef.current = ms;
+    setPlayheadMs(ms);
+  }, []);
+
   useEffect(() => {
-    if (rate === 0) return;
-    let raf = 0;
-    let last = performance.now();
-    const tick = (now: number) => {
-      const dt = now - last;
-      last = now;
-      setPlayheadMs((p) => {
-        const next = p + dt * rate;
-        if (next <= 0) {
-          setRate(0);
-          return 0;
-        }
-        if (next >= durationMs) {
-          setRate(0);
-          return durationMs;
-        }
-        return next;
-      });
-      raf = requestAnimationFrame(tick);
+    const clock = new PlaybackClock({
+      durationMs: durationRef.current,
+      fps: fpsRef.current,
+      // The playhead line and the timecode are 60 fps UI, so take every frame;
+      // the shuttle thinning happens in `applySnapshot`, by rate, not by time.
+      notifyIntervalMs: 0,
+    });
+    clockRef.current = clock;
+    // A StrictMode remount disposes the first clock; restore where we were.
+    if (playheadRef.current > 0) clock.seek(playheadRef.current);
+    const unsubscribe = clock.subscribe(applySnapshot);
+    return () => {
+      unsubscribe();
+      clock.dispose();
+      clockRef.current = null;
     };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [rate, durationMs]);
+  }, [applySnapshot]);
+
+  // Project edits move the end of the timeline and can change the frame rate;
+  // push both into the clock instead of rebuilding it.
+  useEffect(() => {
+    clockRef.current?.setDurationMs(durationMs);
+  }, [durationMs]);
+  useEffect(() => {
+    clockRef.current?.setFps(fps);
+  }, [fps]);
+
+  /** Park the playhead at `ms` (the clock clamps and frame-snaps it). */
+  const seekTo = useCallback((ms: number) => {
+    // A deliberate jump must be seen at once. It is the one transport change
+    // that leaves the RATE alone, so reset the frame-skip counter by hand —
+    // else a seek mid-shuttle could sit invisible for up to a stride.
+    frameCountRef.current = 0;
+    clockRef.current?.seek(ms);
+  }, []);
+
+  /** The live playhead — the clock's own reading, not the published state. */
+  const playheadNow = useCallback(
+    () => clockRef.current?.timeMs ?? playheadRef.current,
+    [],
+  );
+
+  /** J/K/L: next shuttle rate, then roll (or stop) at it. */
+  const shuttle = useCallback((key: "j" | "k" | "l") => {
+    const clock = clockRef.current;
+    if (!clock) return;
+    const next = tl.shuttleRate(rateRef.current, key);
+    // `setRate(0)` both pauses and zeroes, so the next J/L tap starts from a
+    // stop exactly as the old `setRate(0)` state transition did.
+    clock.setRate(next);
+    if (next !== 0) clock.play();
+  }, []);
+
+  /** Space / the toolbar button: stop if rolling, else roll forward at 1×. */
+  const togglePlay = useCallback(() => {
+    const clock = clockRef.current;
+    if (!clock) return;
+    if (rateRef.current !== 0) {
+      clock.setRate(0);
+      return;
+    }
+    clock.setRate(1);
+    clock.play();
+  }, []);
+
+  // ── preview quality ladder ─────────────────────────────────────────────────
+  // One rung for the whole preview stack: the live surface and any flatten
+  // asked for from this state read the same number. A render in flight is the
+  // one moment the user is judging OUTPUT, so it pins the un-degraded rung.
+  const quality = qualityFor({
+    rate,
+    interacting: scrubbing || drag !== null || clipDrag !== null,
+    exporting: previewState === "rendering",
+  });
 
   // Auto-dismiss the scrub-conflict warning a few seconds after it appears.
   useEffect(() => {
@@ -374,9 +487,14 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     [durationMs, view, fps],
   );
 
+  // Pointer-down on the ruler/waveform/lane: seek there AND enter the quality
+  // ladder's interaction rung until the pointer is released (see `endScrub`).
   const seekToX = useCallback(
-    (clientX: number) => setPlayheadMs(clientXToMs(clientX)),
-    [clientXToMs],
+    (clientX: number) => {
+      setScrubbing(true);
+      seekTo(clientXToMs(clientX));
+    },
+    [clientXToMs, seekTo],
   );
 
   function onWheel(e: React.WheelEvent) {
@@ -403,9 +521,14 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     }
   }
 
+  // Buttons pin the PLAYHEAD (not the viewport centre) — the standard "zoom
+  // toward what I'm looking at" behaviour when there's no pointer to anchor
+  // on. Off-screen playhead clamps to the nearest edge instead of anchoring
+  // outside the viewport (which would pan the whole timeline off-window).
   function zoomButton(factor: number) {
     setView((v) => {
-      const z = tl.zoomAround(v, factor, v.widthPx / 2);
+      const anchorX = Math.min(Math.max(tl.msToX(playheadMs, v), 0), v.widthPx);
+      const z = tl.zoomAround(v, factor, anchorX);
       return { ...z, scrollMs: clampScroll(z.scrollMs, z.pxPerMs, v.widthPx) };
     });
   }
@@ -518,11 +641,19 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     const deltaMs = tl.snapToFrame(edge, fps) - timelineBase;
 
     // Vertical hit-test → cross-track target (move only, compatible kind).
+    // Sticky against `clipDrag.targetTrackId` (the currently-committed target,
+    // not the clip's origin) so repeated crossings don't overshoot the band
+    // on every frame — see TRACK_SWITCH_HYSTERESIS_PX.
     let targetTrackId = clipDrag.trackId;
     if (clipDrag.kind === "move" && lanesScrollRef.current) {
       const rect = lanesScrollRef.current.getBoundingClientRect();
       const y = e.clientY - rect.top + lanesScrollRef.current.scrollTop;
-      const hit = trackAtY(y, project.tracks, LANE_H);
+      const hit = trackAtYSticky(
+        y,
+        project.tracks,
+        LANE_H,
+        clipDrag.targetTrackId,
+      );
       if (hit && !hit.locked && hit.kind === clipDrag.trackKind) {
         targetTrackId = hit.id;
       }
@@ -532,6 +663,7 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
   }
 
   async function onPointerUp() {
+    setScrubbing(false);
     if (drag) {
       const d = drag;
       setDrag(null);
@@ -605,6 +737,7 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
   // releases the pointer capture WITHOUT a pointerup — abort both drags
   // without committing so the ghost doesn't stay glued to later hover moves.
   function onPointerCancel() {
+    setScrubbing(false);
     setDrag(null);
     setClipDrag(null);
     setDropTrackId(null);
@@ -671,9 +804,9 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     (c: Caption) => {
       setSelectedId(c.id);
       selectClip(null);
-      setPlayheadMs(c.start_ms);
+      seekTo(c.start_ms);
     },
-    [selectClip],
+    [selectClip, seekTo],
   );
 
   // Clicking a clip selects it and parks the playhead at its start.
@@ -681,17 +814,20 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     (ti: TimelineItem) => {
       selectClip(ti.id);
       setSelectedId(null);
-      setPlayheadMs(ti.timeline_start_ms);
+      seekTo(ti.timeline_start_ms);
     },
-    [selectClip],
+    [selectClip, seekTo],
   );
 
   function step(dir: -1 | 1, count: number) {
     const idx = captions.findIndex((c) => c.id === selectedId);
     if (idx === -1) {
-      setPlayheadMs((p) =>
+      seekTo(
         tl.snapToFrame(
-          Math.max(0, Math.min(durationMs, p + ((dir * 1000) / fps) * count)),
+          Math.max(
+            0,
+            Math.min(durationMs, playheadNow() + ((dir * 1000) / fps) * count),
+          ),
           fps,
         ),
       );
@@ -720,7 +856,7 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     const lower = e.key.toLowerCase();
     if (lower === "j" || lower === "k" || lower === "l") {
       e.preventDefault();
-      setRate((r) => tl.shuttleRate(r, lower));
+      shuttle(lower);
       return;
     }
     if (lower === "s") {
@@ -738,7 +874,7 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     switch (e.key) {
       case " ":
         e.preventDefault();
-        setRate((r) => (r !== 0 ? 0 : 1));
+        togglePlay();
         break;
       case "Delete":
       case "Backspace":
@@ -821,6 +957,17 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     [run],
   );
 
+  // Close every gap on a track: each clip slides back against its
+  // predecessor (locked clips stay anchored — see services::timeline_ops's
+  // gap engine). A no-op on a gapless track lands harmlessly on the undo
+  // stack same as any other clamped op.
+  const packTrackGaps = useCallback(
+    (track: Track) => {
+      void run((p) => ipc.timeline.packTrack(p, track.id)).catch(() => {});
+    },
+    [run],
+  );
+
   // Move a lane up (toward the top = higher index) or down.
   const reorder = useCallback(
     (track: Track, dir: -1 | 1) => {
@@ -842,7 +989,12 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     setPreviewState("rendering");
     try {
       const out = await join(await appCacheDir(), "sundayedit-preview.mp4");
-      const ok = await renderPreviewProxy(project, out);
+      // The flatten inherits the ladder rung that is live when it is asked for:
+      // parked (the normal case) it renders at full proxy geometry, exactly as
+      // before; asked for mid-playback or mid-drag — where the user wants it
+      // FAST — it renders a proportionally smaller proxy. Export is a different
+      // command (`compose.render`) and never comes through here.
+      const ok = await renderPreviewProxy(project, out, quality.scalePct);
       if (ok) {
         setProxySrc(`${convertFileSrc(out)}?t=${Date.now()}`);
         setPreviewState("done");
@@ -900,6 +1052,7 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
             rate={rate}
             durationMs={durationMs}
             fps={fps}
+            scalePct={quality.scalePct}
             onConflict={() => setScrubWarning(true)}
           />
         ) : (
@@ -935,7 +1088,7 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
       <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-1.5">
         <button
           type="button"
-          onClick={() => setRate((r) => (r !== 0 ? 0 : 1))}
+          onClick={togglePlay}
           className="grid h-7 w-7 place-items-center rounded-md hover:bg-[var(--color-bg-surface)]"
           aria-label={playing ? t("timelinePause") : t("timelinePlay")}
         >
@@ -1043,6 +1196,7 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
               onToggle={toggleFlag}
               onMove={reorder}
               onRemove={removeTrack}
+              onPackGaps={packTrackGaps}
               // Individual strings (not an object) so memo's shallow compare
               // holds even though `t` is a fresh closure every render.
               labelMute={t("trackMute")}
@@ -1051,6 +1205,7 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
               labelUp={t("trackMoveUp")}
               labelDown={t("trackMoveDown")}
               labelRemove={t("trackRemove")}
+              labelCloseGaps={t("trackCloseGaps")}
             />
           </div>
         </div>
@@ -1169,23 +1324,27 @@ const LaneHeaders = memo(function LaneHeaders({
   onToggle,
   onMove,
   onRemove,
+  onPackGaps,
   labelMute,
   labelSolo,
   labelLock,
   labelUp,
   labelDown,
   labelRemove,
+  labelCloseGaps,
 }: {
   stacked: Track[];
   onToggle: (track: Track, flag: "muted" | "solo" | "locked") => void;
   onMove: (track: Track, dir: -1 | 1) => void;
   onRemove: (track: Track) => void;
+  onPackGaps: (track: Track) => void;
   labelMute: string;
   labelSolo: string;
   labelLock: string;
   labelUp: string;
   labelDown: string;
   labelRemove: string;
+  labelCloseGaps: string;
 }) {
   return (
     <>
@@ -1199,6 +1358,7 @@ const LaneHeaders = memo(function LaneHeaders({
           onToggle={onToggle}
           onMove={onMove}
           onRemove={onRemove}
+          onPackGaps={onPackGaps}
           labels={{
             mute: labelMute,
             solo: labelSolo,
@@ -1206,6 +1366,7 @@ const LaneHeaders = memo(function LaneHeaders({
             up: labelUp,
             down: labelDown,
             remove: labelRemove,
+            closeGaps: labelCloseGaps,
           }}
         />
       ))}
@@ -1338,6 +1499,7 @@ function TrackHeader({
   onToggle,
   onMove,
   onRemove,
+  onPackGaps,
   labels,
 }: {
   track: Track;
@@ -1347,6 +1509,7 @@ function TrackHeader({
   onToggle: (track: Track, flag: "muted" | "solo" | "locked") => void;
   onMove: (track: Track, dir: -1 | 1) => void;
   onRemove: (track: Track) => void;
+  onPackGaps: (track: Track) => void;
   labels: {
     mute: string;
     solo: string;
@@ -1354,9 +1517,14 @@ function TrackHeader({
     up: string;
     down: string;
     remove: string;
+    closeGaps: string;
   };
 }) {
   const audible = track.kind === "video" || track.kind === "audio";
+  // The gap engine works on TimelineItems; caption tracks store their content
+  // in `project.captions` instead, so "close gaps" has nothing to act on
+  // there. Hidden on a locked track too — same convention as clip drag/trim.
+  const canPackGaps = track.kind !== "caption" && !track.locked;
   return (
     <div
       data-testid={`track-header-${track.id}`}
@@ -1421,6 +1589,18 @@ function TrackHeader({
         off={<Unlock size={13} />}
         activeClass="text-[var(--color-warning)]"
       />
+      {canPackGaps && (
+        <button
+          type="button"
+          data-testid={`pack-track-${track.id}`}
+          onClick={() => onPackGaps(track)}
+          title={labels.closeGaps}
+          aria-label={labels.closeGaps}
+          className="grid h-6 w-6 shrink-0 place-items-center rounded text-[var(--color-fg-subtle)] hover:bg-[var(--color-bg-surface)] hover:text-[var(--color-fg)]"
+        >
+          <FoldHorizontal size={13} />
+        </button>
+      )}
       <button
         type="button"
         data-testid="remove-track"
@@ -1490,6 +1670,7 @@ function CaptionBox({
     c.end_ms + (drag && drag.kind !== "resize-start" ? drag.deltaMs : 0);
   const left = tl.msToX(start, view);
   const width = Math.max(2, (end - start) * view.pxPerMs);
+  const edgePx = tl.edgeHitWidthPx(width);
   const tier = worstTier(c);
   const text = c.words.map((w) => w.text).join(" ");
   return (
@@ -1508,11 +1689,13 @@ function CaptionBox({
       {!locked && (
         <>
           <span
-            className="absolute inset-y-0 left-0 w-1.5 cursor-ew-resize hover:bg-[var(--color-accent-500)]/40"
+            className="absolute inset-y-0 left-0 cursor-ew-resize hover:bg-[var(--color-accent-500)]/40"
+            style={{ width: edgePx }}
             onPointerDown={(e) => onPointerDown(e, "resize-start")}
           />
           <span
-            className="absolute inset-y-0 right-0 w-1.5 cursor-ew-resize hover:bg-[var(--color-accent-500)]/40"
+            className="absolute inset-y-0 right-0 cursor-ew-resize hover:bg-[var(--color-accent-500)]/40"
+            style={{ width: edgePx }}
             onPointerDown={(e) => onPointerDown(e, "resize-end")}
           />
         </>
@@ -1561,12 +1744,27 @@ function ClipBox({
   }
   const left = tl.msToX(start, view);
   const width = Math.max(2, (end - start) * view.pxPerMs);
+  const edgePx = tl.edgeHitWidthPx(width);
   const label =
     item.text?.text || media?.original_filename || media?.path || item.kind;
   // A dimmed source-frame backdrop behind the label for video clips. Extraction
   // is memoized per media id and no-ops outside Tauri (browser/e2e keeps the
   // text-only look).
   const thumb = useThumbnail(media?.kind === "video" ? media : undefined);
+  // Multi-frame filmstrip backdrop (E3-UI), addressed on the fixed per-zoom-
+  // tier grid so panning/zooming reuse already-rendered tiles. Suppressed
+  // while THIS clip is being dragged — the box is sliding but `item` (what
+  // the tile geometry is keyed to) hasn't committed its new position yet, so
+  // tiles would visibly lag the ghost. `thumb` above covers that gap and the
+  // off-Tauri/non-video/no-tiles-yet cases (the hook resolves empty there).
+  const [visStartMs, visEndMs] = tl.visibleRange(view);
+  const filmstripTiles = useFilmstripTiles(
+    !drag && media?.kind === "video" ? media : undefined,
+    item,
+    view.pxPerMs,
+    Math.max(span.start_ms, visStartMs),
+    Math.min(span.end_ms, visEndMs),
+  );
   return (
     <div
       className={cn(
@@ -1581,23 +1779,40 @@ function ClipBox({
       onClick={onSelect}
       title={label}
     >
-      {thumb && (
-        <img
-          src={thumb}
-          alt=""
-          aria-hidden="true"
-          draggable={false}
-          className="pointer-events-none absolute inset-0 h-full w-full object-cover opacity-40"
-        />
-      )}
+      {filmstripTiles.length > 0
+        ? filmstripTiles.map((t) => (
+            <img
+              key={t.key}
+              src={t.url}
+              alt=""
+              aria-hidden="true"
+              draggable={false}
+              className={cn(
+                "pointer-events-none absolute inset-y-0 h-full",
+                t.stale ? "opacity-25" : "opacity-40",
+              )}
+              style={{ left: t.leftPx, width: t.widthPx }}
+            />
+          ))
+        : thumb && (
+            <img
+              src={thumb}
+              alt=""
+              aria-hidden="true"
+              draggable={false}
+              className="pointer-events-none absolute inset-0 h-full w-full object-cover opacity-40"
+            />
+          )}
       {!locked && (
         <>
           <span
-            className="absolute inset-y-0 left-0 z-10 w-1.5 cursor-ew-resize hover:bg-[var(--color-accent-500)]/60"
+            className="absolute inset-y-0 left-0 z-10 cursor-ew-resize hover:bg-[var(--color-accent-500)]/60"
+            style={{ width: edgePx }}
             onPointerDown={(e) => onPointerDown(e, "resize-start")}
           />
           <span
-            className="absolute inset-y-0 right-0 z-10 w-1.5 cursor-ew-resize hover:bg-[var(--color-accent-500)]/60"
+            className="absolute inset-y-0 right-0 z-10 cursor-ew-resize hover:bg-[var(--color-accent-500)]/60"
+            style={{ width: edgePx }}
             onPointerDown={(e) => onPointerDown(e, "resize-end")}
           />
         </>

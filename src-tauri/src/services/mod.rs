@@ -16,6 +16,7 @@
 //!   - `reflow`        — CPS/line-length/line-count readability analysis + timing repair (Phase 7)
 //!   - `llm`           — Claude API client + AI polish/suggest/translate (Phase 4.1/4.3/7.1)
 //!   - `diarize`       — speaker diarization + roster management (Phase 4.2)
+//!   - `tiles`         — fixed-grid tile addressing for filmstrip/waveform caches (E3)
 
 pub mod asr;
 pub mod burnin;
@@ -35,6 +36,7 @@ pub mod project_file;
 pub mod reflow;
 pub mod secrets;
 pub mod style_presets;
+pub mod tiles;
 pub mod timeline_ops;
 pub mod video;
 pub mod waveform;
