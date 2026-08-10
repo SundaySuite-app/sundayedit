@@ -18,6 +18,22 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to cut (e.g. v0.8.0). Created at the dispatched ref."
+        required: true
+        type: string
+      notarize:
+        description: >-
+          Notarize the macOS build. Requires an in-effect Apple Program License
+          Agreement — Apple returns HTTP 403 "a required agreement is missing or
+          has expired" when it is not signed, which fails the whole macOS job
+          AFTER a successful build and code-sign. Leave off to ship a signed but
+          un-notarized DMG (Gatekeeper shows a first-open warning; users right-
+          click → Open, or run `xattr -cr /Applications/SundayEdit.app`).
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -106,12 +122,15 @@ jobs:
           # password. The old APPLE_PASSWORD secret was stale (notarytool 401);
           # the fresh app-specific password lives in APP_SPECIFIC_PASSWORD
           # (added 2026-06-09), so feed that one in.
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # tauri-action only notarizes when all three are non-empty, so this
+          # is the on/off switch. A tag push always attempts it; a manual run
+          # only does when `notarize` is checked.
+          APPLE_ID: ${{ (github.event_name != 'workflow_dispatch' || inputs.notarize) && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ (github.event_name != 'workflow_dispatch' || inputs.notarize) && secrets.APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ (github.event_name != 'workflow_dispatch' || inputs.notarize) && secrets.APPLE_TEAM_ID || '' }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "SundayEdit ${{ github.ref_name }}"
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: "SundayEdit ${{ inputs.tag || github.ref_name }}"
           releaseBody: "See the assets below to download and install. Auto-update is enabled for existing installs."
           releaseDraft: true
           prerelease: false

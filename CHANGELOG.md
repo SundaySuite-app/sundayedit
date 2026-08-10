@@ -9,6 +9,54 @@ history lives in the git log and `docs/ARCHITECTURE.md`'s phase table.)
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-10
+
+Everything under "Unreleased" below this heading in the previous revision is
+now released as 0.8.0: the night hardening round (22 confirmed bug fixes,
+thumbnails, split/delete, i18n ×7, render-efficiency pass) plus the whole
+OSS-integration programme (E1–E6, E8).
+
+### Added
+
+- **Karaoke captions.** ASS `\k`/`\kf` timing generated from the per-word ASR
+  timings we already had, driven by a single Rust source of truth
+  (`services/karaoke.rs`) that the preview overlay mirrors, so what plays is
+  what burns in. Off by default; a disabled karaoke block leaves the ASS
+  output byte-identical.
+- **GPU preview compositor (PixiJS), behind a flag, default off.** Two
+  independent gates — a persisted user setting and a WebGL2 probe that
+  rejects software contexts. With the flag off the preview renders exactly as
+  it did before, pinned by a byte-for-byte markup test.
+- **Curated clip effects** (brightness, contrast, saturation, grayscale) with
+  one Rust and one TypeScript definition pinned against each other, and
+  parity tests that render through the real ffmpeg builder and measure the
+  output rather than comparing strings.
+- Filmstrips on video clips, gap operations (detect/insert/remove/pack with
+  protected gaps), and an anchored zoom that keeps the point under the
+  pointer fixed.
+- A real timeline clock (`PlaybackClock`, AudioContext-derived) that keeps
+  time when the browser throttles animation frames.
+
+### Changed
+
+- macOS builds now declare a user agent containing a Safari token. PixiJS
+  picks its texture-upload path by regex-matching the user agent, and Tauri's
+  WKWebView string lacks that token, which cost 42× on frame upload
+  (28.92 → 0.69 ms). The webview makes no external requests, so nothing else
+  observes the string. See ADR-010.
+- Releases can now be cut without Apple notarization (`workflow_dispatch`
+  with `notarize` off), producing a signed but un-notarized macOS build.
+
+### Known limitations
+
+- The macOS build for this release is **signed but not notarized** — Apple's
+  Program License Agreement is unsigned, and notarization returns HTTP 403
+  until it is. On first launch, right-click the app → **Open**, or run
+  `xattr -cr /Applications/SundayEdit.app`.
+- `jassub` (exact libass preview) is deliberately **not** adopted: it is
+  LGPL-2.1+/FTL, not MIT, and that is an owner decision. See
+  `THIRD-PARTY-NOTICES.md`.
+
 ### Fixed
 
 - Night bug-hunt: **22 adversarially confirmed findings fixed**, each with a
