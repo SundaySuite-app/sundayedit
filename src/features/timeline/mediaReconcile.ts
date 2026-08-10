@@ -52,12 +52,15 @@
  *   carries its already-resolved `targetTimeMs` (see `previewMap.ts`).
  *
  * ── Relationship to mediaSync.ts ────────────────────────────────────────────
- * `mediaSync.ts` is the *shipping* single-element reconciler used by
- * MediaPlayer, and it stays untouched and in use. `mediaReconcile.ts` is its
- * multi-element successor for programme stage E2, where a pool of source-keyed
- * elements backs multi-clip preview. Until E2 wires the pool, this module is
- * standalone and tested; the two deliberately coexist rather than one being
- * half-migrated into the other.
+ * Programme stage E2 made this the policy MediaPlayer executes: it snapshots
+ * its single `<video>`, calls `reconcileMedia`, and applies the actions.
+ * `mediaSync.ts` keeps only `isUserGesture` (the gesture-window rule, which is
+ * not a reconcile decision at all) in production; its `intentFor`/`reconcile`/
+ * `snapToFrameSec` remain exported and tested as the superseded single-epsilon
+ * reconciler. The signature here is already the multi-element one
+ * (`snapshots` is a list), so the source-keyed element POOL that backs true
+ * multi-clip preview needs no change to this module — only a caller that
+ * hands it more than one snapshot.
  */
 
 /** Why an action was issued — kept on every action for logs and tests. */

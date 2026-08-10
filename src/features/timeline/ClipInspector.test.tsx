@@ -137,6 +137,40 @@ describe("ClipInspector — trim buffer semantics", () => {
   });
 });
 
+describe("ClipInspector — delete (ripple)", () => {
+  it("commits op_ripple_delete_item for the inspected clip and closes the panel", async () => {
+    invoke.mockResolvedValueOnce({ ...SAMPLE_PROJECT, updated_at: 3 });
+    const onClose = vi.fn();
+    render(<ClipInspector item={ITEM} onClose={onClose} />);
+
+    fireEvent.click(screen.getByTestId("inspector-delete"));
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("op_ripple_delete_item", {
+        project: SAMPLE_PROJECT,
+        itemId: ITEM.id,
+      }),
+    );
+    await vi.waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    // The op lands on the shared undo stack via store.run, same as trim/split.
+    expect(useProjectStore.getState().past).toEqual([SAMPLE_PROJECT]);
+  });
+
+  it("leaves the project untouched and does not close when the backend rejects", async () => {
+    invoke.mockRejectedValueOnce(
+      Object.assign(new Error("nope"), { code: "not_found" }),
+    );
+    const onClose = vi.fn();
+    render(<ClipInspector item={ITEM} onClose={onClose} />);
+
+    fireEvent.click(screen.getByTestId("inspector-delete"));
+
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(useProjectStore.getState().project).toBe(SAMPLE_PROJECT);
+  });
+});
+
 describe("ClipInspector — transition", () => {
   it("hides the duration field when no transition is set (no op possible)", () => {
     renderInspector();

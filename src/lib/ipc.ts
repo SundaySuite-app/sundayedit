@@ -27,6 +27,7 @@ import type {
   FillerHit,
   FindMatch,
   FindOptions,
+  Gap,
   GlossaryApplyResult,
   ImportRequest,
   TimelineItemKind,
@@ -238,6 +239,22 @@ export const timeline = {
   /** Delete a clip and slide later same-track clips left to close the gap. */
   rippleDeleteItem: (project: Project, itemId: string) =>
     call<Project>("op_ripple_delete_item", { project, itemId }),
+  /** Query the empty stretches on one track. Read-only — no undo entry. */
+  detectGaps: (project: Project, trackId: string) =>
+    call<Gap[]>("timeline_detect_gaps", { project, trackId }),
+  /** Open `durationMs` of empty time at `atMs`; ripple stops at a locked clip. */
+  insertGap: (
+    project: Project,
+    trackId: string,
+    atMs: number,
+    durationMs: number,
+  ) => call<Project>("op_insert_gap", { project, trackId, atMs, durationMs }),
+  /** Close the gap containing `atMs`; no-op if `atMs` isn't in an unprotected gap. */
+  removeGap: (project: Project, trackId: string, atMs: number) =>
+    call<Project>("op_remove_gap", { project, trackId, atMs }),
+  /** Close every gap on the track, left to right; locked clips stay anchored. */
+  packTrack: (project: Project, trackId: string) =>
+    call<Project>("op_pack_track", { project, trackId }),
   /** Set the leading-edge transition; duration clamps to the clip length. */
   setTransition: (
     project: Project,
@@ -285,12 +302,30 @@ export const compose = {
   cancel: () => call<void>("compose_cancel"),
 };
 
-// ── Media utilities (thumbnails) ─────────────────────────────────────────────
+// ── Media utilities (thumbnails, filmstrip tiles) ────────────────────────────
 export const media = {
   /** Grab a single 120px-tall thumbnail frame from `mediaPath` at `atMs`,
    *  writing a JPEG to `outPath`. Returns the written path. */
   thumbnail: (mediaPath: string, atMs: number, outPath: string) =>
     call<string>("extract_thumbnail", { mediaPath, atMs, outPath }),
+  /** Render one filmstrip tile — `cols` frames from `[startMs, endMs)` tiled
+   *  into a single JPEG at `outPath`. Ranges should come from the fixed
+   *  per-zoom-tier grid (`tiles.ts`), so rendered files stay addressable and
+   *  reusable across scroll and zoom. Returns the written path. */
+  filmstripTile: (
+    mediaPath: string,
+    startMs: number,
+    endMs: number,
+    cols: number,
+    outPath: string,
+  ) =>
+    call<string>("extract_filmstrip_tile", {
+      mediaPath,
+      startMs,
+      endMs,
+      cols,
+      outPath,
+    }),
 };
 
 // ── Export ──────────────────────────────────────────────────────────────────

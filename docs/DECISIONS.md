@@ -99,3 +99,42 @@ Real-time multi-track compositing in the browser is expensive and not yet portab
 4. **Deferred:** a real-time WebCodecs compositor, gated behind a runtime capability check, so we only use it where the browser actually supports it and fall back cleanly otherwise.
 
 This keeps "what you export matches what you saw" (Tech principles) honest: export is the ground truth, and preview fidelity improves in stages without blocking the NLE.
+
+## ADR-011 — Protected gaps ride on `TimelineItem.locked`; no gap entity
+
+**Status:** Accepted (2026-08-10) — OSS-integrasjonsprogram E3
+
+The gap engine (`detect_gaps` / `insert_gap_with_ripple` / `remove_gap_with_ripple` / `pack_track` in `src-tauri/src/services/timeline_ops.rs`) needs a notion of a **protected gap**: empty time a ripple must not consume, so the material downstream keeps its timecode.
+
+The tempting model is a persisted gap entity (`ProtectedGap { track_id, start_ms, end_ms }` in a new table) — and it is the wrong one. Gaps have no independent identity: they are defined entirely by the clips around them, so a persisted gap has to be re-derived, migrated, and garbage-collected on every single timeline edit. That is a whole class of drift bugs bought for nothing.
+
+**Decision:** protection is _derived, never stored_. The marker is the existing, already-persisted `TimelineItem.locked` flag: **the gap immediately before a locked clip is protected**, because closing or shrinking past it would move a clip the user deliberately pinned. `Gap.protected` is computed by `detect_gaps` at query time.
+
+Consequences:
+
+- **No schema migration.** `SCHEMA_VERSION` stays at 4; no new table, no new column, no backfill.
+- **No new UI vocabulary.** The lock affordance already exists on clips and already means "do not move this". Ripple protection is the same promise, honoured by more operations.
+- **Nothing to garbage-collect.** Delete the locked clip and the protection disappears with it, automatically and correctly.
+- Gaps are exposed as a _query_ (`timeline_detect_gaps`), not as project state — the frontend never has to keep a gap list in sync.
+- Cost: a gap cannot be protected without a clip after it to anchor the protection, and the two ideas cannot be separated later without revisiting this ADR. Both are acceptable — a trailing gap has nothing to protect (the track simply ends), and no UX has asked for "pin this emptiness but let the clip after it slide".
+
+The ripple semantics that follow: a shift **stops at** a protected gap. Clips before it absorb as much of the shift as the gap has headroom (clamp, don't reject — a fully pinned track is a no-op, never an error), and the locked clip never moves. `pack_track` treats locked clips as anchors: everything upstream packs left, so the protected gap survives and grows, and the clips after the anchor pack against the anchor's end instead of sliding past it.
+
+## ADR-012 — Timeline caches are addressed on a fixed grid per zoom tier
+
+**Status:** Accepted (2026-08-10) — OSS-integrasjonsprogram E3
+
+Filmstrips (and, later, waveforms) are expensive to render and cheap to reuse — but only if the cache key is stable. Keyed by "the range currently visible at the current zoom", every scroll and every zoom step invalidates everything, because two viewports never line up twice.
+
+**Decision:** cached timeline artefacts are addressed on an **absolute grid per zoom tier**, defined once in `src-tauri/src/services/tiles.rs` and shared by every consumer:
+
+- tier `t` has span `TILE_BASE_SPAN_MS >> t` (64 s at tier 0 down to 250 ms at tier 8),
+- tile `i` covers `[i*span, (i+1)*span)`, anchored at timeline zero — never at the viewport,
+- 64 s is chosen so every tier halves _exactly_, with no integer-division rounding, which is what makes tiles nest: tile `i` at tier `t` is precisely tiles `2i` and `2i+1` at tier `t+1`.
+
+Consequences:
+
+- **Scrolling reuses tiles** — panning only asks for the tiles that entered the view.
+- **Zooming reuses the centre** — because the boundaries nest, an already-rendered tier-`t` tile is a valid coarse stand-in for its two children while they render (`parent_tile` / `child_tiles`).
+- The scheme is media-agnostic on purpose. `services::video::filmstrip_tile_args` / `extract_filmstrip_tile` consume it today; the waveform cache adopts the same grid later rather than inventing a second one. (This is the one place the upstream inspiration applied the idea to video and forgot its own waveform cache — we do not repeat that.)
+- `tile_key(tier, index)` is opaque and filename-safe; `tile_file_name(media_key, …)` scopes it by content hash, so a moved file keeps its rendered tiles.

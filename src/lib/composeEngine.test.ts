@@ -188,6 +188,53 @@ describe("renderPreviewProxy", () => {
       output: "/out/proxy.mp4",
     });
   });
+
+  // The preview quality ladder's rung (features/timeline/previewQuality.ts)
+  // reaches the proxy render as a percentage of the project's frame geometry —
+  // `compose::proxy_settings` derives the render size from what it is handed
+  // (and still caps height at 480 on top). Export never comes through here.
+  it("hands the project through UNMODIFIED at full scale", async () => {
+    tauriEnv = true;
+    invoke.mockResolvedValueOnce(undefined);
+    await renderPreviewProxy(SAMPLE_PROJECT, "/out/proxy.mp4", 100);
+    expect(invoke.mock.calls[0][1].project).toBe(SAMPLE_PROJECT);
+  });
+
+  it("scales the requested proxy geometry to the tier below full scale", async () => {
+    tauriEnv = true;
+    invoke.mockResolvedValueOnce(undefined);
+    await renderPreviewProxy(SAMPLE_PROJECT, "/out/proxy.mp4", 50);
+    const sent = invoke.mock.calls[0][1].project as Project;
+    // 1920×1080 → 960×540, aspect kept, both even (H.264 yuv420p).
+    expect(sent.video_width).toBe(960);
+    expect(sent.video_height).toBe(540);
+    expect(sent.video_width % 2).toBe(0);
+    expect(sent.video_height % 2).toBe(0);
+    // Only the canvas moved — the timeline itself is untouched.
+    expect(sent.timeline_items).toBe(SAMPLE_PROJECT.timeline_items);
+    expect(SAMPLE_PROJECT.video_width).toBe(1920);
+  });
+
+  it("rounds an odd scaled dimension up to an even one", async () => {
+    tauriEnv = true;
+    invoke.mockResolvedValueOnce(undefined);
+    const odd: Project = {
+      ...SAMPLE_PROJECT,
+      video_width: 1000,
+      video_height: 606,
+    };
+    await renderPreviewProxy(odd, "/out/proxy.mp4", 25);
+    const sent = invoke.mock.calls[0][1].project as Project;
+    expect(sent.video_width).toBe(250);
+    expect(sent.video_height).toBe(152); // 151.5 → 152
+  });
+
+  it("ignores a nonsense scale rather than requesting a zero-size proxy", async () => {
+    tauriEnv = true;
+    invoke.mockResolvedValueOnce(undefined);
+    await renderPreviewProxy(SAMPLE_PROJECT, "/out/proxy.mp4", 0);
+    expect(invoke.mock.calls[0][1].project).toBe(SAMPLE_PROJECT);
+  });
 });
 
 describe("defaultComposeSettings", () => {

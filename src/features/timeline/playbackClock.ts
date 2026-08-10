@@ -55,8 +55,10 @@
  *    process-wide mutable clock is a footgun under React StrictMode double
  *    mounts. Owners construct and `dispose()` their own instance.
  *
- * Not wired into Timeline.tsx — that swap is programme stage E2 (see
- * docs/OSS-INTEGRATION-PROGRAM.md). This lands as a standalone tested module.
+ * Wired into Timeline.tsx as the timeline clock in programme stage E2 (see
+ * docs/OSS-INTEGRATION-PROGRAM.md): Timeline owns one instance, drives it from
+ * the J/K/L + Space transport, and publishes its snapshots into React state and
+ * `playhead.ts`. rAF now only decides when the UI looks at the clock.
  */
 
 /** Transport state. `stopped` is "parked at 0", `paused` is "parked here". */

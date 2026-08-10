@@ -19,7 +19,7 @@
  */
 
 import { useEffect, useState } from "react";
-import { Scissors, X } from "lucide-react";
+import { Scissors, Trash2, X } from "lucide-react";
 
 import type { Project, TimelineItem, Transform } from "@/lib/bindings";
 import { ipc } from "@/lib/ipc";
@@ -121,6 +121,18 @@ export function ClipInspector({
     });
   }
 
+  // Ripple-delete: later same-track clips slide left to close the gap.
+  // Mirrors the Timeline's Delete/Backspace shortcut — this is the same op
+  // made discoverable as a button, and closes the panel with the clip since
+  // there's nothing left to inspect.
+  function deleteClip() {
+    void run((p) => ipc.timeline.rippleDeleteItem(p, item.id))
+      .then(() => onClose())
+      .catch(() => {
+        // Clamped / rejected by the backend — leave the project untouched.
+      });
+  }
+
   function commitTrim(edge: "in" | "out", raw: string) {
     const value = Number(raw);
     if (!Number.isFinite(value)) return;
@@ -212,6 +224,16 @@ export function ClipInspector({
           >
             <Scissors size={13} />
             {t("inspectorSplit")}
+          </button>
+          <button
+            type="button"
+            data-testid="inspector-delete"
+            onClick={deleteClip}
+            title={t("inspectorDelete")}
+            className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-[var(--color-border)] px-2 py-1.5 text-[var(--text-ui-sm)] text-[var(--color-fg-muted)] hover:border-[var(--color-danger,#b3261e)] hover:bg-[var(--color-bg-surface)] hover:text-[var(--color-danger,#b3261e)]"
+          >
+            <Trash2 size={13} />
+            {t("inspectorDelete")}
           </button>
         </Section>
 

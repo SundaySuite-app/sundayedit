@@ -14,6 +14,9 @@
 //! `Project::validate()` so a malformed result is surfaced as an
 //! `Invariant` error instead of corrupting state.
 
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
 use crate::error::{AppError, AppResult};
 use crate::model::{
     MediaItem, Project, TextSpec, TimelineItem, TimelineItemKind, Track, TrackKind, Transform,
@@ -536,6 +539,214 @@ pub fn ripple_delete_item(project: &Project, item_id: &str) -> AppResult<Project
     finalize(next)
 }
 
+// ── gap engine ──────────────────────────────────────────────────────────────────
+//
+// A *gap* is empty time on one track: from 0 to the first clip, or between two
+// clips. There is no trailing gap — the track simply ends.
+//
+// **Protection.** A protected gap is one a ripple must not consume: the shift
+// stops there and the material downstream keeps its timecode. We do NOT
+// introduce a persisted gap entity for this. The marker is the existing,
+// already-persisted `TimelineItem.locked` flag: *the gap immediately before a
+// locked clip is protected*, because closing or shrinking past it would move a
+// clip the user pinned. `Gap.protected` is therefore derived at query time,
+// never stored — no new table, no new column, no SCHEMA_VERSION bump, and it
+// composes with the lock affordance the UI already has. See docs/DECISIONS.md
+// ADR-011 for the rejected alternative (a persisted gap entity).
+//
+// All four ops clamp rather than reject: an out-of-range `at_ms`, a zero
+// duration, or a fully pinned track yields an unchanged project, not an error.
+
+/// A stretch of empty time on one track. `end_ms` is exclusive.
+///
+/// `protected` means a ripple stops here (the clip that follows is locked).
+/// Returned by `detect_gaps` — this is a query result, never persisted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../src/lib/bindings/Gap.ts")]
+pub struct Gap {
+    #[ts(type = "number")]
+    pub start_ms: i64,
+    #[ts(type = "number")]
+    pub end_ms: i64,
+    pub protected: bool,
+}
+
+impl Gap {
+    /// Length of the gap in milliseconds.
+    pub fn duration_ms(&self) -> i64 {
+        self.end_ms - self.start_ms
+    }
+}
+
+/// Every gap on `track_id`, left to right, including a leading gap when the
+/// first clip does not start at 0. Pure query — takes no project mutation.
+pub fn detect_gaps(project: &Project, track_id: &str) -> AppResult<Vec<Gap>> {
+    require_track(project, track_id)?;
+    let items = track_items_sorted(project, track_id);
+
+    let mut gaps = Vec::new();
+    let mut cursor = 0i64;
+    for it in &items {
+        if it.timeline_start_ms > cursor {
+            gaps.push(Gap {
+                start_ms: cursor,
+                end_ms: it.timeline_start_ms,
+                protected: it.locked,
+            });
+        }
+        // `max` so overlapping clips (legal on Caption/Overlay tracks) don't
+        // manufacture a phantom gap behind the cursor.
+        cursor = cursor.max(it.timeline_end_ms());
+    }
+    Ok(gaps)
+}
+
+/// Open `duration_ms` of empty time at `at_ms`: every clip that STARTS at or
+/// after `at_ms` slides right. A clip straddling `at_ms` keeps its place — use
+/// `split_timeline_item` first if you want to cut it open.
+///
+/// The ripple stops at the first locked clip at or after `at_ms`: the clips in
+/// between absorb as much of the shift as the protected gap allows, and the
+/// locked clip never moves. With no headroom the op is a no-op.
+pub fn insert_gap_with_ripple(
+    project: &Project,
+    track_id: &str,
+    at_ms: i64,
+    duration_ms: i64,
+) -> AppResult<Project> {
+    require_track(project, track_id)?;
+    let at = at_ms.max(0);
+    let requested = duration_ms.max(0);
+    if requested == 0 {
+        return finalize(project.clone());
+    }
+
+    let items = track_items_sorted(project, track_id);
+    let barrier = items
+        .iter()
+        .position(|it| it.timeline_start_ms >= at && it.locked);
+
+    // Clips that may move: start >= at, and ahead of the barrier.
+    let movable: Vec<String> = items
+        .iter()
+        .enumerate()
+        .filter(|(i, it)| it.timeline_start_ms >= at && barrier.is_none_or(|b| *i < b))
+        .map(|(_, it)| it.id.clone())
+        .collect();
+    if movable.is_empty() {
+        return finalize(project.clone());
+    }
+
+    // Clamp the shift to the headroom in front of the barrier.
+    let shift = match barrier {
+        None => requested,
+        Some(b) => {
+            let last_end = items[..b]
+                .iter()
+                .filter(|it| it.timeline_start_ms >= at)
+                .map(|it| it.timeline_end_ms())
+                .max()
+                .unwrap_or(at);
+            requested.min((items[b].timeline_start_ms - last_end).max(0))
+        }
+    };
+    if shift == 0 {
+        return finalize(project.clone());
+    }
+
+    let mut next = project.clone();
+    for it in next.timeline_items.iter_mut() {
+        if movable.iter().any(|id| id == &it.id) {
+            it.timeline_start_ms += shift;
+        }
+    }
+    finalize(next)
+}
+
+/// Close the gap containing `at_ms`: every clip from the gap's end onwards
+/// slides left by the gap's length.
+///
+/// No-op (not an error) when `at_ms` is not inside a gap, or when the gap is
+/// protected. The ripple stops at the first locked clip downstream, which then
+/// keeps its timecode while the material before it packs up against the gap.
+pub fn remove_gap_with_ripple(
+    project: &Project,
+    track_id: &str,
+    at_ms: i64,
+) -> AppResult<Project> {
+    require_track(project, track_id)?;
+    let at = at_ms.max(0);
+
+    let gaps = detect_gaps(project, track_id)?;
+    let Some(gap) = gaps
+        .into_iter()
+        .find(|g| at >= g.start_ms && at < g.end_ms)
+        .filter(|g| !g.protected)
+    else {
+        return finalize(project.clone());
+    };
+    let len = gap.duration_ms();
+
+    let items = track_items_sorted(project, track_id);
+    let barrier = items
+        .iter()
+        .position(|it| it.timeline_start_ms >= gap.end_ms && it.locked);
+    let movable: Vec<String> = items
+        .iter()
+        .enumerate()
+        .filter(|(i, it)| it.timeline_start_ms >= gap.end_ms && barrier.is_none_or(|b| *i < b))
+        .map(|(_, it)| it.id.clone())
+        .collect();
+    if movable.is_empty() {
+        return finalize(project.clone());
+    }
+
+    let mut next = project.clone();
+    for it in next.timeline_items.iter_mut() {
+        if movable.iter().any(|id| id == &it.id) {
+            it.timeline_start_ms = (it.timeline_start_ms - len).max(gap.start_ms);
+        }
+    }
+    finalize(next)
+}
+
+/// Close every gap on the track, left to right: each clip slides back against
+/// its predecessor (the first one to 0).
+///
+/// Locked clips are anchors — they keep their timecode, and the clips after
+/// them pack against the anchor's end rather than sliding past it. So the gap
+/// in front of a locked clip survives (and grows, since everything upstream
+/// moved left): that is exactly what "protected" buys the user.
+///
+/// Clips never move right, so a track with no gaps is unchanged.
+pub fn pack_track(project: &Project, track_id: &str) -> AppResult<Project> {
+    require_track(project, track_id)?;
+    let items = track_items_sorted(project, track_id);
+
+    let mut cursor = 0i64;
+    let mut moves: Vec<(String, i64)> = Vec::new();
+    for it in &items {
+        if it.locked {
+            cursor = cursor.max(it.timeline_end_ms());
+            continue;
+        }
+        let dur = it.timeline_end_ms() - it.timeline_start_ms;
+        // `min` is belt-and-braces: on a well-formed track the cursor is never
+        // ahead of the clip, and we must never shove a clip to the right.
+        let start = cursor.min(it.timeline_start_ms);
+        moves.push((it.id.clone(), start));
+        cursor = start + dur;
+    }
+
+    let mut next = project.clone();
+    for it in next.timeline_items.iter_mut() {
+        if let Some((_, start)) = moves.iter().find(|(id, _)| id == &it.id) {
+            it.timeline_start_ms = *start;
+        }
+    }
+    finalize(next)
+}
+
 // ── transitions / transform ─────────────────────────────────────────────────────
 
 /// Set (or replace) the leading-edge transition on a clip. The duration is
@@ -641,6 +852,34 @@ fn find_item_mut<'a>(project: &'a mut Project, id: &str) -> AppResult<&'a mut Ti
             entity: "timeline_item",
             id: id.to_string(),
         })
+}
+
+fn require_track<'a>(project: &'a Project, track_id: &str) -> AppResult<&'a Track> {
+    project
+        .tracks
+        .iter()
+        .find(|t| t.id == track_id)
+        .ok_or_else(|| AppError::NotFound {
+            entity: "track",
+            id: track_id.to_string(),
+        })
+}
+
+/// Every clip on `track_id`, ordered by timeline position. Ties broken by id so
+/// the order is deterministic (two clips may share a start on Caption/Overlay
+/// tracks, where overlap is legal).
+fn track_items_sorted<'a>(project: &'a Project, track_id: &str) -> Vec<&'a TimelineItem> {
+    let mut items: Vec<&TimelineItem> = project
+        .timeline_items
+        .iter()
+        .filter(|it| it.track_id == track_id)
+        .collect();
+    items.sort_by(|a, b| {
+        a.timeline_start_ms
+            .cmp(&b.timeline_start_ms)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    items
 }
 
 fn find_media<'a>(project: &'a Project, id: &str) -> AppResult<&'a MediaItem> {
@@ -1252,5 +1491,461 @@ mod tests {
         let p = base();
         let err = add_text_item(&p, "t1".into(), "nope", 0, 1000, "Hi".into()).unwrap_err();
         assert_eq!(err.code(), "not_found");
+    }
+
+    // ── gap engine ──────────────────────────────────────────────────────────
+
+    /// A track with three 1 s clips and two 1 s gaps:
+    ///   [1000..2000) a  ·gap·  [3000..4000) b  ·gap·  [5000..6000) c
+    /// plus a leading gap [0..1000).
+    fn gappy() -> Project {
+        let mut p = base();
+        p.media = vec![media("m1", 10_000)];
+        p.timeline_items = vec![
+            item("a", "v1", Some("m1"), 1000, 0, 1000),
+            item("b", "v1", Some("m1"), 3000, 0, 1000),
+            item("c", "v1", Some("m1"), 5000, 0, 1000),
+        ];
+        p
+    }
+
+    fn lock(p: &mut Project, id: &str) {
+        p.timeline_items
+            .iter_mut()
+            .find(|it| it.id == id)
+            .unwrap()
+            .locked = true;
+    }
+
+    fn start_of(p: &Project, id: &str) -> i64 {
+        p.timeline_items
+            .iter()
+            .find(|it| it.id == id)
+            .unwrap()
+            .timeline_start_ms
+    }
+
+    // detect_gaps
+    #[test]
+    fn detect_gaps_finds_leading_and_interior_gaps() {
+        let g = detect_gaps(&gappy(), "v1").unwrap();
+        assert_eq!(
+            g,
+            vec![
+                Gap {
+                    start_ms: 0,
+                    end_ms: 1000,
+                    protected: false
+                },
+                Gap {
+                    start_ms: 2000,
+                    end_ms: 3000,
+                    protected: false
+                },
+                Gap {
+                    start_ms: 4000,
+                    end_ms: 5000,
+                    protected: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn detect_gaps_reports_no_trailing_gap() {
+        let g = detect_gaps(&gappy(), "v1").unwrap();
+        assert!(
+            g.iter().all(|x| x.start_ms < 5000),
+            "a track just ends — no trailing gap"
+        );
+    }
+
+    #[test]
+    fn detect_gaps_empty_track_has_no_gaps() {
+        let p = base();
+        assert!(detect_gaps(&p, "v1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn detect_gaps_gapless_track_has_no_gaps() {
+        let mut p = base();
+        p.timeline_items = vec![
+            item("a", "v1", Some("m1"), 0, 0, 1000),
+            item("b", "v1", Some("m1"), 1000, 0, 1000),
+        ];
+        assert!(detect_gaps(&p, "v1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn detect_gaps_unknown_track_is_not_found() {
+        let err = detect_gaps(&gappy(), "nope").unwrap_err();
+        assert_eq!(err.code(), "not_found");
+    }
+
+    #[test]
+    fn detect_gaps_ignores_other_tracks() {
+        let mut p = gappy();
+        p.tracks.push(track("v2", TrackKind::Video, 1));
+        p.timeline_items
+            .push(item("d", "v2", Some("m1"), 0, 0, 9000));
+        assert_eq!(detect_gaps(&p, "v1").unwrap().len(), 3);
+        assert!(detect_gaps(&p, "v2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn detect_gaps_overlapping_items_do_not_manufacture_gaps() {
+        // Overlap is legal on Overlay tracks; a short clip inside a long one
+        // must not look like a gap when the cursor walks past it.
+        let mut p = base();
+        p.tracks.push(track("ov", TrackKind::Overlay, 1));
+        p.timeline_items = vec![
+            item("long", "ov", Some("m1"), 0, 0, 5000),
+            item("short", "ov", Some("m1"), 1000, 0, 500),
+        ];
+        assert!(detect_gaps(&p, "ov").unwrap().is_empty());
+    }
+
+    #[test]
+    fn detect_gaps_marks_the_gap_before_a_locked_clip_protected() {
+        let mut p = gappy();
+        lock(&mut p, "b");
+        let g = detect_gaps(&p, "v1").unwrap();
+        assert_eq!(g[1].start_ms, 2000);
+        assert!(g[1].protected, "gap in front of locked 'b' is protected");
+        assert!(!g[0].protected);
+        assert!(!g[2].protected);
+    }
+
+    #[test]
+    fn gap_duration_is_end_minus_start() {
+        let g = detect_gaps(&gappy(), "v1").unwrap();
+        assert_eq!(g[0].duration_ms(), 1000);
+    }
+
+    // insert_gap_with_ripple
+    #[test]
+    fn insert_gap_shifts_clips_starting_at_or_after() {
+        let r = insert_gap_with_ripple(&gappy(), "v1", 3000, 500).unwrap();
+        assert_eq!(start_of(&r, "a"), 1000, "before the point — unmoved");
+        assert_eq!(start_of(&r, "b"), 3500);
+        assert_eq!(start_of(&r, "c"), 5500);
+    }
+
+    #[test]
+    fn insert_gap_leaves_a_straddling_clip_in_place() {
+        // 3500 falls inside b [3000..4000): b starts before it, so b stays.
+        let r = insert_gap_with_ripple(&gappy(), "v1", 3500, 500).unwrap();
+        assert_eq!(start_of(&r, "b"), 3000);
+        assert_eq!(start_of(&r, "c"), 5500);
+    }
+
+    #[test]
+    fn insert_gap_at_zero_shifts_the_whole_track() {
+        let r = insert_gap_with_ripple(&gappy(), "v1", 0, 250).unwrap();
+        assert_eq!(start_of(&r, "a"), 1250);
+        assert_eq!(start_of(&r, "b"), 3250);
+        assert_eq!(start_of(&r, "c"), 5250);
+    }
+
+    #[test]
+    fn insert_gap_zero_duration_is_a_no_op() {
+        let p = gappy();
+        let r = insert_gap_with_ripple(&p, "v1", 3000, 0).unwrap();
+        assert_eq!(r.timeline_items, p.timeline_items);
+    }
+
+    #[test]
+    fn insert_gap_clamps_negative_inputs() {
+        let p = gappy();
+        // Negative duration clamps to 0 → no-op; negative at clamps to 0.
+        let r = insert_gap_with_ripple(&p, "v1", -9999, -5).unwrap();
+        assert_eq!(r.timeline_items, p.timeline_items);
+        let r = insert_gap_with_ripple(&p, "v1", -9999, 100).unwrap();
+        assert_eq!(start_of(&r, "a"), 1100);
+    }
+
+    #[test]
+    fn insert_gap_past_the_end_moves_nothing() {
+        let p = gappy();
+        let r = insert_gap_with_ripple(&p, "v1", 99_000, 1000).unwrap();
+        assert_eq!(r.timeline_items, p.timeline_items);
+    }
+
+    #[test]
+    fn insert_gap_ripple_stops_at_a_protected_gap() {
+        let mut p = gappy();
+        lock(&mut p, "c"); // gap [4000..5000) in front of c is protected
+        let r = insert_gap_with_ripple(&p, "v1", 3000, 400).unwrap();
+        assert_eq!(start_of(&r, "b"), 3400, "b absorbs the shift");
+        assert_eq!(start_of(&r, "c"), 5000, "locked c keeps its timecode");
+    }
+
+    #[test]
+    fn insert_gap_clamps_the_shift_to_the_protected_headroom() {
+        let mut p = gappy();
+        lock(&mut p, "c");
+        // Headroom between b's end (4000) and c's start (5000) is 1000 ms.
+        let r = insert_gap_with_ripple(&p, "v1", 3000, 5_000).unwrap();
+        assert_eq!(start_of(&r, "b"), 4000, "b slides only as far as it fits");
+        assert_eq!(start_of(&r, "c"), 5000);
+    }
+
+    #[test]
+    fn insert_gap_with_no_headroom_is_a_no_op() {
+        let mut p = base();
+        p.timeline_items = vec![
+            item("a", "v1", Some("m1"), 0, 0, 1000),
+            item("b", "v1", Some("m1"), 1000, 0, 1000),
+        ];
+        lock(&mut p, "b");
+        let before = p.timeline_items.clone();
+        let r = insert_gap_with_ripple(&p, "v1", 1000, 500).unwrap();
+        assert_eq!(r.timeline_items, before);
+    }
+
+    #[test]
+    fn insert_gap_at_a_locked_clip_moves_nothing() {
+        let mut p = gappy();
+        lock(&mut p, "b");
+        let before = p.timeline_items.clone();
+        let r = insert_gap_with_ripple(&p, "v1", 3000, 500).unwrap();
+        assert_eq!(r.timeline_items, before, "b is the barrier itself");
+    }
+
+    #[test]
+    fn insert_gap_downstream_of_the_barrier_stays_put() {
+        let mut p = gappy();
+        lock(&mut p, "b");
+        let r = insert_gap_with_ripple(&p, "v1", 1000, 300).unwrap();
+        assert_eq!(start_of(&r, "a"), 1300);
+        assert_eq!(start_of(&r, "b"), 3000);
+        assert_eq!(start_of(&r, "c"), 5000, "ripple never jumped the barrier");
+    }
+
+    #[test]
+    fn insert_gap_unknown_track_is_not_found() {
+        let err = insert_gap_with_ripple(&gappy(), "nope", 0, 100).unwrap_err();
+        assert_eq!(err.code(), "not_found");
+    }
+
+    // remove_gap_with_ripple
+    #[test]
+    fn remove_gap_closes_the_gap_and_ripples() {
+        let r = remove_gap_with_ripple(&gappy(), "v1", 2500).unwrap();
+        assert_eq!(start_of(&r, "a"), 1000);
+        assert_eq!(start_of(&r, "b"), 2000, "b closed up against a");
+        assert_eq!(start_of(&r, "c"), 4000);
+        // The gap it targeted is gone; the other two survive.
+        let g = detect_gaps(&r, "v1").unwrap();
+        assert_eq!(g.len(), 2);
+        assert!(!g.iter().any(|x| x.start_ms == 2000));
+    }
+
+    #[test]
+    fn remove_gap_closes_the_leading_gap() {
+        let r = remove_gap_with_ripple(&gappy(), "v1", 0).unwrap();
+        assert_eq!(start_of(&r, "a"), 0);
+        assert_eq!(start_of(&r, "b"), 2000);
+        assert_eq!(start_of(&r, "c"), 4000);
+    }
+
+    #[test]
+    fn remove_gap_is_inclusive_of_start_exclusive_of_end() {
+        // 2000 is the gap's first ms → hits. 3000 is the next clip → no-op.
+        let hit = remove_gap_with_ripple(&gappy(), "v1", 2000).unwrap();
+        assert_eq!(start_of(&hit, "b"), 2000);
+        let p = gappy();
+        let miss = remove_gap_with_ripple(&p, "v1", 3000).unwrap();
+        assert_eq!(miss.timeline_items, p.timeline_items);
+    }
+
+    #[test]
+    fn remove_gap_outside_any_gap_is_a_no_op() {
+        let p = gappy();
+        for at in [1500i64, 3500, 5500, 99_000] {
+            let r = remove_gap_with_ripple(&p, "v1", at).unwrap();
+            assert_eq!(r.timeline_items, p.timeline_items, "at={at}");
+        }
+    }
+
+    #[test]
+    fn remove_gap_clamps_negative_at() {
+        let r = remove_gap_with_ripple(&gappy(), "v1", -500).unwrap();
+        assert_eq!(start_of(&r, "a"), 0, "clamped into the leading gap");
+    }
+
+    #[test]
+    fn remove_gap_refuses_a_protected_gap() {
+        let mut p = gappy();
+        lock(&mut p, "b");
+        let before = p.timeline_items.clone();
+        let r = remove_gap_with_ripple(&p, "v1", 2500).unwrap();
+        assert_eq!(r.timeline_items, before);
+    }
+
+    #[test]
+    fn remove_gap_ripple_stops_at_a_downstream_locked_clip() {
+        let mut p = gappy();
+        lock(&mut p, "c");
+        let r = remove_gap_with_ripple(&p, "v1", 2500).unwrap();
+        assert_eq!(start_of(&r, "b"), 2000, "b moved");
+        assert_eq!(start_of(&r, "c"), 5000, "locked c did not");
+    }
+
+    #[test]
+    fn remove_gap_on_an_empty_track_is_a_no_op() {
+        let p = base();
+        let r = remove_gap_with_ripple(&p, "v1", 1000).unwrap();
+        assert!(r.timeline_items.is_empty());
+    }
+
+    #[test]
+    fn remove_gap_unknown_track_is_not_found() {
+        let err = remove_gap_with_ripple(&gappy(), "nope", 0).unwrap_err();
+        assert_eq!(err.code(), "not_found");
+    }
+
+    // pack_track
+    #[test]
+    fn pack_track_closes_every_gap() {
+        let r = pack_track(&gappy(), "v1").unwrap();
+        assert_eq!(start_of(&r, "a"), 0);
+        assert_eq!(start_of(&r, "b"), 1000);
+        assert_eq!(start_of(&r, "c"), 2000);
+        assert!(detect_gaps(&r, "v1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn pack_track_is_idempotent() {
+        let once = pack_track(&gappy(), "v1").unwrap();
+        let twice = pack_track(&once, "v1").unwrap();
+        assert_eq!(once.timeline_items, twice.timeline_items);
+    }
+
+    #[test]
+    fn pack_track_leaves_a_gapless_track_alone() {
+        let mut p = base();
+        p.timeline_items = vec![
+            item("a", "v1", Some("m1"), 0, 0, 1000),
+            item("b", "v1", Some("m1"), 1000, 0, 1000),
+        ];
+        let r = pack_track(&p, "v1").unwrap();
+        assert_eq!(r.timeline_items, p.timeline_items);
+    }
+
+    #[test]
+    fn pack_track_never_moves_a_clip_to_the_right() {
+        let r = pack_track(&gappy(), "v1").unwrap();
+        for id in ["a", "b", "c"] {
+            assert!(start_of(&r, id) <= start_of(&gappy(), id), "{id} moved right");
+        }
+    }
+
+    #[test]
+    fn pack_track_anchors_locked_clips_and_preserves_their_gap() {
+        let mut p = gappy();
+        lock(&mut p, "c");
+        let r = pack_track(&p, "v1").unwrap();
+        assert_eq!(start_of(&r, "a"), 0);
+        assert_eq!(start_of(&r, "b"), 1000);
+        assert_eq!(start_of(&r, "c"), 5000, "anchor holds its timecode");
+        // The protected gap survives — grown, because the material upstream
+        // packed left away from it.
+        let g = detect_gaps(&r, "v1").unwrap();
+        assert_eq!(g.len(), 1);
+        assert_eq!((g[0].start_ms, g[0].end_ms), (2000, 5000));
+        assert!(g[0].protected);
+    }
+
+    #[test]
+    fn pack_track_packs_after_a_locked_anchor_too() {
+        let mut p = gappy();
+        lock(&mut p, "b");
+        let r = pack_track(&p, "v1").unwrap();
+        assert_eq!(start_of(&r, "a"), 0);
+        assert_eq!(start_of(&r, "b"), 3000, "anchor holds");
+        assert_eq!(start_of(&r, "c"), 4000, "c packs against the anchor's end");
+    }
+
+    #[test]
+    fn pack_track_first_clip_locked_pins_the_leading_gap() {
+        let mut p = gappy();
+        lock(&mut p, "a");
+        let r = pack_track(&p, "v1").unwrap();
+        assert_eq!(start_of(&r, "a"), 1000);
+        assert_eq!(start_of(&r, "b"), 2000);
+        assert_eq!(start_of(&r, "c"), 3000);
+        let g = detect_gaps(&r, "v1").unwrap();
+        assert_eq!(g.len(), 1);
+        assert_eq!((g[0].start_ms, g[0].end_ms), (0, 1000));
+    }
+
+    #[test]
+    fn pack_track_all_locked_is_a_no_op() {
+        let mut p = gappy();
+        for id in ["a", "b", "c"] {
+            lock(&mut p, id);
+        }
+        let before = p.timeline_items.clone();
+        let r = pack_track(&p, "v1").unwrap();
+        assert_eq!(r.timeline_items, before);
+    }
+
+    #[test]
+    fn pack_track_ignores_other_tracks() {
+        let mut p = gappy();
+        p.tracks.push(track("v2", TrackKind::Video, 1));
+        p.timeline_items
+            .push(item("d", "v2", Some("m1"), 7000, 0, 1000));
+        let r = pack_track(&p, "v1").unwrap();
+        assert_eq!(start_of(&r, "d"), 7000);
+    }
+
+    #[test]
+    fn pack_track_respects_clip_speed() {
+        let mut p = base();
+        let mut fast = item("a", "v1", Some("m1"), 1000, 0, 2000);
+        fast.speed = 2.0; // 2000 ms of source → 1000 ms on the timeline
+        p.timeline_items = vec![fast, item("b", "v1", Some("m1"), 5000, 0, 1000)];
+        let r = pack_track(&p, "v1").unwrap();
+        assert_eq!(start_of(&r, "a"), 0);
+        assert_eq!(start_of(&r, "b"), 1000);
+    }
+
+    #[test]
+    fn pack_track_empty_track_is_fine() {
+        let p = base();
+        let r = pack_track(&p, "v1").unwrap();
+        assert!(r.timeline_items.is_empty());
+    }
+
+    #[test]
+    fn pack_track_unknown_track_is_not_found() {
+        let err = pack_track(&gappy(), "nope").unwrap_err();
+        assert_eq!(err.code(), "not_found");
+    }
+
+    // Cross-op invariant: every gap op leaves a valid timeline.
+    #[test]
+    fn gap_ops_all_validate_the_result() {
+        let p = gappy();
+        for r in [
+            insert_gap_with_ripple(&p, "v1", 3000, 750).unwrap(),
+            remove_gap_with_ripple(&p, "v1", 2500).unwrap(),
+            pack_track(&p, "v1").unwrap(),
+        ] {
+            r.validate_timeline().expect("timeline invariants hold");
+            r.validate().expect("project invariants hold");
+        }
+    }
+
+    #[test]
+    fn insert_then_remove_the_same_gap_round_trips() {
+        let p = gappy();
+        let inserted = insert_gap_with_ripple(&p, "v1", 3000, 750).unwrap();
+        // The gap in front of b is now 1750 ms; removing it puts b back.
+        let restored = remove_gap_with_ripple(&inserted, "v1", 2500).unwrap();
+        assert_eq!(start_of(&restored, "b"), 2000);
+        assert_eq!(start_of(&restored, "c"), 4000);
     }
 }

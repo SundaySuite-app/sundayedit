@@ -37,6 +37,21 @@ pub fn extract_thumbnail(media_path: String, at_ms: i64, out_path: String) -> Ap
     video::extract_thumbnail(&media_path, at_ms, &out_path)
 }
 
+/// Render one filmstrip tile — `cols` frames from `[start_ms, end_ms)` tiled
+/// into a single JPEG at `out_path`. Ranges come from the fixed per-zoom-tier
+/// grid in `services::tiles` (`tiles_covering` / `tile_key`), so the rendered
+/// files stay addressable and reusable across scroll and zoom.
+#[tauri::command]
+pub fn extract_filmstrip_tile(
+    media_path: String,
+    start_ms: i64,
+    end_ms: i64,
+    cols: u32,
+    out_path: String,
+) -> AppResult<String> {
+    video::extract_filmstrip_tile(&media_path, start_ms, end_ms, cols, &out_path)
+}
+
 /// Create a fresh in-memory Project from a video file. Captions are empty
 /// until the user transcribes (Phase 2). The video is hashed for path
 /// stability and a sensible default style is applied. The multi-track shape

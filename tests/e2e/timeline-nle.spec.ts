@@ -119,6 +119,51 @@ test("the Delete key ripple-deletes the selected clip", async ({ page }) => {
   await expect(page.getByTitle("sermon.mp4")).toHaveCount(0);
 });
 
+// ── real-UI: the inspector's delete button ripple-deletes too (E3-UI) ────────
+
+test("the inspector's delete button ripple-deletes the selected clip and closes the panel", async ({
+  page,
+}) => {
+  await page.getByTitle("sermon.mp4").dispatchEvent("click");
+  const inspector = page.getByTestId("clip-inspector");
+  await expect(inspector).toBeVisible();
+
+  await inspector.getByTestId("inspector-delete").click();
+  // op_ripple_delete_item removed the only clip — its box AND the inspector
+  // (nothing left to inspect) are gone.
+  await expect(page.getByTitle("sermon.mp4")).toHaveCount(0);
+  await expect(inspector).toBeHidden();
+});
+
+// ── real-UI: the track header's close-gaps button (E3-UI) ────────────────────
+
+test("the close-gaps track button is offered on a video track but not on captions", async ({
+  page,
+}) => {
+  await expect(
+    page.getByTestId("track-header-tv").getByTestId("pack-track-tv"),
+  ).toBeVisible();
+  // Gaps live in TimelineItems; the caption track's content is a separate
+  // `captions` array, so there is nothing for pack_track to act on there.
+  await expect(
+    page.getByTestId("track-header-tc").getByTestId("pack-track-tc"),
+  ).toHaveCount(0);
+});
+
+test("clicking close-gaps commits op_pack_track without disturbing an already-packed track", async ({
+  page,
+}) => {
+  // The demo project's one clip already sits at 0 on tv — packing is a no-op,
+  // but the click must still round-trip cleanly through the shared undo stack
+  // (no alert, the clip box survives) rather than erroring or vanishing state.
+  await page
+    .getByTestId("track-header-tv")
+    .getByTestId("pack-track-tv")
+    .dispatchEvent("click");
+  await expect(page.getByTitle("sermon.mp4")).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
 // ── real-UI: remove-track rejection surfaces in the timeline ─────────────────
 
 test("removing a non-empty track surfaces the backend rejection", async ({
@@ -255,6 +300,70 @@ test("ripple-delete op removes a clip and slides later clips left", async ({
   expect(next.timeline_items).toHaveLength(1);
   expect(next.timeline_items[0].id).toBe("ti2");
   expect(next.timeline_items[0].timeline_start_ms).toBe(2000); // 20000 − 18000
+});
+
+test("pack-track op closes every gap, left to right", async ({ page }) => {
+  // ti1 [0,18000], then a 2000ms gap, then ti2 [20000,24000].
+  const project = demoProject();
+  project.timeline_items.push({
+    id: "ti2",
+    track_id: "tv",
+    kind: "av",
+    source_media_id: "m1",
+    in_ms: 0,
+    out_ms: 4000,
+    timeline_start_ms: 20_000,
+    speed: 1,
+    transform: identityTransform(),
+    effects: [],
+    transition_in: null,
+    text: null,
+    enabled: true,
+    locked: false,
+  });
+  const next = await invoke<DemoProject>(page, "op_pack_track", {
+    project,
+    trackId: "tv",
+  });
+  expect(
+    next.timeline_items.find((it) => it.id === "ti1")!.timeline_start_ms,
+  ).toBe(0);
+  expect(
+    next.timeline_items.find((it) => it.id === "ti2")!.timeline_start_ms,
+  ).toBe(18_000); // packed straight up against ti1's end
+});
+
+test("pack-track op anchors a locked clip and leaves the gap in front of it alone", async ({
+  page,
+}) => {
+  const project = demoProject();
+  project.timeline_items[0].locked = true; // ti1 is the anchor
+  project.timeline_items.push({
+    id: "ti2",
+    track_id: "tv",
+    kind: "av",
+    source_media_id: "m1",
+    in_ms: 0,
+    out_ms: 4000,
+    timeline_start_ms: 20_000,
+    speed: 1,
+    transform: identityTransform(),
+    effects: [],
+    transition_in: null,
+    text: null,
+    enabled: true,
+    locked: false,
+  });
+  const next = await invoke<DemoProject>(page, "op_pack_track", {
+    project,
+    trackId: "tv",
+  });
+  expect(
+    next.timeline_items.find((it) => it.id === "ti1")!.timeline_start_ms,
+  ).toBe(0); // locked — untouched
+  expect(
+    next.timeline_items.find((it) => it.id === "ti2")!.timeline_start_ms,
+  ).toBe(18_000); // packs against the anchor's end, same as the unlocked case
 });
 
 test("set-transition then clear-transition round-trips a clip's lead-in", async ({
