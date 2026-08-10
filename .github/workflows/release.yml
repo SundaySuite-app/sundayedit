@@ -23,17 +23,17 @@ on:
         description: "Release tag to cut (e.g. v0.8.0). Created at the dispatched ref."
         required: true
         type: string
-      notarize:
-        description: >-
-          Notarize the macOS build. Requires an in-effect Apple Program License
-          Agreement — Apple returns HTTP 403 "a required agreement is missing or
-          has expired" when it is not signed, which fails the whole macOS job
-          AFTER a successful build and code-sign. Leave off to ship a signed but
-          un-notarized DMG (Gatekeeper shows a first-open warning; users right-
-          click → Open, or run `xattr -cr /Applications/SundayEdit.app`).
-        required: false
-        default: false
-        type: boolean
+    # Notarization is deliberately NOT an input here: a manual run never
+    # notarizes, a tag push always does. Two reasons. (1) GitHub compares a
+    # boolean input against a literal by casting both to a number, so both
+    # "true" and "false" come out NaN and never equal `true` — a toggle would
+    # silently mean whatever the default was. (2) Notarization needs an
+    # in-effect Apple Program License Agreement; while it is unsigned, Apple
+    # answers HTTP 403 and fails the macOS job AFTER a clean build and
+    # code-sign. So dispatch = the escape hatch that ships a signed but
+    # un-notarized DMG (Gatekeeper warns on first open: right-click → Open,
+    # or `xattr -cr /Applications/SundayEdit.app`), and tagging restores
+    # notarization automatically once the agreement is accepted.
 
 jobs:
   build:
@@ -92,6 +92,18 @@ jobs:
       - name: Fetch bundled ffmpeg/ffprobe sidecars
         run: node scripts/fetch-ffmpeg.mjs ${{ matrix.sidecar-args }}
 
+      # Only a tag push notarizes. Exporting through $GITHUB_ENV (rather than
+      # a conditional expression in the build step's `env:`) is what makes the
+      # off-switch real: on a manual run these variables are never defined.
+      - name: Enable macOS notarization (tag pushes only)
+        if: matrix.platform == 'macos-latest' && github.event_name == 'push'
+        run: |
+          {
+            echo "APPLE_ID=${{ secrets.APPLE_ID }}"
+            echo "APPLE_PASSWORD=${{ secrets.APP_SPECIFIC_PASSWORD }}"
+            echo "APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}"
+          } >> "$GITHUB_ENV"
+
       - name: Build, sign, and publish
         uses: tauri-apps/tauri-action@v1
         env:
@@ -122,12 +134,12 @@ jobs:
           # password. The old APPLE_PASSWORD secret was stale (notarytool 401);
           # the fresh app-specific password lives in APP_SPECIFIC_PASSWORD
           # (added 2026-06-09), so feed that one in.
-          # tauri-action only notarizes when all three are non-empty, so this
-          # is the on/off switch. A tag push always attempts it; a manual run
-          # only does when `notarize` is checked.
-          APPLE_ID: ${{ (github.event_name != 'workflow_dispatch' || inputs.notarize) && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ (github.event_name != 'workflow_dispatch' || inputs.notarize) && secrets.APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ (github.event_name != 'workflow_dispatch' || inputs.notarize) && secrets.APPLE_TEAM_ID || '' }}
+          # APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID are deliberately absent
+          # here — they are exported by the step above, and only on tag pushes.
+          # Setting them to '' would NOT disable notarization: an empty-but-
+          # defined variable still reads as Ok("") on the Tauri side, so the
+          # bundler enters the notarize path and dies on "Team ID must be at
+          # least 3 characters". The variables have to not exist at all.
         with:
           tagName: ${{ inputs.tag || github.ref_name }}
           releaseName: "SundayEdit ${{ inputs.tag || github.ref_name }}"
