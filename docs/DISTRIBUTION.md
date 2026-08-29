@@ -184,3 +184,30 @@ CMAKE_PROJECT_TOP_LEVEL_INCLUDES="$PWD/src-tauri/cmake/ggml-ci-portable.cmake" \
 ```
 
 Artifacts land in `src-tauri/target/universal-apple-darwin/release/bundle/`.
+
+## Notarization: how the switch works (and two traps)
+
+`release.yml` notarizes **only on a tag push**. A manual `workflow_dispatch`
+run deliberately does not, which is the escape hatch for shipping while
+Apple's Program License Agreement is unsigned (notarytool answers HTTP 403
+until it is accepted, failing the macOS job _after_ a clean build and
+code-sign). Nothing needs to be toggled when the agreement is accepted —
+tag a release and notarization happens again.
+
+Two traps this cost us a build each to learn:
+
+1. **Setting `APPLE_ID: ''` does not disable notarization.** An empty-but-
+   defined environment variable still reads as `Ok("")` on the Tauri side,
+   so the bundler enters the notarize path and then dies on
+   `Team ID must be at least 3 characters`. The variables have to not exist
+   at all — hence the conditional step that exports them via `$GITHUB_ENV`.
+2. **A `type: boolean` workflow input cannot be compared to a literal.**
+   GitHub casts both sides to a number, so `"true"` and `"false"` both
+   become NaN and neither equals `true`. A notarize toggle built that way
+   would silently mean its default forever. The rule is positional instead.
+
+An un-notarized build is still signed with the Developer ID cert and runs;
+Gatekeeper shows a first-open warning (right-click → **Open**, or
+`xattr -cr /Applications/SundayEdit.app`). Auto-update is unaffected — the
+updater verifies its own minisign signature against the pubkey in
+`tauri.conf.json`.

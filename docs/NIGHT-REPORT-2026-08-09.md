@@ -53,32 +53,46 @@ slettet (ren forfar av main).
 npm-gruppen (23 oppdateringer), cargo-gruppen (9), actions-gruppen,
 `quinn-proto` (RUSTSEC high). Lukket: fast-uri, js-yaml, postcss m.fl.
 
-## 👤 Morgenbeslutninger (alt klart, én handling per punkt)
+## ✅ Morgenbeslutningene — gjennomført 2026-08-10
 
-1. **Merge PR #37** — lockfile-only sikkerhets-bumper (undici×11,
-   brace-expansion, esbuild, serde_with). Full gate grønn. `npm audit` = 0.
-2. **Merge PR #36** — vite 8 + plugin-react 6 som atomisk par (dependabot
-   #30/#31 er et låst peer-par, umulige enkeltvis — kombinasjonen er
-   full-gate-verifisert). Lukker high-varselet på vite. **Lukk #30 + #31
-   manuelt etterpå.**
-3. **Merge PR #29** (jest-dom 7) og **PR #33** (zip 8) — begge verifisert
-   grønne lokalt mot main (kommentarer ligger på PR-ene).
-   → Etter 1–4 gjenstår ett varsel: `glib` medium (transitiv via tauri,
-   ingen in-range-fiks — vent på oppstrøms).
-4. **PR #32 (sunday-auth v0.4.1)** — IKKE rørt: kryss-repo SSO-kontrakt.
-   Sjekk sunday-platform-CHANGELOG før beslutning.
-5. **Remote-grener** (klassifisereren stoppet autonom sletting — korrekt).
-   Innholdet er i main via squash-merger; slett når du vil:
-   ```
-   git push origin --delete feat/adopt-contracts-mediahandoff feat/highlight-reel-studio fix/whisper-metal-progress-cancel fix/reel-render-spawn-blocking feat/universal-macos-target
-   ```
-   Lokale rester: `git branch -D feat/adopt-contracts-mediahandoff feat/highlight-reel-studio fix/whisper-metal-progress-cancel`
-6. **v0.7.0-utgivelsen (fra juli):** draften har kun Windows-installer.
-   macOS-DMG-en blokkeres fortsatt av Apple-avtalen → godta på
-   developer.apple.com (Membership → Agreements), re-kjør feilet jobb
-   (`gh run rerun 29450117806 --failed`), publiser draften.
-7. **Rigg-test:** `docs/SMOKE-TEST.md` har nye NLE-rader N1–N7 (ekte video
-   → import → klipp → eksport). Eneste flate natta ikke kan verifisere.
+Alle sju punktene under er utført; teksten står igjen som historikk.
+Sluttilstand: **0 åpne PR-er, 0 ekstragrener, `npm audit` 0, dependabot
+17 → 1 varsel** (`glib`, medium, ingen in-range-fiks — vent på oppstrøms).
+
+1–3. **Alle dependency-PR-ene** ble samlet i #43 i stedet for å merges hver
+for seg: de ugyldiggjorde hverandres lockfiler, og #36 hadde rukket å
+få konflikt. vite 8 + plugin-react 6 + jest-dom 7 + `npm audit fix` +
+`serde_with` landet som én verifisert enhet. #26 (actions) og #33 (zip 8)
+merget separat. #37/#36/#31/#30/#29 lukket som superseded. 4. **#32 sunday-auth** løste seg ved etterprøving: Rec/Stage/Paper kjørte
+allerede v0.4.1, så Edit var etternøleren. Dependabots gren var bygget på
+en juli-main (580 tester mot dagens 740), så dens grønne CI beviste
+ingenting — endringen ble verifisert på ekte main og merget der (#45). 5. **Grenene** er ryddet; kun `main` står igjen. 6. **Apple-avtalen ble omgått, ikke løst** (eierordre: «dropp den om du kan»).
+`release.yml` notariserer nå kun ved tag-push; manuell `workflow_dispatch`
+er escape-luken som gir et signert, u-notarisert bygg. Notarisering slår
+seg derfor på av seg selv den dagen avtalen signeres — ingen bryter å
+huske. **v0.8.0 er bygget, publisert og satt som Latest.**
+To feller verdt å kjenne, begge funnet her:
+
+- `APPLE_ID: ''` slår **ikke** av notarisering. En tom-men-definert
+  variabel leses som `Ok("")`, så bundleren går inn i notariseringsstien
+  og dør på «Team ID must be at least 3 characters» — etter et rent bygg
+  og vellykket signering. Variablene må ikke _eksistere_.
+- En `type: boolean` workflow-input kan ikke sammenlignes med en literal:
+  GitHub caster begge til tall, så både `"true"` og `"false"` blir NaN og
+  ingen er lik `true`. En slik bryter betyr stille sin default for alltid.
+
+7. **Rigg-testen gjenstår** — den eneste flaten som krever eier + ekte video.
+
+### Artefakt-verifisering (v0.8.0, etterprøvd på nedlastet DMG)
+
+- Hovedbinær **og** begge ffmpeg-sidecars er ekte universal (`x86_64 arm64`).
+- Signaturen er gyldig og tilfredsstiller sin Designated Requirement;
+  utstedt til _Developer ID Application: Richard Fossland (784GN847G4)_,
+  full kjede til Apple Root CA, sikkert tidsstempel, hardened runtime på.
+- Gatekeeper avviser med nøyaktig én grunn: `Unnotarized Developer ID` —
+  altså er bygget klart for notarisering i det avtalen er på plass.
+- Alle åtte updater-signaturer bærer nøkkel-ID `62b77f9fd487be44`, identisk
+  med pubkey-en appen har bakt inn → auto-oppdatering verifiserer.
 
 ## Flagget, ikke rørt (bevisste beslutninger for eier)
 
