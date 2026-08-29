@@ -557,3 +557,39 @@ describe("Timeline — shuttle/snap keys ignore modified chords", () => {
     expect(queryByText("2× ▸")).not.toBeNull(); // playback must keep running
   });
 });
+
+// ── missing-media indicator (Round: relink media) ────────────────────────────
+
+describe("Timeline — missing media indicator", () => {
+  it("marks the clip box when check_media_paths reports its source missing", async () => {
+    tauriEnv = true;
+    invoke.mockImplementation((cmd: unknown) =>
+      cmd === "check_media_paths"
+        ? Promise.resolve([
+            { media_id: "m1", path: "/demo/sermon.mp4", exists: false },
+          ])
+        : Promise.reject(new Error("not mocked")),
+    );
+    render(<Timeline project={SAMPLE_PROJECT} />);
+
+    await screen.findByTestId("clip-missing-badge");
+    expect(screen.getByTitle(/Source file missing/)).toBeTruthy();
+  });
+
+  it("leaves the clip box alone when the source is present", async () => {
+    tauriEnv = true;
+    invoke.mockImplementation((cmd: unknown) =>
+      cmd === "check_media_paths"
+        ? Promise.resolve([
+            { media_id: "m1", path: "/demo/sermon.mp4", exists: true },
+          ])
+        : Promise.reject(new Error("not mocked")),
+    );
+    render(<Timeline project={SAMPLE_PROJECT} />);
+
+    // Give the availability check a tick to (not) land.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByTestId("clip-missing-badge")).toBeNull();
+    expect(screen.getByTitle("sermon.mp4")).toBeTruthy();
+  });
+});

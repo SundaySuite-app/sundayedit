@@ -204,6 +204,18 @@ describe("ipc contract — project lifecycle", () => {
     await ipc.project.extractAudio("/v.mp4", "/cache");
     expectCall("extract_audio", { videoPath: "/v.mp4", cacheDir: "/cache" });
   });
+  it("check_media_paths", async () => {
+    await ipc.project.checkMediaPaths(SAMPLE_PROJECT);
+    expectCall("check_media_paths", { project: SAMPLE_PROJECT });
+  });
+  it("op_relink_media", async () => {
+    await ipc.timeline.relinkMedia(SAMPLE_PROJECT, "m1", "/moved/talk.mp4");
+    expectCall("op_relink_media", {
+      project: SAMPLE_PROJECT,
+      mediaId: "m1",
+      newPath: "/moved/talk.mp4",
+    });
+  });
   it("project_relink (with + without optional filename)", async () => {
     await ipc.project.relink("hash", ["/a", "/b"]);
     expectCall("project_relink", {

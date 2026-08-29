@@ -73,6 +73,7 @@ pub fn run() {
             // NLE timeline / clip-track operations (multi-track)
             commands::timeline_ops::op_import_media,
             commands::timeline_ops::op_remove_media,
+            commands::timeline_ops::op_relink_media,
             commands::timeline_ops::op_add_track,
             commands::timeline_ops::op_remove_track,
             commands::timeline_ops::op_reorder_track,
@@ -118,6 +119,7 @@ pub fn run() {
             commands::project::waveform_compute,
             commands::project::extract_audio,
             commands::project::project_relink,
+            commands::project::check_media_paths,
             commands::project::accepted_media_extensions,
             // ASR / transcription (Phase 2)
             commands::asr::asr_list_models,

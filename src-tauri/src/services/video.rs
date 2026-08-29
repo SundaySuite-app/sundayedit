@@ -302,6 +302,43 @@ pub fn find_relink_candidate(
     Ok(None)
 }
 
+// ── Availability (relink detection) ─────────────────────────────────────────────
+
+/// Whether one pooled `MediaItem`'s file is still where the project says it is.
+///
+/// Returned by the `check_media_paths` command, which the renderer runs on
+/// project open so a moved/renamed source shows the relink affordance instead
+/// of a silent "Video utilgjengelig" preview and a failing export.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../src/lib/bindings/MediaAvailability.ts")]
+pub struct MediaAvailability {
+    pub media_id: String,
+    pub path: String,
+    pub exists: bool,
+}
+
+/// Pure core of `check_media_paths`: map each `(media_id, path)` through an
+/// existence predicate, preserving pool order.
+///
+/// The filesystem call is injected so the mapping is unit-testable without
+/// touching disk — the command wrapper supplies `Path::exists`. Deliberately
+/// does NOT hash: this runs on every project open and must stay a stat per
+/// file, not a read of every byte (that is `find_relink_candidate`'s job,
+/// and only once we already know something is missing).
+pub fn media_availability<F>(items: &[(String, String)], exists: F) -> Vec<MediaAvailability>
+where
+    F: Fn(&str) -> bool,
+{
+    items
+        .iter()
+        .map(|(media_id, path)| MediaAvailability {
+            media_id: media_id.clone(),
+            path: path.clone(),
+            exists: exists(path),
+        })
+        .collect()
+}
+
 // ── Clip thumbnails ─────────────────────────────────────────────────────────────
 
 /// Build the ffmpeg argument vector for a single-frame thumbnail grab at
@@ -833,5 +870,67 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let found = find_relink_candidate("deadbeef", &[dir.path().to_path_buf()], None).unwrap();
         assert_eq!(found, None);
+    }
+
+    // ── media_availability (pure) ──────────────────────────────────────────
+    fn pair(id: &str, path: &str) -> (String, String) {
+        (id.to_string(), path.to_string())
+    }
+
+    #[test]
+    fn media_availability_reports_per_item() {
+        let items = vec![
+            pair("m1", "/here/a.mp4"),
+            pair("m2", "/gone/b.mp4"),
+            pair("m3", "/here/c.mov"),
+        ];
+        let got = media_availability(&items, |p| p.starts_with("/here/"));
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].media_id, "m1");
+        assert_eq!(got[0].path, "/here/a.mp4");
+        assert!(got[0].exists);
+        assert!(!got[1].exists);
+        assert!(got[2].exists);
+    }
+
+    #[test]
+    fn media_availability_preserves_pool_order() {
+        let items = vec![pair("z", "/z"), pair("a", "/a"), pair("m", "/m")];
+        let got = media_availability(&items, |_| true);
+        let ids: Vec<&str> = got.iter().map(|a| a.media_id.as_str()).collect();
+        assert_eq!(ids, vec!["z", "a", "m"]);
+    }
+
+    #[test]
+    fn media_availability_empty_pool_is_empty() {
+        assert!(media_availability(&[], |_| true).is_empty());
+    }
+
+    #[test]
+    fn media_availability_reports_duplicate_paths_independently() {
+        // Two pool entries can legitimately point at the same file (imported
+        // twice). Both rows must be present so the UI can relink each id.
+        let items = vec![pair("m1", "/shared.mp4"), pair("m2", "/shared.mp4")];
+        let got = media_availability(&items, |_| false);
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|a| !a.exists));
+    }
+
+    #[test]
+    fn media_availability_matches_real_fs_through_the_command_predicate() {
+        // The IO half the command wrapper supplies, pinned once against a
+        // real temp dir so the injected predicate isn't a fiction.
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("present.mp4");
+        std::fs::write(&present, b"x").unwrap();
+        let missing = dir.path().join("missing.mp4");
+
+        let items = vec![
+            pair("m1", &present.to_string_lossy()),
+            pair("m2", &missing.to_string_lossy()),
+        ];
+        let got = media_availability(&items, |p| Path::new(p).exists());
+        assert!(got[0].exists);
+        assert!(!got[1].exists);
     }
 }

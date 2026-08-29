@@ -1127,6 +1127,45 @@ function backend(): void {
         });
       }
 
+      // ── missing-media detection + relink (Round: relink media) ──
+      // `exists` is a pure convention over the mock's fake filesystem: any
+      // path under `/missing/` is "gone", everything else (`/demo/…`,
+      // freshly-picked paths, …) is "present". Real fs stats happen only in
+      // the Rust backend.
+      case "check_media_paths":
+        return Promise.resolve(
+          media(project).map((m) => ({
+            media_id: m.id,
+            path: m.path,
+            exists: !/^\/missing\//i.test(m.path),
+          })),
+        );
+      case "project_relink":
+        // The mock has no real filesystem to search — always report "not
+        // found automatically" so the renderer's dialog fallback is what
+        // actually drives the relink in E2E (see `plugin:dialog|open` below,
+        // which honours `window.__mockDialogPath` for exactly this).
+        return Promise.resolve(null);
+      case "op_relink_media": {
+        const mediaId = args.mediaId as string;
+        const newPath = args.newPath as string;
+        const idx = media(project).findIndex((m) => m.id === mediaId);
+        if (idx < 0) throw err(`media ${mediaId} not found`);
+        // A path containing "short" simulates a re-probe that comes back with
+        // a different (shorter) duration — the renderer's "timings may no
+        // longer line up" warning path.
+        const newDuration = /short/i.test(newPath) ? 4_000 : 12_000;
+        const nextMedia = media(project).slice();
+        nextMedia[idx] = {
+          ...nextMedia[idx],
+          path: newPath,
+          content_hash: `hash-${newPath}`,
+          original_filename: basename(newPath),
+          duration_ms: newDuration,
+        };
+        return Promise.resolve({ ...project, media: nextMedia });
+      }
+
       // ── media import dialog + probe ──
       case "accepted_media_extensions":
         return Promise.resolve([
@@ -1139,9 +1178,16 @@ function backend(): void {
           "m4a",
         ]);
       case "plugin:dialog|open":
-        // The media-bin Import button opens this picker; return a deterministic
-        // path so the real button drives `op_import_media` end-to-end.
-        return Promise.resolve("/demo/broll.mp4");
+        // The media-bin Import button (and the relink flow's manual-pick
+        // fallback) opens this picker. A spec can steer the returned path via
+        // `window.__mockDialogPath` (reset to the default `/demo/broll.mp4`
+        // import path otherwise) — set it before clicking to exercise a
+        // specific relink target, e.g. a `/missing/…` sentinel or a `short`
+        // one for the duration-changed warning.
+        return Promise.resolve(
+          (window as unknown as { __mockDialogPath?: string })
+            .__mockDialogPath ?? "/demo/broll.mp4",
+        );
       case "plugin:dialog|save":
         // The compose-export "save as" picker; a deterministic output path lets
         // the real button drive `compose_render` end-to-end.
