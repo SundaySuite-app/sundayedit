@@ -149,6 +149,23 @@ pub fn extract_audio(video_path: String, cache_dir: String) -> AppResult<String>
     Ok(wav.to_string_lossy().to_string())
 }
 
+/// Which of the project's pooled media files are still on disk.
+///
+/// Cheap on purpose — one `Path::exists` stat per `MediaItem`, no hashing —
+/// so the renderer can run it on every project open and surface the relink
+/// affordance BEFORE the preview shows "Video utilgjengelig" and the export
+/// dies on a missing input. The mapping itself is pure
+/// (`video::media_availability`); this wrapper only supplies the filesystem.
+#[tauri::command]
+pub fn check_media_paths(project: Project) -> Vec<video::MediaAvailability> {
+    let items: Vec<(String, String)> = project
+        .media
+        .iter()
+        .map(|m| (m.id.clone(), m.path.clone()))
+        .collect();
+    video::media_availability(&items, |p| Path::new(p).exists())
+}
+
 /// Try to relink a project whose video moved. Searches the provided dirs.
 #[tauri::command]
 pub fn project_relink(

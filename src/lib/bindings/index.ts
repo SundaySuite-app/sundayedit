@@ -36,6 +36,7 @@ export type { ImportRequest }    from "./ImportRequest";
 export type { LengthWarning }    from "./LengthWarning";
 export type { MediaKind }        from "./MediaKind";
 export type { MediaItem }        from "./MediaItem";
+export type { MediaAvailability } from "./MediaAvailability";
 export type { Track }            from "./Track";
 export type { TrackKind }        from "./TrackKind";
 export type { CropRect }         from "./CropRect";

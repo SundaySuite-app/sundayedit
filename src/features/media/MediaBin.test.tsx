@@ -19,6 +19,12 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/api/path", () => ({
   appCacheDir: async () => "/cache",
   join: async (...parts: string[]) => parts.join("/"),
+  // The relink flow's candidate-directory search (src/features/media/relink.ts).
+  dirname: async (p: string) => p.split("/").slice(0, -1).join("/") || "/",
+  videoDir: async () => "/Movies",
+  desktopDir: async () => "/Desktop",
+  downloadDir: async () => "/Downloads",
+  homeDir: async () => "/Home",
 }));
 
 const openDialog = vi.fn();
@@ -241,10 +247,18 @@ describe("MediaBin — add track", () => {
 });
 
 describe("MediaBin — thumbnails", () => {
+  // Every row now also fires `check_media_paths` on mount (missing-media
+  // detection) — these mocks answer that with "all present" so it's a no-op,
+  // and assertions below count `extract_thumbnail` calls specifically rather
+  // than every `invoke` call.
+  const thumbnailCalls = () =>
+    invoke.mock.calls.filter(([cmd]) => cmd === "extract_thumbnail").length;
+
   it("upgrades the kind icon to a thumbnail img when extract_thumbnail resolves (Tauri)", async () => {
     tauriEnv = true;
     const media = freshMedia();
     invoke.mockImplementation(async (cmd: unknown, args: unknown) => {
+      if (cmd === "check_media_paths") return [];
       expect(cmd).toBe("extract_thumbnail");
       const a = args as { mediaPath: string; atMs: number; outPath: string };
       expect(a.mediaPath).toBe(media.path);
@@ -263,17 +277,18 @@ describe("MediaBin — thumbnails", () => {
       return el as HTMLImageElement;
     });
     expect(img.src).toBe(`asset://localhost//cache/thumbnails/${media.id}.jpg`);
-    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(thumbnailCalls()).toBe(1);
   });
 
   it("keeps the icon (never calls extract_thumbnail) for audio-only media", async () => {
     tauriEnv = true;
+    invoke.mockResolvedValue([]); // check_media_paths: nothing missing
     const media = freshMedia({ kind: "audio_only", width: 0, height: 0 });
     renderBin(projectWith(media));
 
     // Give any stray thumbnail promise a chance to run.
     await new Promise((r) => setTimeout(r, 0));
-    expect(invoke).not.toHaveBeenCalled();
+    expect(thumbnailCalls()).toBe(0);
     expect(screen.getByTitle(media.path).querySelector("img")).toBeNull();
     expect(screen.getByTitle(media.path).querySelector("svg")).not.toBeNull();
   });
@@ -283,6 +298,7 @@ describe("MediaBin — thumbnails", () => {
     renderBin(projectWith(media));
 
     await new Promise((r) => setTimeout(r, 0));
+    // Off-Tauri, the availability check is skipped too — no IPC at all.
     expect(invoke).not.toHaveBeenCalled();
     expect(screen.getByTitle(media.path).querySelector("img")).toBeNull();
   });
@@ -290,16 +306,203 @@ describe("MediaBin — thumbnails", () => {
   it("falls back to the icon when the extraction fails, without re-spawning ffmpeg", async () => {
     tauriEnv = true;
     const media = freshMedia();
-    invoke.mockRejectedValue(new Error("ffmpeg exploded"));
+    invoke.mockImplementation(async (cmd: unknown) => {
+      if (cmd === "check_media_paths") return [];
+      throw new Error("ffmpeg exploded");
+    });
     const { unmount } = renderBin(projectWith(media));
 
-    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(thumbnailCalls()).toBe(1));
     expect(screen.getByTitle(media.path).querySelector("img")).toBeNull();
 
     // A remount reuses the memoized failure — no second ffmpeg run.
     unmount();
     renderBin(projectWith(media));
     await new Promise((r) => setTimeout(r, 0));
-    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(thumbnailCalls()).toBe(1);
+  });
+});
+
+describe("MediaBin — missing media", () => {
+  // `run` (inside relink.ts) reads the CURRENT project from the store, not
+  // the `project` prop — so every test here keeps the two in sync.
+  function setup(media: MediaItem): Project {
+    const proj = projectWith(media);
+    useProjectStore.setState({
+      project: proj,
+      past: [],
+      future: [],
+      busy: false,
+      inFlight: false,
+    });
+    return proj;
+  }
+
+  it("flags a row check_media_paths reports missing, with a Finn filen… action", async () => {
+    tauriEnv = true;
+    const media = freshMedia({ path: "/old/gone.mp4" });
+    setup(media);
+    invoke.mockImplementation(async (cmd: unknown) => {
+      if (cmd === "check_media_paths")
+        return [{ media_id: media.id, path: media.path, exists: false }];
+      throw new Error(`unexpected command ${String(cmd)}`);
+    });
+    renderBin(projectWith(media));
+
+    await vi.waitFor(() =>
+      expect(screen.getByTestId("relink-media")).toBeTruthy(),
+    );
+    expect(screen.getByText(/File missing/i)).toBeTruthy();
+  });
+
+  it("does not flag a row check_media_paths reports as present", async () => {
+    tauriEnv = true;
+    const media = freshMedia();
+    setup(media);
+    invoke.mockImplementation(async (cmd: unknown) => {
+      if (cmd === "check_media_paths")
+        return [{ media_id: media.id, path: media.path, exists: true }];
+      return null; // extract_thumbnail etc. — irrelevant here
+    });
+    renderBin(projectWith(media));
+
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByTestId("relink-media")).toBeNull();
+  });
+
+  it("auto-search finds the moved file and commits the relink without a dialog", async () => {
+    tauriEnv = true;
+    const media = freshMedia({ path: "/old/gone.mp4" });
+    setup(media);
+    const relinked: Project = {
+      ...SAMPLE_PROJECT,
+      media: [{ ...media, path: "/new/gone.mp4" }],
+    };
+    invoke.mockImplementation(async (cmd: unknown, args: unknown) => {
+      if (cmd === "check_media_paths")
+        return [{ media_id: media.id, path: media.path, exists: false }];
+      if (cmd === "project_relink") return "/new/gone.mp4";
+      if (cmd === "op_relink_media") {
+        const a = args as { mediaId: string; newPath: string };
+        expect(a.mediaId).toBe(media.id);
+        expect(a.newPath).toBe("/new/gone.mp4");
+        return relinked;
+      }
+      throw new Error(`unexpected command ${String(cmd)}`);
+    });
+    renderBin(projectWith(media));
+
+    await vi.waitFor(() => screen.getByTestId("relink-media"));
+    fireEvent.click(screen.getByTestId("relink-media"));
+
+    await vi.waitFor(() =>
+      expect(useProjectStore.getState().project).toEqual(relinked),
+    );
+    expect(openDialog).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the file dialog when auto-search finds nothing", async () => {
+    tauriEnv = true;
+    const media = freshMedia({ path: "/old/gone.mp4" });
+    setup(media);
+    const relinked: Project = {
+      ...SAMPLE_PROJECT,
+      media: [{ ...media, path: "/picked/gone.mp4" }],
+    };
+    invoke.mockImplementation(async (cmd: unknown) => {
+      if (cmd === "check_media_paths")
+        return [{ media_id: media.id, path: media.path, exists: false }];
+      if (cmd === "project_relink") return null; // nothing found automatically
+      if (cmd === "accepted_media_extensions") return ["mp4"];
+      if (cmd === "op_relink_media") return relinked;
+      throw new Error(`unexpected command ${String(cmd)}`);
+    });
+    openDialog.mockResolvedValueOnce("/picked/gone.mp4");
+    renderBin(projectWith(media));
+
+    await vi.waitFor(() => screen.getByTestId("relink-media"));
+    fireEvent.click(screen.getByTestId("relink-media"));
+
+    await vi.waitFor(() => expect(openDialog).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(useProjectStore.getState().project).toEqual(relinked),
+    );
+  });
+
+  it("leaves the row missing when the manual pick is cancelled", async () => {
+    tauriEnv = true;
+    const media = freshMedia({ path: "/old/gone.mp4" });
+    const proj = setup(media);
+    invoke.mockImplementation(async (cmd: unknown) => {
+      if (cmd === "check_media_paths")
+        return [{ media_id: media.id, path: media.path, exists: false }];
+      if (cmd === "project_relink") return null;
+      if (cmd === "accepted_media_extensions") return ["mp4"];
+      throw new Error(`unexpected command ${String(cmd)}`);
+    });
+    openDialog.mockResolvedValueOnce(null); // cancelled
+    renderBin(projectWith(media));
+
+    await vi.waitFor(() => screen.getByTestId("relink-media"));
+    fireEvent.click(screen.getByTestId("relink-media"));
+
+    await vi.waitFor(() => expect(openDialog).toHaveBeenCalledTimes(1));
+    // Still missing, nothing committed — cancelling is not a failure.
+    expect(screen.getByTestId("relink-media")).toBeTruthy();
+    expect(useProjectStore.getState().project).toBe(proj);
+    expect(screen.queryByTestId("relink-status")).toBeNull();
+  });
+
+  it("surfaces the backend's relink failure message", async () => {
+    tauriEnv = true;
+    const media = freshMedia({ path: "/old/gone.mp4" });
+    setup(media);
+    invoke.mockImplementation(async (cmd: unknown) => {
+      if (cmd === "check_media_paths")
+        return [{ media_id: media.id, path: media.path, exists: false }];
+      if (cmd === "project_relink") return "/new/gone.mp4";
+      if (cmd === "op_relink_media")
+        throw { code: "video_missing", message: "could not read the file" };
+      throw new Error(`unexpected command ${String(cmd)}`);
+    });
+    renderBin(projectWith(media));
+
+    await vi.waitFor(() => screen.getByTestId("relink-media"));
+    fireEvent.click(screen.getByTestId("relink-media"));
+
+    await vi.waitFor(() =>
+      expect(screen.getByTestId("relink-status").textContent).toBe(
+        "could not read the file",
+      ),
+    );
+    // Still flagged missing — the relink never committed.
+    expect(screen.getByTestId("relink-media")).toBeTruthy();
+  });
+
+  it("warns when the relinked file's duration differs from the original", async () => {
+    tauriEnv = true;
+    const media = freshMedia({ path: "/old/gone.mp4", duration_ms: 18_000 });
+    setup(media);
+    const relinked: Project = {
+      ...SAMPLE_PROJECT,
+      media: [{ ...media, path: "/new/gone.mp4", duration_ms: 4_000 }],
+    };
+    invoke.mockImplementation(async (cmd: unknown) => {
+      if (cmd === "check_media_paths")
+        return [{ media_id: media.id, path: media.path, exists: false }];
+      if (cmd === "project_relink") return "/new/gone.mp4";
+      if (cmd === "op_relink_media") return relinked;
+      throw new Error(`unexpected command ${String(cmd)}`);
+    });
+    renderBin(projectWith(media));
+
+    await vi.waitFor(() => screen.getByTestId("relink-media"));
+    fireEvent.click(screen.getByTestId("relink-media"));
+
+    await vi.waitFor(() =>
+      expect(screen.getByTestId("relink-status").textContent).toMatch(
+        /timing|duration/i,
+      ),
+    );
   });
 });

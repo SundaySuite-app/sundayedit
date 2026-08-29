@@ -12,7 +12,15 @@
 
 import { useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { FileVideo, Music, Import, Plus, X } from "lucide-react";
+import {
+  AlertTriangle,
+  FileVideo,
+  Music,
+  Import,
+  Plus,
+  Search,
+  X,
+} from "lucide-react";
 
 import type { MediaItem, Project, TrackKind } from "@/lib/bindings";
 import { ipc, project as projectApi } from "@/lib/ipc";
@@ -20,6 +28,11 @@ import { useProjectStore } from "@/lib/useProjectStore";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/cn";
 import { useThumbnail } from "./thumbnails";
+import { useMediaAvailability } from "./useMediaAvailability";
+import { useRelinkMedia, type RelinkStatus } from "./relink";
+
+/** Phases the relink button should show as "busy" (disabled, spinner-ish label). */
+const RELINK_BUSY_PHASES = new Set(["searching", "picking", "linking"]);
 
 /** dataTransfer MIME carrying a media id from a bin row to a timeline lane. */
 export const MEDIA_DND_MIME = "application/x-sundayedit-media";
@@ -49,6 +62,11 @@ export function MediaBin({ project }: { project: Project }) {
   const t = useT();
   const run = useProjectStore((s) => s.run);
   const [error, setError] = useState<string | null>(null);
+  // Which media rows are missing on disk, re-checked whenever the pool's
+  // membership or paths change (fresh open, import, relink) — see the hook
+  // doc for why NOT on every project edit.
+  const { missingIds } = useMediaAvailability(project);
+  const { relink, statusById } = useRelinkMedia();
 
   async function importMedia() {
     setError(null);
@@ -119,7 +137,10 @@ export function MediaBin({ project }: { project: Project }) {
               <MediaRow
                 key={m.id}
                 media={m}
+                missing={missingIds.has(m.id)}
+                status={statusById[m.id]}
                 onRemove={() => void removeMedia(m)}
+                onRelink={() => void relink(m)}
               />
             ))}
           </ul>
@@ -156,16 +177,25 @@ export function MediaBin({ project }: { project: Project }) {
 
 function MediaRow({
   media,
+  missing,
+  status,
   onRemove,
+  onRelink,
 }: {
   media: MediaItem;
+  missing: boolean;
+  status: RelinkStatus | undefined;
   onRemove: () => void;
+  onRelink: () => void;
 }) {
   const t = useT();
   const Icon = media.kind === "audio_only" ? Music : FileVideo;
   // Source-frame thumbnail (memoized per media id; null for audio / browser
-  // mode — the kind icon keeps standing in).
-  const thumb = useThumbnail(media);
+  // mode — the kind icon keeps standing in). Never attempted for a missing
+  // file — there's nothing on disk for ffmpeg to read.
+  const thumb = useThumbnail(missing ? undefined : media);
+  const busy = !!status && RELINK_BUSY_PHASES.has(status.phase);
+  const statusText = status && relinkStatusText(status, t);
   return (
     <li
       draggable
@@ -173,7 +203,12 @@ function MediaRow({
         e.dataTransfer.setData(MEDIA_DND_MIME, media.id);
         e.dataTransfer.effectAllowed = "copy";
       }}
-      className="flex cursor-grab items-center gap-2.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-2.5 py-2 active:cursor-grabbing"
+      className={cn(
+        "flex cursor-grab items-center gap-2.5 rounded-md border px-2.5 py-2 active:cursor-grabbing",
+        missing
+          ? "border-[var(--color-danger,#b3261e)]/50 bg-[var(--color-danger,#b3261e)]/5"
+          : "border-[var(--color-border)] bg-[var(--color-bg-surface)]",
+      )}
       title={media.path}
     >
       {thumb ? (
@@ -183,6 +218,12 @@ function MediaRow({
           aria-hidden="true"
           draggable={false}
           className="h-9 w-14 shrink-0 rounded object-cover"
+        />
+      ) : missing ? (
+        <AlertTriangle
+          size={16}
+          className="shrink-0 text-[var(--color-danger,#b3261e)]"
+          aria-hidden="true"
         />
       ) : (
         <Icon
@@ -195,11 +236,47 @@ function MediaRow({
         <div className="truncate text-[var(--text-ui-sm)]">
           {media.original_filename || media.path}
         </div>
-        <div className="text-[10px] tabular-nums text-[var(--color-fg-subtle)]">
-          {fmtSeconds(media.duration_ms)}
-          {media.width > 0 && ` · ${media.width}×${media.height}`}
-        </div>
+        {missing ? (
+          <div
+            className="truncate text-[10px] text-[var(--color-danger,#b3261e)]"
+            title={media.path}
+          >
+            {t("mediaBinMissing")} · {media.path}
+          </div>
+        ) : (
+          <div className="text-[10px] tabular-nums text-[var(--color-fg-subtle)]">
+            {fmtSeconds(media.duration_ms)}
+            {media.width > 0 && ` · ${media.width}×${media.height}`}
+          </div>
+        )}
+        {statusText && (
+          <div
+            data-testid="relink-status"
+            className={cn(
+              "truncate text-[10px]",
+              status?.phase === "error"
+                ? "text-[var(--color-danger,#b3261e)]"
+                : "text-[var(--color-fg-subtle)]",
+            )}
+          >
+            {statusText}
+          </div>
+        )}
       </div>
+      {missing && (
+        <button
+          type="button"
+          data-testid="relink-media"
+          onClick={onRelink}
+          disabled={busy}
+          title={t("mediaBinRelink")}
+          aria-label={t("mediaBinRelink")}
+          className="inline-flex shrink-0 items-center gap-1 rounded-md border border-[var(--color-border)] px-2 py-1 text-[var(--text-ui-xs)] text-[var(--color-fg-muted)] hover:bg-[var(--color-bg)] hover:text-[var(--color-fg)] disabled:opacity-50"
+        >
+          <Search size={12} />
+          {t("mediaBinRelink")}
+        </button>
+      )}
       <button
         type="button"
         data-testid="remove-media"
@@ -212,6 +289,27 @@ function MediaRow({
       </button>
     </li>
   );
+}
+
+/** Localized progress/outcome line under a missing row. Backend error
+ *  messages are surfaced verbatim (same convention as the import/remove
+ *  error strip above), never translated. */
+function relinkStatusText(
+  status: RelinkStatus,
+  t: ReturnType<typeof useT>,
+): string {
+  switch (status.phase) {
+    case "searching":
+      return t("relinkSearching");
+    case "picking":
+      return t("relinkPicking");
+    case "linking":
+      return t("relinkLinking");
+    case "error":
+      return status.message ?? t("relinkFailedGeneric");
+    case "done":
+      return status.message ?? t("relinkSuccess");
+  }
 }
 
 function AddTrackButton({

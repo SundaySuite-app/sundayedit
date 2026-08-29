@@ -48,6 +48,7 @@ import {
   Loader2,
   RotateCcw,
   FoldHorizontal,
+  AlertTriangle,
   X,
 } from "lucide-react";
 
@@ -79,6 +80,7 @@ import { qualityFor, renderStride, shouldRenderFrame } from "./previewQuality";
 import { renderPreviewProxy } from "@/lib/composeEngine";
 import { MEDIA_DND_MIME } from "@/features/media/MediaBin";
 import { useThumbnail } from "@/features/media/thumbnails";
+import { useMediaAvailability } from "@/features/media/useMediaAvailability";
 import { useFilmstripTiles } from "./filmstrip";
 
 interface Props {
@@ -168,6 +170,11 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     for (const it of project.media) m.set(it.id, it);
     return m;
   }, [project.media]);
+  // Media ids whose file is missing on disk — a stable Set reference (see the
+  // hook doc) that LaneStack/ClipBox read straight off, so a clip box's
+  // missing state costs one `Set.has` per box instead of a per-clip lookup
+  // that would break the lane's memoization every render.
+  const { missingIds: missingMediaIds } = useMediaAvailability(project);
   // Clips grouped by track, each start-sorted and carrying its timeline span.
   const clipsByTrack = useMemo(() => {
     const by = new Map<
@@ -1246,6 +1253,7 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
               visibleCaptionRows={visibleCaptionRows}
               clipsByTrack={clipsByTrack}
               mediaById={mediaById}
+              missingMediaIds={missingMediaIds}
               drag={drag}
               clipDrag={clipDrag}
               selectedId={selectedId}
@@ -1382,6 +1390,7 @@ const LaneStack = memo(function LaneStack({
   visibleCaptionRows,
   clipsByTrack,
   mediaById,
+  missingMediaIds,
   drag,
   clipDrag,
   selectedId,
@@ -1406,6 +1415,7 @@ const LaneStack = memo(function LaneStack({
     { start_ms: number; end_ms: number; ti: TimelineItem }[]
   >;
   mediaById: Map<string, MediaItem>;
+  missingMediaIds: Set<string>;
   drag: CaptionDrag | null;
   clipDrag: ClipDrag | null;
   selectedId: string | null;
@@ -1473,6 +1483,10 @@ const LaneStack = memo(function LaneStack({
                       span.ti.source_media_id
                         ? mediaById.get(span.ti.source_media_id)
                         : undefined
+                    }
+                    missing={
+                      !!span.ti.source_media_id &&
+                      missingMediaIds.has(span.ti.source_media_id)
                     }
                     view={view}
                     speed={Math.max(0.01, span.ti.speed)}
@@ -1710,6 +1724,7 @@ function CaptionBox({
 function ClipBox({
   item,
   media,
+  missing,
   view,
   speed,
   drag,
@@ -1720,6 +1735,10 @@ function ClipBox({
 }: {
   item: TimelineItem;
   media: MediaItem | undefined;
+  /** The clip's source media is missing on disk — see `useMediaAvailability`.
+   *  A plain boolean (not the media item / a lookup) so this prop's identity
+   *  never breaks LaneStack's memoization. */
+  missing: boolean;
   view: tl.TimelineView;
   speed: number;
   drag: ClipDrag | null;
@@ -1728,6 +1747,7 @@ function ClipBox({
   onPointerDown: (e: React.PointerEvent, kind: ClipDrag["kind"]) => void;
   onSelect: () => void;
 }) {
+  const t = useT();
   const span = itemSpan(item);
   // Live preview of the active drag.
   let start = span.start_ms;
@@ -1747,19 +1767,24 @@ function ClipBox({
   const edgePx = tl.edgeHitWidthPx(width);
   const label =
     item.text?.text || media?.original_filename || media?.path || item.kind;
+  const title = missing ? `${label} — ${t("timelineClipMissingMedia")}` : label;
   // A dimmed source-frame backdrop behind the label for video clips. Extraction
   // is memoized per media id and no-ops outside Tauri (browser/e2e keeps the
-  // text-only look).
-  const thumb = useThumbnail(media?.kind === "video" ? media : undefined);
+  // text-only look). Skipped entirely once the source is known missing —
+  // there's nothing on disk for ffmpeg to grab a frame from.
+  const thumb = useThumbnail(
+    !missing && media?.kind === "video" ? media : undefined,
+  );
   // Multi-frame filmstrip backdrop (E3-UI), addressed on the fixed per-zoom-
   // tier grid so panning/zooming reuse already-rendered tiles. Suppressed
   // while THIS clip is being dragged — the box is sliding but `item` (what
   // the tile geometry is keyed to) hasn't committed its new position yet, so
   // tiles would visibly lag the ghost. `thumb` above covers that gap and the
-  // off-Tauri/non-video/no-tiles-yet cases (the hook resolves empty there).
+  // off-Tauri/non-video/no-tiles-yet/missing-media cases (the hook resolves
+  // empty there).
   const [visStartMs, visEndMs] = tl.visibleRange(view);
   const filmstripTiles = useFilmstripTiles(
-    !drag && media?.kind === "video" ? media : undefined,
+    !drag && !missing && media?.kind === "video" ? media : undefined,
     item,
     view.pxPerMs,
     Math.max(span.start_ms, visStartMs),
@@ -1772,26 +1797,28 @@ function ClipBox({
         selected
           ? "ring-2 ring-[var(--color-accent-500)]"
           : "border border-[var(--color-accent-500)]/40",
+        missing &&
+          "border-dashed border-[var(--color-danger,#b3261e)] bg-[var(--color-danger,#b3261e)]/15",
         drag && "opacity-80",
       )}
       style={{ left, width }}
       onPointerDown={(e) => !locked && onPointerDown(e, "move")}
       onClick={onSelect}
-      title={label}
+      title={title}
     >
       {filmstripTiles.length > 0
-        ? filmstripTiles.map((t) => (
+        ? filmstripTiles.map((tile) => (
             <img
-              key={t.key}
-              src={t.url}
+              key={tile.key}
+              src={tile.url}
               alt=""
               aria-hidden="true"
               draggable={false}
               className={cn(
                 "pointer-events-none absolute inset-y-0 h-full",
-                t.stale ? "opacity-25" : "opacity-40",
+                tile.stale ? "opacity-25" : "opacity-40",
               )}
-              style={{ left: t.leftPx, width: t.widthPx }}
+              style={{ left: tile.leftPx, width: tile.widthPx }}
             />
           ))
         : thumb && (
@@ -1803,6 +1830,14 @@ function ClipBox({
               className="pointer-events-none absolute inset-0 h-full w-full object-cover opacity-40"
             />
           )}
+      {missing && (
+        <AlertTriangle
+          size={12}
+          data-testid="clip-missing-badge"
+          className="pointer-events-none absolute right-1 top-1 z-10 text-[var(--color-danger,#b3261e)]"
+          aria-hidden="true"
+        />
+      )}
       {!locked && (
         <>
           <span

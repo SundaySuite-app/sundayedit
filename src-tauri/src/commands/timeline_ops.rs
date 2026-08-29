@@ -59,6 +59,18 @@ pub fn op_remove_media(project: Project, media_id: String) -> AppResult<Project>
     timeline_ops::remove_media(&project, &media_id)
 }
 
+/// Repoint a pool entry at a file that moved or was renamed: re-probe and
+/// re-hash `new_path`, keep the media **id** so every clip stays attached,
+/// clamp any clip the new (possibly shorter) duration no longer fits, and
+/// carry the legacy primary-video scalars when this was the primary.
+///
+/// The renderer calls `project_relink` first (auto-search by content hash)
+/// and falls back to a file dialog; either way the chosen path lands here.
+#[tauri::command]
+pub fn op_relink_media(project: Project, media_id: String, new_path: String) -> AppResult<Project> {
+    timeline_ops::relink_media(&project, &media_id, &new_path)
+}
+
 // ── tracks ─────────────────────────────────────────────────────────────────────
 
 #[tauri::command]

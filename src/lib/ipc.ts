@@ -30,6 +30,7 @@ import type {
   Gap,
   GlossaryApplyResult,
   ImportRequest,
+  MediaAvailability,
   TimelineItemKind,
   TrackKind,
   Transform,
@@ -156,6 +157,19 @@ export const timeline = {
   /** Remove a media item — rejected if any timeline item still references it. */
   removeMedia: (project: Project, mediaId: string) =>
     call<Project>("op_remove_media", { project, mediaId }),
+  /**
+   * Repoint a pool entry at a file that moved or was renamed. The media **id**
+   * is kept, so every clip that referenced it stays attached; the new file is
+   * re-probed and re-hashed, clips the (possibly shorter) new duration no
+   * longer fits are clamped, and the legacy `video_*` scalars follow along
+   * when this was the project's primary video.
+   *
+   * Pair with `project.checkMediaPaths` (what is missing) and
+   * `project.relink` (auto-search by content hash) — this is the commit step,
+   * so route it through `useProjectStore.run` to keep it undoable.
+   */
+  relinkMedia: (project: Project, mediaId: string, newPath: string) =>
+    call<Project>("op_relink_media", { project, mediaId, newPath }),
   /** Add a track of the given kind; it gets the next stacking index. */
   addTrack: (project: Project, kind: TrackKind, name: string) =>
     call<Project>("op_add_track", { project, kind, name }),
@@ -389,6 +403,15 @@ export const project = {
    *  with `waveform`. */
   extractAudio: (videoPath: string, cacheDir: string) =>
     call<string>("extract_audio", { videoPath, cacheDir }),
+  /**
+   * Which pooled media files are still on disk. One `exists` stat per
+   * `MediaItem`, no hashing — cheap enough to run on every project open, so
+   * a moved source surfaces the relink affordance instead of a dead preview
+   * and a failing export. Feed the missing rows to `relink` (auto-search),
+   * then `timeline.relinkMedia` (commit).
+   */
+  checkMediaPaths: (proj: Project) =>
+    call<MediaAvailability[]>("check_media_paths", { project: proj }),
   relink: (
     targetHash: string,
     searchDirs: string[],

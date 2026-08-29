@@ -33,6 +33,7 @@ import { CaptionEditor } from "@/features/editor/CaptionEditor";
 import { Timeline } from "@/features/timeline/Timeline";
 import { ClipInspector } from "@/features/timeline/ClipInspector";
 import { MediaBin } from "@/features/media/MediaBin";
+import { MissingMediaBanner } from "@/features/media/MissingMediaBanner";
 import { ContextPanel } from "@/features/context/ContextPanel";
 import { SettingsPanel } from "@/features/settings/SettingsPanel";
 import { Onboarding } from "@/features/onboarding/Onboarding";
@@ -547,6 +548,7 @@ function App() {
           onExport={() => setModal("export")}
           onSettings={() => setModal("settings")}
         />
+        <MissingMediaBanner project={project} />
         <div className="min-h-0 flex-1 overflow-y-auto border-t border-[var(--color-border)]">
           <CaptionEditor key={project.id} />
         </div>

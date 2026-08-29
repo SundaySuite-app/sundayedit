@@ -22,6 +22,7 @@ use crate::model::{
     Effect, MediaItem, Project, TextSpec, TimelineItem, TimelineItemKind, Track, TrackKind,
     Transform, Transition,
 };
+use crate::services::video::{self, VideoMetadata};
 
 // ── finalize ──────────────────────────────────────────────────────────────────
 
@@ -68,6 +69,167 @@ pub fn remove_media(project: &Project, media_id: &str) -> AppResult<Project> {
 
     let mut next = project.clone();
     next.media.remove(idx);
+    finalize(next)
+}
+
+// ── relink ─────────────────────────────────────────────────────────────────────
+
+/// Point an existing `MediaItem` at a file that moved or was renamed.
+///
+/// The ONE thing that must not change is the media **id** — every
+/// `TimelineItem.source_media_id` and every filmstrip/thumbnail cache key
+/// hangs off it, so an id-preserving update is what makes this a repair
+/// rather than a re-import that orphans the edit.
+///
+/// This is the only op in the module that touches the filesystem: the new
+/// file has to be probed and hashed before we can honestly claim its
+/// duration. The state transition itself stays pure in `apply_relink`, which
+/// is where the interesting behaviour (and its tests) live.
+///
+/// Errors when `new_path` is absent or unprobeable — a relink to a file we
+/// cannot read would write a lie into the project.
+pub fn relink_media(project: &Project, media_id: &str, new_path: &str) -> AppResult<Project> {
+    // Fail before spawning ffprobe so the message names the real problem.
+    if !std::path::Path::new(new_path).exists() {
+        return Err(AppError::VideoMissing(new_path.to_string()));
+    }
+    // Cheap existence check on the media id too — no point probing a large
+    // file only to discover the pool entry was never there.
+    find_media(project, media_id)?;
+
+    let meta = video::probe(std::path::Path::new(new_path))?;
+    let hash = video::content_hash(std::path::Path::new(new_path))?;
+    apply_relink(project, media_id, new_path, &meta, hash)
+}
+
+/// Pure half of [`relink_media`]: swap a pool entry's file facts for the
+/// already-probed facts of `new_path`, then repair anything the swap
+/// invalidated.
+///
+/// Two consequences a naive field update would get wrong:
+///
+///  1. **A shorter replacement.** Clips cut against the old duration may now
+///     reference source time past the new end, which `validate_timeline`
+///     rejects outright. Following the module's clamp-don't-reject rule we
+///     pull each affected clip back into `[0, new_duration)` instead of
+///     failing the whole relink — a slightly short clip the user can see and
+///     re-trim beats an unopenable project. A clip that merely overhangs the
+///     end keeps its `in_ms` and loses the overhang; a clip that now starts
+///     entirely past the end slides back to the tail, keeping its length
+///     where the new file is long enough to hold it. Either way the clip's
+///     source span can only shrink or slide, never grow, so its
+///     `timeline_end_ms` never advances and no new overlap is created.
+///  2. **The primary video.** `Project::video_path` and friends are the
+///     legacy scalars the burn-in fast path and the legacy preview read
+///     directly, bypassing the pool. If the relinked item IS the primary
+///     (its OLD path is what the scalars point at), they have to move with
+///     it or the repaired project still opens a dead file.
+///
+/// Captions are deliberately left alone even when the new file is shorter.
+/// They are the flagship data and carry their own timing; silently dropping
+/// words the user transcribed would be a far worse loss than a caption that
+/// runs past the end of a replacement clip.
+pub fn apply_relink(
+    project: &Project,
+    media_id: &str,
+    new_path: &str,
+    meta: &VideoMetadata,
+    content_hash: String,
+) -> AppResult<Project> {
+    let idx = project
+        .media
+        .iter()
+        .position(|m| m.id == media_id)
+        .ok_or_else(|| AppError::NotFound {
+            entity: "media",
+            id: media_id.to_string(),
+        })?;
+
+    let new_dur = meta.duration_ms;
+    if new_dur <= 0 {
+        return Err(AppError::Validation(format!(
+            "{} reports a duration of {} ms — nothing to relink to",
+            new_path, new_dur
+        )));
+    }
+
+    let old_path = project.media[idx].path.clone();
+    let old_hash = project.media[idx].content_hash.clone();
+    // The pool entry is primary when the legacy scalars still point at the
+    // file it USED to be — compare before we overwrite it.
+    let is_primary = old_path == project.video_path;
+
+    let original_filename = std::path::Path::new(new_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&project.media[idx].original_filename)
+        .to_string();
+
+    let mut next = project.clone();
+
+    {
+        let m = &mut next.media[idx];
+        m.path = new_path.to_string();
+        m.content_hash = content_hash.clone();
+        // A relink can legitimately change what the file IS — swapping a
+        // camera master for an audio-only bounce. A stale `Video` kind would
+        // keep the preview trying to draw frames that aren't there.
+        m.kind = meta.kind;
+        m.duration_ms = new_dur;
+        m.width = meta.width;
+        m.height = meta.height;
+        m.fps = meta.fps;
+        m.has_audio = meta.audio_codec.is_some();
+        m.original_filename = original_filename;
+        // The extracted WAV is cached under the OLD content hash. Same bytes
+        // (a pure move/rename) → the cache is still correct and re-extracting
+        // a long talk would be wasteful; different bytes → it is now wrong
+        // audio, so drop it and let the next transcribe/waveform re-extract.
+        if content_hash != old_hash {
+            m.audio_wav_path = None;
+        }
+    }
+
+    // ── clamp clips whose source range no longer fits ────────────────────────
+    for it in next.timeline_items.iter_mut() {
+        if it.source_media_id.as_deref() != Some(media_id) {
+            continue;
+        }
+        if it.in_ms >= 0 && it.out_ms <= new_dur && it.in_ms < it.out_ms {
+            continue; // already inside the new bounds
+        }
+        let len = (it.out_ms - it.in_ms).max(1);
+        if it.in_ms >= new_dur {
+            // Wholly past the new end: slide the window back to the tail,
+            // keeping the clip's length when the new file can hold it.
+            it.out_ms = new_dur;
+            it.in_ms = (new_dur - len).max(0);
+        } else {
+            // Overhangs the end (or a negative in from a malformed file):
+            // keep the start, drop the overhang.
+            it.in_ms = it.in_ms.max(0);
+            it.out_ms = it.out_ms.clamp(it.in_ms + 1, new_dur);
+        }
+        // Both branches land `0 <= in < out <= new_dur`: `new_dur >= 1` is
+        // guaranteed above, the slide branch keeps `len >= 1`, and the
+        // overhang branch only runs while `in_ms + 1 <= new_dur`.
+    }
+
+    // ── carry the legacy primary-video scalars ───────────────────────────────
+    if is_primary {
+        next.video_path = new_path.to_string();
+        next.video_content_hash = content_hash;
+        next.video_duration_ms = new_dur;
+        next.video_width = meta.width;
+        next.video_height = meta.height;
+        next.video_fps = meta.fps;
+        // Same reasoning as the pool entry's cached WAV: keyed by content
+        // hash, so it survives a move and is dropped on a content change.
+        if old_hash != next.video_content_hash {
+            next.audio_wav_path = None;
+        }
+    }
+
     finalize(next)
 }
 
@@ -1122,6 +1284,293 @@ mod tests {
         let p = base();
         let err = remove_media(&p, "nope").unwrap_err();
         assert_eq!(err.code(), "not_found");
+    }
+
+    // ── relink_media / apply_relink ─────────────────────────────────────────
+    //
+    // The IO half (`relink_media`) only probes + hashes and hands off, so the
+    // whole state transition is exercised here through `apply_relink` with a
+    // synthetic probe — no ffmpeg, no fixture files.
+
+    fn probe(dur: i64) -> VideoMetadata {
+        VideoMetadata {
+            duration_ms: dur,
+            width: 1280,
+            height: 720,
+            fps: 25.0,
+            video_codec: Some("h264".into()),
+            audio_codec: Some("aac".into()),
+            audio_channels: Some(2),
+            audio_sample_rate: Some(48_000),
+            container: Some("mov,mp4".into()),
+            kind: MediaKind::Video,
+        }
+    }
+
+    #[test]
+    fn relink_keeps_the_media_id_so_clips_stay_attached() {
+        let mut p = base();
+        p.timeline_items = vec![item("i1", "v1", Some("m1"), 0, 0, 4000)];
+        let r = apply_relink(&p, "m1", "/moved/new.mp4", &probe(5000), "h2".into()).unwrap();
+
+        assert_eq!(r.media[0].id, "m1", "the id is the anchor — never reissued");
+        assert_eq!(
+            r.timeline_items[0].source_media_id.as_deref(),
+            Some("m1"),
+            "the clip must still resolve to the pool entry"
+        );
+        assert_eq!(r.timeline_items[0].in_ms, 0);
+        assert_eq!(r.timeline_items[0].out_ms, 4000);
+    }
+
+    #[test]
+    fn relink_updates_every_file_fact_including_the_basename() {
+        let p = base();
+        let mut meta = probe(7777);
+        meta.audio_codec = None;
+        meta.kind = MediaKind::AudioOnly;
+        let r = apply_relink(&p, "m1", "/elsewhere/Talen 2026.m4a", &meta, "hNEW".into()).unwrap();
+
+        let m = &r.media[0];
+        assert_eq!(m.path, "/elsewhere/Talen 2026.m4a");
+        assert_eq!(m.content_hash, "hNEW");
+        assert_eq!(m.duration_ms, 7777);
+        assert_eq!(m.width, 1280);
+        assert_eq!(m.height, 720);
+        assert_eq!(m.fps, 25.0);
+        assert!(!m.has_audio, "no audio stream in the probe");
+        assert_eq!(m.kind, MediaKind::AudioOnly);
+        assert_eq!(
+            m.original_filename, "Talen 2026.m4a",
+            "basename of the new path, spaces and all"
+        );
+    }
+
+    // ── the interesting case: a SHORTER replacement ─────────────────────────
+
+    #[test]
+    fn relink_to_shorter_file_clamps_overhanging_clip() {
+        // Clip cut against the 5.000 ms original now overhangs a 3.000 ms
+        // replacement. Keep the start, drop the overhang — and stay valid.
+        let mut p = base();
+        p.timeline_items = vec![item("i1", "v1", Some("m1"), 0, 1000, 5000)];
+        let r = apply_relink(&p, "m1", "/short.mp4", &probe(3000), "h2".into()).unwrap();
+
+        assert_eq!(r.timeline_items[0].in_ms, 1000, "start of the cut survives");
+        assert_eq!(r.timeline_items[0].out_ms, 3000, "clamped to the new end");
+        r.validate_timeline()
+            .expect("finalize already ran, but pin it explicitly");
+    }
+
+    #[test]
+    fn relink_to_shorter_file_slides_a_clip_that_now_starts_past_the_end() {
+        // in_ms 4000 is past a 3.000 ms replacement entirely — clamping out
+        // alone would leave in >= out. Slide the window back to the tail,
+        // keeping the 800 ms length the new file can still hold.
+        let mut p = base();
+        p.timeline_items = vec![item("i1", "v1", Some("m1"), 0, 4000, 4800)];
+        let r = apply_relink(&p, "m1", "/short.mp4", &probe(3000), "h2".into()).unwrap();
+
+        let it = &r.timeline_items[0];
+        assert_eq!(it.in_ms, 2200);
+        assert_eq!(it.out_ms, 3000);
+        assert_eq!(it.out_ms - it.in_ms, 800, "length preserved");
+    }
+
+    #[test]
+    fn relink_to_much_shorter_file_collapses_to_the_whole_new_file() {
+        // The new file is shorter than the clip's own length: there is no
+        // window to slide, so the clip becomes the entire new file rather
+        // than the relink failing.
+        let mut p = base();
+        p.timeline_items = vec![item("i1", "v1", Some("m1"), 0, 3000, 5000)];
+        let r = apply_relink(&p, "m1", "/tiny.mp4", &probe(400), "h2".into()).unwrap();
+
+        assert_eq!(r.timeline_items[0].in_ms, 0);
+        assert_eq!(r.timeline_items[0].out_ms, 400);
+    }
+
+    #[test]
+    fn relink_to_shorter_file_clamps_every_affected_clip_and_leaves_others_alone() {
+        let mut p = base();
+        p.media.push(media("m2", 5000));
+        p.tracks.push(track("v2", TrackKind::Video, 1));
+        p.timeline_items = vec![
+            item("i1", "v1", Some("m1"), 0, 0, 1000),       // fits
+            item("i2", "v1", Some("m1"), 2000, 1500, 4500), // overhangs
+            item("i3", "v2", Some("m2"), 0, 3000, 5000),    // other media — untouched
+        ];
+        let r = apply_relink(&p, "m1", "/short.mp4", &probe(2000), "h2".into()).unwrap();
+
+        let by = |id: &str| r.timeline_items.iter().find(|i| i.id == id).unwrap();
+        assert_eq!((by("i1").in_ms, by("i1").out_ms), (0, 1000));
+        assert_eq!((by("i2").in_ms, by("i2").out_ms), (1500, 2000));
+        assert_eq!(
+            (by("i3").in_ms, by("i3").out_ms),
+            (3000, 5000),
+            "a clip on a different media must not be touched"
+        );
+    }
+
+    #[test]
+    fn relink_to_shorter_file_never_grows_a_clip_on_the_timeline() {
+        // Clamping shrinks source spans, so timeline_end_ms can only move
+        // left — a clamp can never manufacture an overlap with a neighbour.
+        let mut p = base();
+        p.timeline_items = vec![
+            item("i1", "v1", Some("m1"), 0, 0, 4000),
+            item("i2", "v1", Some("m1"), 4000, 1000, 5000),
+        ];
+        let before: Vec<i64> = p
+            .timeline_items
+            .iter()
+            .map(|i| i.timeline_end_ms())
+            .collect();
+        let r = apply_relink(&p, "m1", "/short.mp4", &probe(2500), "h2".into()).unwrap();
+
+        for (it, was) in r.timeline_items.iter().zip(before) {
+            assert!(
+                it.timeline_end_ms() <= was,
+                "clip {} grew from {} to {}",
+                it.id,
+                was,
+                it.timeline_end_ms()
+            );
+        }
+    }
+
+    #[test]
+    fn relink_to_longer_file_leaves_clips_untouched() {
+        let mut p = base();
+        p.timeline_items = vec![item("i1", "v1", Some("m1"), 0, 1000, 5000)];
+        let r = apply_relink(&p, "m1", "/long.mp4", &probe(60_000), "h2".into()).unwrap();
+        assert_eq!(
+            (r.timeline_items[0].in_ms, r.timeline_items[0].out_ms),
+            (1000, 5000)
+        );
+    }
+
+    // ── the legacy primary-video scalars ────────────────────────────────────
+
+    #[test]
+    fn relink_of_the_primary_media_carries_the_legacy_scalars() {
+        // Without this the burn-in fast path and the legacy preview keep
+        // reading the OLD path and the repaired project is still broken.
+        let mut p = base();
+        p.video_path = p.media[0].path.clone(); // "/v/m1.mp4"
+        p.video_content_hash = "h".into();
+        p.video_duration_ms = 5000;
+        p.audio_wav_path = Some("/cache/h.wav".into());
+
+        let r = apply_relink(&p, "m1", "/moved/m1.mp4", &probe(4000), "hNEW".into()).unwrap();
+
+        assert_eq!(r.video_path, "/moved/m1.mp4");
+        assert_eq!(r.video_content_hash, "hNEW");
+        assert_eq!(r.video_duration_ms, 4000);
+        assert_eq!(r.video_width, 1280);
+        assert_eq!(r.video_height, 720);
+        assert_eq!(r.video_fps, 25.0);
+        assert_eq!(
+            r.audio_wav_path, None,
+            "the cached WAV is keyed by the old hash — different bytes, drop it"
+        );
+    }
+
+    #[test]
+    fn relink_of_a_non_primary_media_leaves_the_scalars_alone() {
+        let mut p = base();
+        p.video_path = "/somewhere/primary.mp4".into();
+        p.video_content_hash = "hPRIMARY".into();
+        p.video_duration_ms = 9999;
+        p.audio_wav_path = Some("/cache/hPRIMARY.wav".into());
+
+        let r = apply_relink(&p, "m1", "/moved/other.mp4", &probe(4000), "hNEW".into()).unwrap();
+
+        assert_eq!(r.video_path, "/somewhere/primary.mp4");
+        assert_eq!(r.video_content_hash, "hPRIMARY");
+        assert_eq!(r.video_duration_ms, 9999);
+        assert_eq!(r.audio_wav_path.as_deref(), Some("/cache/hPRIMARY.wav"));
+    }
+
+    #[test]
+    fn relink_primary_by_pure_move_keeps_the_cached_wav() {
+        // Same bytes, new path: the hash-keyed WAV is still correct, and
+        // re-extracting an hour-long talk for a rename would be daft.
+        let mut p = base();
+        p.video_path = p.media[0].path.clone();
+        p.video_content_hash = "h".into();
+        p.audio_wav_path = Some("/cache/h.wav".into());
+        p.media[0].audio_wav_path = Some("/cache/h.wav".into());
+
+        let r = apply_relink(&p, "m1", "/moved/m1.mp4", &probe(5000), "h".into()).unwrap();
+
+        assert_eq!(r.audio_wav_path.as_deref(), Some("/cache/h.wav"));
+        assert_eq!(r.media[0].audio_wav_path.as_deref(), Some("/cache/h.wav"));
+    }
+
+    #[test]
+    fn relink_drops_the_pool_wav_when_the_content_changed() {
+        let mut p = base();
+        p.media[0].audio_wav_path = Some("/cache/h.wav".into());
+        let r = apply_relink(&p, "m1", "/other.mp4", &probe(5000), "hNEW".into()).unwrap();
+        assert_eq!(r.media[0].audio_wav_path, None);
+    }
+
+    #[test]
+    fn relink_leaves_captions_alone_even_when_the_file_shrinks() {
+        // Captions are the flagship data; a shorter replacement must never
+        // silently destroy transcribed words.
+        let mut p = base();
+        p.captions = vec![crate::model::Caption {
+            id: "c1".into(),
+            start_ms: 3000,
+            end_ms: 4000, // well past the 1.000 ms replacement
+            words: vec![crate::model::Word {
+                text: "nåde".into(),
+                start_ms: 3000,
+                end_ms: 4000,
+                confidence: 91.0,
+                edited: false,
+                locked: false,
+                polished: false,
+                alternates: vec![],
+            }],
+            speaker_id: None,
+            style_id: None,
+            notes: None,
+            ai_generated: true,
+            last_edited_at: 0,
+            track_id: None,
+        }];
+        p.timeline_items = vec![item("i1", "v1", Some("m1"), 0, 0, 5000)];
+        let r = apply_relink(&p, "m1", "/short.mp4", &probe(1000), "h2".into()).unwrap();
+
+        assert_eq!(r.captions.len(), 1);
+        assert_eq!(r.captions[0].words.len(), 1);
+        assert_eq!((r.captions[0].start_ms, r.captions[0].end_ms), (3000, 4000));
+        assert_eq!(r.captions[0].words[0].confidence, 91.0);
+    }
+
+    #[test]
+    fn relink_unknown_media_is_not_found() {
+        let p = base();
+        let err = apply_relink(&p, "nope", "/x.mp4", &probe(1000), "h".into()).unwrap_err();
+        assert_eq!(err.code(), "not_found");
+    }
+
+    #[test]
+    fn relink_to_zero_duration_file_is_rejected() {
+        let p = base();
+        let err = apply_relink(&p, "m1", "/empty.mp4", &probe(0), "h".into()).unwrap_err();
+        assert_eq!(err.code(), "validation");
+    }
+
+    #[test]
+    fn relink_media_errors_when_the_path_does_not_exist() {
+        // The IO wrapper's own guard — it must not reach ffprobe.
+        let p = base();
+        let err = relink_media(&p, "m1", "/definitely/not/here/nope.mp4").unwrap_err();
+        assert_eq!(err.code(), "video_missing");
     }
 
     // ── add_track / remove_track / reorder / flags ──────────────────────────
