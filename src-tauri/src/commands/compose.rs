@@ -5,6 +5,13 @@
 //!     timeline is simple). Streams `compose-render-progress` events and honours
 //!     a shared cancel flag, mirroring `reel_render_all`.
 //!   - `compose_cancel` — flip the cancel flag.
+//!   - `compose_default_encoder` — the hardware-aware encoder pick for THIS
+//!     platform, so the compose export UI can default to the same choice the
+//!     burn-in preset path makes (`ExportPreset::to_burnin_options`) instead of
+//!     unconditionally targeting the CPU encoder. `default_encoder()` is a
+//!     `cfg!(target_os)` branch baked into the binary, not a runtime probe —
+//!     there is nothing for the frontend to compute on its own, so this is a
+//!     thin read-only round-trip rather than a new plugin dependency.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +19,7 @@ use std::sync::Arc;
 
 use crate::error::AppResult;
 use crate::model::Project;
+use crate::services::burnin::Encoder;
 use crate::services::compose::{self, ComposeSettings};
 
 /// Shared cancel flag for the in-flight compose render (one at a time).
@@ -69,4 +77,33 @@ pub async fn compose_preview_proxy(
 #[tauri::command]
 pub fn compose_cancel(control: tauri::State<'_, ComposeRenderControl>) {
     control.cancel.store(true, Ordering::Relaxed);
+}
+
+/// The hardware-aware encoder this platform's binary would pick by default —
+/// `VideoToolbox` on macOS, `Nvenc` on Windows (best-effort; `render()` falls
+/// back to CPU on failure), `Cpu` elsewhere. Read-only; takes no project.
+#[tauri::command]
+pub fn compose_default_encoder() -> Encoder {
+    crate::services::burnin::default_encoder()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mirrors `burnin::default_encoder_matches_platform` — this command is a
+    /// thin pass-through, but pinning it here too means a future refactor that
+    /// forgets to keep the two wired together fails loudly instead of quietly
+    /// reverting the compose export UI to "always CPU".
+    #[test]
+    fn compose_default_encoder_matches_platform() {
+        let e = compose_default_encoder();
+        if cfg!(target_os = "macos") {
+            assert_eq!(e, Encoder::VideoToolbox);
+        } else if cfg!(target_os = "windows") {
+            assert_eq!(e, Encoder::Nvenc);
+        } else {
+            assert_eq!(e, Encoder::Cpu);
+        }
+    }
 }

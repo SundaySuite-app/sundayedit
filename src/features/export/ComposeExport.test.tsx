@@ -7,12 +7,14 @@ import { SAMPLE_PROJECT } from "@/lib/sampleProject";
 import { useLocale } from "@/lib/i18n";
 
 // Mock the lowest layer (Tauri invoke) so the real typed `ipc` wrappers run —
-// this pins the compose command names. `isTauri` reports false so the progress
-// subscription stays on the deterministic window-CustomEvent path.
+// this pins the compose command names. `tauriEnv` flips what `isTauri()`
+// reports per-test; off (the default) keeps the progress subscription on the
+// deterministic window-CustomEvent path used by most of this file's tests.
 const invoke = vi.fn();
+let tauriEnv = false;
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invoke(...args),
-  isTauri: () => false,
+  isTauri: () => tauriEnv,
 }));
 
 // The save dialog resolves a fixed output path so the export flow runs.
@@ -53,6 +55,7 @@ beforeEach(() => {
   saveDialog.mockReset();
   saveDialog.mockResolvedValue("/demo/out.mp4");
   useLocale.setState({ lang: "en" });
+  tauriEnv = false;
 });
 
 afterEach(() => {
@@ -139,5 +142,73 @@ describe("ComposeExport — cancel vs error", () => {
     await vi.waitFor(() => expect(saveDialog).toHaveBeenCalled());
     expect(screen.queryByTestId("compose-progress")).toBeNull();
     expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+// ── encoder/codec picker (R3-B) ──────────────────────────────────────────────
+// Regression: the multi-track export used to hardcode `encoder: "cpu"`
+// unconditionally — minutes vs. close to an hour on a 60-minute timeline.
+
+describe("ComposeExport — encoder/codec picker", () => {
+  function encoderSelect(): HTMLSelectElement {
+    return screen.getByTestId("compose-encoder-select") as HTMLSelectElement;
+  }
+
+  it("stays on cpu off-Tauri, without ever calling compose_default_encoder", () => {
+    invoke.mockResolvedValue(undefined);
+    render(<ComposeExport project={SAMPLE_PROJECT} />);
+    expect(encoderSelect().value).toBe("cpu");
+    expect(invoke).not.toHaveBeenCalledWith(
+      "compose_default_encoder",
+      undefined,
+    );
+  });
+
+  it("adopts the platform's hardware-aware default under Tauri — no longer unconditionally cpu", async () => {
+    tauriEnv = true;
+    invoke.mockImplementation((cmd: unknown) =>
+      cmd === "compose_default_encoder"
+        ? Promise.resolve("video-toolbox")
+        : Promise.resolve(undefined),
+    );
+    render(<ComposeExport project={SAMPLE_PROJECT} />);
+    await vi.waitFor(() => expect(encoderSelect().value).toBe("video-toolbox"));
+  });
+
+  it("always keeps CPU (most compatible) selectable regardless of the detected default", async () => {
+    tauriEnv = true;
+    invoke.mockImplementation((cmd: unknown) =>
+      cmd === "compose_default_encoder"
+        ? Promise.resolve("nvenc")
+        : Promise.resolve(undefined),
+    );
+    render(<ComposeExport project={SAMPLE_PROJECT} />);
+    await vi.waitFor(() => expect(encoderSelect().value).toBe("nvenc"));
+    const options = Array.from(encoderSelect().options).map((o) => o.value);
+    expect(options).toContain("cpu");
+    expect(screen.getByText("CPU (most compatible)")).toBeTruthy();
+  });
+
+  it("sends the user's picked codec + encoder to compose_render, not the hardcoded baseline", async () => {
+    invoke.mockResolvedValue(undefined);
+    render(<ComposeExport project={SAMPLE_PROJECT} />);
+
+    fireEvent.click(screen.getByTestId("compose-codec-h265"));
+    fireEvent.change(encoderSelect(), { target: { value: "nvenc" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Export composed video/ }),
+    );
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "compose_render",
+        expect.objectContaining({
+          settings: expect.objectContaining({
+            codec: "h265",
+            encoder: "nvenc",
+          }),
+        }),
+      ),
+    );
   });
 });

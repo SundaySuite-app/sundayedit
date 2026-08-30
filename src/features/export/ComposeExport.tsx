@@ -5,9 +5,18 @@
  *
  * This is an ADDED export path that sits alongside the sidecar + burn-in exports
  * in `ExportPanel`; it never touches them. The flow:
- *   pick output (save dialog) → build ComposeSettings from the project geometry →
- *   `ipc.compose.render` → a fixed progress overlay driven by the
- *   `compose-render-progress` event, with a Cancel button (`ipc.compose.cancel`).
+ *   pick output (save dialog) → build ComposeSettings from the project geometry,
+ *   codec/encoder from the picker below → `ipc.compose.render` → a fixed
+ *   progress overlay driven by the `compose-render-progress` event, with a
+ *   Cancel button (`ipc.compose.cancel`).
+ *
+ * The encoder picker exists because a 60-minute timeline is minutes on a
+ * hardware encoder versus close to an hour unconditionally on `libx264` (CPU)
+ * — the gap this export path used to default into silently. It seeds from
+ * `detectDefaultEncoder` (the same hardware-aware pick the burn-in/preset
+ * export path makes) but the user can always override it, "CPU (most
+ * compatible)" included, for a machine where the hardware encoder is flaky or
+ * a file that must open everywhere.
  *
  * Everything here assumes Tauri; the caller guards mounting behind `isTauri()`.
  */
@@ -17,12 +26,14 @@ import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Clapperboard, Loader2, X, CheckCircle2 } from "lucide-react";
 
 import { ipc, IPCError } from "@/lib/ipc";
-import type { Project } from "@/lib/bindings";
+import type { Encoder, Project, VideoCodec } from "@/lib/bindings";
 import {
   defaultComposeSettings,
+  detectDefaultEncoder,
   subscribeComposeProgress,
 } from "@/lib/composeEngine";
 import { useT } from "@/lib/i18n";
+import { cn } from "@/lib/cn";
 
 type Phase =
   | { kind: "idle" }
@@ -41,6 +52,24 @@ export function ComposeExport({ project }: { project: Project }) {
   // failure unless we sniff the message — the flag makes the calm "cancelled"
   // state robust even if the backend's error text changes.
   const cancelRequestedRef = useRef(false);
+
+  // Codec/encoder the user picked, seeded from the platform's hardware-aware
+  // default (see the module doc comment). Starts at the universal-fallback
+  // "cpu" for the one render before `detectDefaultEncoder` resolves — a user
+  // clicking export in that split second still gets a correct, if slower,
+  // render, never a broken one.
+  const [codec, setCodec] = useState<VideoCodec>("h264");
+  const [encoder, setEncoder] = useState<Encoder>("cpu");
+
+  useEffect(() => {
+    let cancelled = false;
+    void detectDefaultEncoder().then((e) => {
+      if (!cancelled) setEncoder(e);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => () => unsubRef.current?.(), []);
 
@@ -64,7 +93,15 @@ export function ComposeExport({ project }: { project: Project }) {
     });
 
     try {
-      await ipc.compose.render(project, out, defaultComposeSettings(project));
+      // Geometry/fps come from the project; codec/encoder come from the
+      // picker below — see `defaultComposeSettings`'s own doc comment for why
+      // that function stays a pure "h264"/"cpu" baseline instead of reaching
+      // for the platform pick itself.
+      await ipc.compose.render(project, out, {
+        ...defaultComposeSettings(project),
+        codec,
+        encoder,
+      });
       setPhase({ kind: "done", path: out });
     } catch (e) {
       const message =
@@ -113,6 +150,58 @@ export function ComposeExport({ project }: { project: Project }) {
           </span>
         </span>
       </button>
+
+      {/* Encoder/codec picker — see the module doc comment. Defaults to the
+          hardware-aware pick (once `detectDefaultEncoder` resolves) but
+          always leaves "CPU (most compatible)" reachable. */}
+      <div className="mt-2 space-y-2 rounded-md border border-[var(--color-border)] p-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-fg-subtle)]">
+            {t("composeCodecLabel")}
+          </span>
+          <div className="flex gap-1">
+            {(["h264", "h265"] as VideoCodec[]).map((c) => (
+              <button
+                key={c}
+                type="button"
+                data-testid={`compose-codec-${c}`}
+                aria-pressed={codec === c}
+                onClick={() => setCodec(c)}
+                className={cn(
+                  "rounded border px-2 py-1 font-mono text-[10px] font-semibold uppercase transition-colors",
+                  codec === c
+                    ? "border-[var(--color-accent-500)] bg-[var(--color-accent-500)]/12 text-[var(--color-accent-300)]"
+                    : "border-[var(--color-border)] text-[var(--color-fg-muted)] hover:border-[var(--color-border-strong)]",
+                )}
+              >
+                {c === "h264" ? "H.264" : "H.265"}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <label
+            htmlFor="compose-encoder-select"
+            className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-fg-subtle)]"
+          >
+            {t("composeEncoderLabel")}
+          </label>
+          <select
+            id="compose-encoder-select"
+            data-testid="compose-encoder-select"
+            value={encoder}
+            onChange={(e) => setEncoder(e.target.value as Encoder)}
+            className="rounded border border-[var(--color-border)] bg-[var(--color-bg-elevated)] px-2 py-1 text-[10px] text-[var(--color-fg)]"
+          >
+            <option value="cpu">{t("composeEncoderCpu")}</option>
+            <option value="video-toolbox">
+              {t("composeEncoderVideoToolbox")}
+            </option>
+            <option value="nvenc">{t("composeEncoderNvenc")}</option>
+            <option value="quick-sync">{t("composeEncoderQuickSync")}</option>
+          </select>
+        </div>
+      </div>
 
       {phase.kind !== "idle" && (
         <div

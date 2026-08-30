@@ -5,6 +5,7 @@ import {
   subscribeComposeProgress,
   renderPreviewProxy,
   defaultComposeSettings,
+  detectDefaultEncoder,
 } from "./composeEngine";
 import { SAMPLE_PROJECT } from "./sampleProject";
 import type { ComposeProgress, Project } from "./bindings";
@@ -290,5 +291,26 @@ describe("defaultComposeSettings", () => {
       video_height: 607,
     };
     expect(defaultComposeSettings(screenGrab).height).toBe(608);
+  });
+});
+
+describe("detectDefaultEncoder", () => {
+  it("resolves cpu off-Tauri without ever calling invoke", async () => {
+    tauriEnv = false;
+    await expect(detectDefaultEncoder()).resolves.toBe("cpu");
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("relays the platform pick from compose_default_encoder under Tauri", async () => {
+    tauriEnv = true;
+    invoke.mockResolvedValueOnce("video-toolbox");
+    await expect(detectDefaultEncoder()).resolves.toBe("video-toolbox");
+    expect(invoke).toHaveBeenCalledWith("compose_default_encoder");
+  });
+
+  it("falls back to cpu if the round-trip rejects", async () => {
+    tauriEnv = true;
+    invoke.mockRejectedValueOnce(new Error("no such command"));
+    await expect(detectDefaultEncoder()).resolves.toBe("cpu");
   });
 });

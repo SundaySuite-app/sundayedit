@@ -37,8 +37,12 @@ import type {
   PolishEstimate,
   PolishResult,
   Project,
+  ReelRenderProgress,
+  ReelRenderResult,
+  ReelStoryboard,
   ReflowConfig,
   ReflowIssue,
+  RenderPlan,
   ReplaceResult,
   SecretProvider,
   SecretStatus,
@@ -650,6 +654,44 @@ export const clips = {
   ) => call<void>("clip_burnin_render", { project, clip, output, preset }),
 };
 
+// ── Sermon Highlight Reel Studio (batch social clips) ────────────────────────
+/** The batch render streams `ReelRenderProgress` on this event. */
+export const REEL_RENDER_PROGRESS_EVENT = "reel-render-progress";
+
+export const reel = {
+  /** Propose a reviewable storyboard from the transcript. NEVER errors for a
+   *  missing key: with no resolvable Anthropic key (or on any AI failure) the
+   *  backend returns the keyless pause heuristic instead and reports
+   *  `used_ai: false` (plus `ai_error` when the AI path was tried and failed).
+   *  Renders nothing. With no captions at all it returns an empty plan. */
+  storyboard: (project: Project, model: ClaudeModel, apiKey?: string) =>
+    call<ReelStoryboard>("reel_storyboard", {
+      project,
+      model,
+      apiKey: apiKey ?? null,
+    }),
+  /** Pure fan-out — the reviewed clips × the chosen platform presets become a
+   *  confirmable list of render items under `outputDir`. No IO, no render.
+   *  An empty `presetIds` means the backend's default vertical (9:16) set. */
+  buildPlan: (plan: ClipPlan, presetIds: string[], outputDir: string) =>
+    call<RenderPlan>("reel_build_plan", { plan, presetIds, outputDir }),
+  /** Burn every item in the plan to a vertical MP4. Streams progress on
+   *  `REEL_RENDER_PROGRESS_EVENT` and resolves with the partial outcome —
+   *  one failed clip does not abort the batch. */
+  renderAll: (project: Project, plan: RenderPlan) =>
+    call<ReelRenderResult>("reel_render_all", { project, plan }),
+  /** Ask the in-flight batch to stop. It finishes the clip it is on first (we
+   *  never leave a half-written MP4), so expect one more progress tick. */
+  cancelRender: () => call<void>("reel_cancel_render"),
+  /** Subscribe to batch-render progress. Returns an unlisten function. */
+  onRenderProgress: (
+    cb: (p: ReelRenderProgress) => void,
+  ): Promise<UnlistenFn> =>
+    listen<ReelRenderProgress>(REEL_RENDER_PROGRESS_EVENT, (e) =>
+      cb(e.payload),
+    ),
+};
+
 // ── AI glossary suggestions (Phase 3.4 mode 3) ───────────────────────────────
 export const glossary = {
   /** Pure cost/scope preview — no network. */
@@ -767,6 +809,7 @@ export const ipc = {
   cleanup,
   reflow,
   clips,
+  reel,
   glossary,
   polish,
   suggest,

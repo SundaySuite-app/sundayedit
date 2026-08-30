@@ -134,6 +134,14 @@ pub fn op_split_timeline_item(
     timeline_ops::split_timeline_item(&project, &item_id, at_timeline_ms, new_id())
 }
 
+/// Duplicate a clip — a copy lands right after the original on the same
+/// track (see `timeline_ops::duplicate_timeline_item` for the placement
+/// clamp). The new id is minted here, same pattern as `op_split_timeline_item`.
+#[tauri::command]
+pub fn op_duplicate_timeline_item(project: Project, item_id: String) -> AppResult<Project> {
+    timeline_ops::duplicate_timeline_item(&project, &item_id, new_id())
+}
+
 #[tauri::command]
 pub fn op_trim_timeline_item(
     project: Project,

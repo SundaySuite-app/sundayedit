@@ -12,11 +12,29 @@
  *     real app and in Playwright without reimplementing Tauri's event layer.
  *   - `renderPreviewProxy` — environment-guarded wrapper around
  *     `ipc.compose.previewProxy`; degrades to a no-op off-Tauri.
- *   - `defaultComposeSettings` — project-derived H264/CPU defaults.
+ *   - `defaultComposeSettings` — project-derived geometry, defaulting to
+ *     H.264/CPU. The CALLER (`ComposeExport`) overrides `codec`/`encoder` with
+ *     whatever the user picked, seeded from `detectDefaultEncoder` below —
+ *     this function stays a synchronous, pure baseline on purpose (it is
+ *     unit-tested as one) rather than reaching for the platform pick itself.
+ *   - `detectDefaultEncoder` — the hardware-aware encoder pick
+ *     `compose_default_encoder` (Rust `burnin::default_encoder`) makes for
+ *     THIS platform, i.e. the same one the burn-in preset path already uses
+ *     (`ExportPreset::to_burnin_options`). `"cpu"` off-Tauri or on any error —
+ *     it is a courtesy default for the picker, never load-bearing.
+ *
+ * This module does NOT go through `ipc.compose` for the encoder-detection
+ * call — `ipc.ts` is owned by another concurrent change (R3-B); see this
+ * function's own comment.
  */
 
-import { isTauri } from "@tauri-apps/api/core";
-import type { ComposeProgress, ComposeSettings, Project } from "./bindings";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import type {
+  ComposeProgress,
+  ComposeSettings,
+  Encoder,
+  Project,
+} from "./bindings";
 import { compose } from "./ipc";
 
 export const COMPOSE_PROGRESS_EVENT = "compose-render-progress";
@@ -149,4 +167,29 @@ export function defaultComposeSettings(project: Project): ComposeSettings {
     encoder: "cpu",
     bitrate_kbps: null,
   };
+}
+
+/**
+ * The hardware-aware encoder this platform would pick by default — mirrors
+ * the choice `ExportPreset::to_burnin_options` already makes for the burn-in
+ * export path, via the `compose_default_encoder` command
+ * (`burnin::default_encoder`: VideoToolbox on macOS, Nvenc on Windows, Cpu
+ * elsewhere — a `cfg!(target_os)` branch baked into the binary, not a runtime
+ * hardware probe).
+ *
+ * Resolves `"cpu"` off-Tauri (browser/demo) or if the round-trip fails for any
+ * reason — this seeds the compose export picker's initial selection, it is
+ * never load-bearing: the user can always pick a different encoder, and "cpu"
+ * is always a legal, correct choice.
+ *
+ * Calls `invoke` directly rather than going through `ipc.compose` — see this
+ * module's own doc comment.
+ */
+export async function detectDefaultEncoder(): Promise<Encoder> {
+  if (!isTauri()) return "cpu";
+  try {
+    return await invoke<Encoder>("compose_default_encoder");
+  } catch {
+    return "cpu";
+  }
 }

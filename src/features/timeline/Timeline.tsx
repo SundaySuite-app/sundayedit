@@ -17,7 +17,10 @@
  * make it drift away from the media. rAF only decides when we look. Drags snap to
  * neighbouring edges, the playhead and the bounds (S toggles snapping). B
  * blades the selected clip at the playhead; Delete/Backspace ripple-deletes
- * it. Media dragged from the bin drops onto a lane to become a new clip.
+ * it. Media dragged from the bin drops onto a lane to become a new clip. ⌘D
+ * duplicates the selected clip right after itself on the same track; ⌘C/⌘V
+ * copy it and re-place a duplicate at the playhead, on the track the copied
+ * clip is on now (or its own track if nothing else is selected).
  */
 
 import {
@@ -39,6 +42,8 @@ import {
   Magnet,
   Volume2,
   VolumeX,
+  Eye,
+  EyeOff,
   Lock,
   Unlock,
   Headphones,
@@ -78,6 +83,10 @@ import { publishPlayheadMs } from "./playhead";
 import { PlaybackClock, type PlaybackSnapshot } from "./playbackClock";
 import { qualityFor, renderStride, shouldRenderFrame } from "./previewQuality";
 import { renderPreviewProxy } from "@/lib/composeEngine";
+import {
+  duplicateTimelineItem,
+  newestTimelineItemId,
+} from "./timelineOpsExtra";
 import { MEDIA_DND_MIME } from "@/features/media/MediaBin";
 import { useThumbnail } from "@/features/media/thumbnails";
 import { useMediaAvailability } from "@/features/media/useMediaAvailability";
@@ -109,7 +118,7 @@ const LANE_H = 52;
 // and 150px squeezed the name label to zero width — invisible per Playwright,
 // truncated-to-nothing for real users. Widened again from 184 (R2 audio): the
 // compact track-fader slider is an 8th control on that same row.
-const GUTTER_W = 212;
+const GUTTER_W = 276;
 
 /** Caption move/resize drag (flagship captions on a caption track). */
 type CaptionDrag = {
@@ -221,6 +230,16 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
   const [drag, setDrag] = useState<CaptionDrag | null>(null);
   const [clipDrag, setClipDrag] = useState<ClipDrag | null>(null);
   const [dropTrackId, setDropTrackId] = useState<string | null>(null);
+  // ⌘C clipboard: just enough to find the source clip again at paste time —
+  // NOT a frozen snapshot of its fields. ⌘V re-duplicates whatever that id
+  // currently looks like (see `pasteClipboard`), so a paste after further
+  // edits to the copied clip reflects those edits, same as most NLEs'
+  // "duplicate" but keyed off a remembered id instead of the selection.
+  const clipboardRef = useRef<{
+    id: string;
+    trackId: string;
+    trackKind: Track["kind"];
+  } | null>(null);
   const [waveform, setWaveform] = useState<WaveformData | null>(null);
   // A transient warning when the user scrubs the native video control while the
   // timeline is driving playback (the two clocks would fight).
@@ -854,11 +873,10 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
-    // Modified chords (Cmd+K command palette, Cmd+S save, menu accelerators)
-    // belong to app-level handlers — never treat them as timeline shortcuts.
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
     // Keystrokes typed into a focused field are never timeline shortcuts —
-    // mirrors the app-wide typing guard in useUndoHotkeys.
+    // mirrors the app-wide typing guard in useUndoHotkeys. Checked FIRST, so
+    // Cmd+C/Cmd+V below still reach a focused text field's own native
+    // copy/paste instead of the timeline's clipboard.
     const target = e.target as HTMLElement | null;
     if (
       target &&
@@ -868,6 +886,29 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     ) {
       return;
     }
+    // ⌘D duplicate, ⌘C/⌘V copy-paste — the only modified chords the timeline
+    // claims. Every OTHER modified chord (Cmd+K command palette, Cmd+S save,
+    // menu accelerators) belongs to an app-level handler and must be left
+    // alone, unprevented — the fallthrough bail below is unchanged for those.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey) {
+      const modKey = e.key.toLowerCase();
+      if (modKey === "d") {
+        e.preventDefault();
+        duplicateSelectedClip();
+        return;
+      }
+      if (modKey === "c") {
+        e.preventDefault();
+        copySelectedClip();
+        return;
+      }
+      if (modKey === "v") {
+        e.preventDefault();
+        pasteClipboard();
+        return;
+      }
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
     const lower = e.key.toLowerCase();
     if (lower === "j" || lower === "k" || lower === "l") {
       e.preventDefault();
@@ -950,6 +991,64 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
       .catch(() => {});
   }
 
+  // ⌘D: duplicate the selected clip. `duplicate_timeline_item` (Rust) places
+  // the copy immediately after the original on the same track — see its
+  // doc comment for the placement clamp (slots into a gap, trims to fit a
+  // small one, or falls back to the end of the track).
+  function duplicateSelectedClip() {
+    const ti = selectedEditableClip();
+    if (!ti) return;
+    void run((p) => duplicateTimelineItem(p, ti.id)).catch(() => {});
+  }
+
+  // ⌘C: remember the selected clip's id + its track's kind (not a frozen copy
+  // of its fields — see `clipboardRef`'s own comment). Works even on a locked
+  // clip/track: copying doesn't mutate anything, only pasting does.
+  function copySelectedClip() {
+    const ti = project.timeline_items.find((i) => i.id === selectedClipId);
+    if (!ti) return;
+    const track = project.tracks.find((t) => t.id === ti.track_id);
+    if (!track) return;
+    clipboardRef.current = {
+      id: ti.id,
+      trackId: ti.track_id,
+      trackKind: track.kind,
+    };
+  }
+
+  // ⌘V: duplicate the copied clip, then move that duplicate to the playhead —
+  // on the currently selected (unlocked) clip's track when there is one,
+  // else back onto the track the copy came from. Same "same track kind" rule
+  // the pointer drag/drop path enforces (a video clip can't land on a
+  // caption/audio lane); a locked or vanished target track is a silent no-op,
+  // matching every other keyboard op in this file.
+  function pasteClipboard() {
+    const copied = clipboardRef.current;
+    if (!copied) return;
+    const selected = selectedEditableClip();
+    const targetTrackId = selected ? selected.track_id : copied.trackId;
+    const targetTrack = project.tracks.find((t) => t.id === targetTrackId);
+    if (
+      !targetTrack ||
+      targetTrack.locked ||
+      targetTrack.kind !== copied.trackKind
+    ) {
+      return;
+    }
+    const at = playheadMs;
+    void run(async (p) => {
+      const duplicated = await duplicateTimelineItem(p, copied.id);
+      const newId = newestTimelineItemId(p, duplicated);
+      if (!newId) return duplicated;
+      return ipc.timeline.moveTimelineItem(
+        duplicated,
+        newId,
+        targetTrackId,
+        at,
+      );
+    }).catch(() => {});
+  }
+
   // Remove an (empty) track. The backend rejects a non-empty one — surface
   // that message instead of failing silently (there is no ghost to snap back).
   const removeTrack = useCallback(
@@ -962,9 +1061,13 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     [run],
   );
 
-  // Toggle a track flag through the shared undo stack.
+  // Toggle a track flag through the shared undo stack. `enabled` is the
+  // visibility/audibility switch honoured by both the preview (`previewMap.ts`)
+  // and the export (`compose.rs`'s track_visible/has_audio) for EVERY track
+  // kind — not just audio's mute/solo — so it lives here beside them rather
+  // than the audible-only pair below.
   const toggleFlag = useCallback(
-    (track: Track, flag: "muted" | "solo" | "locked") => {
+    (track: Track, flag: "enabled" | "muted" | "solo" | "locked") => {
       void run((p) =>
         ipc.timeline.setTrackFlags(p, track.id, { [flag]: !track[flag] }),
       ).catch(() => {});
@@ -1232,6 +1335,7 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
               onVolumeChange={setTrackVolume}
               // Individual strings (not an object) so memo's shallow compare
               // holds even though `t` is a fresh closure every render.
+              labelEnabled={t("trackEnabled")}
               labelMute={t("trackMute")}
               labelSolo={t("trackSolo")}
               labelLock={t("trackLock")}
@@ -1361,6 +1465,7 @@ const LaneHeaders = memo(function LaneHeaders({
   onRemove,
   onPackGaps,
   onVolumeChange,
+  labelEnabled,
   labelMute,
   labelSolo,
   labelLock,
@@ -1371,11 +1476,15 @@ const LaneHeaders = memo(function LaneHeaders({
   labelVolume,
 }: {
   stacked: Track[];
-  onToggle: (track: Track, flag: "muted" | "solo" | "locked") => void;
+  onToggle: (
+    track: Track,
+    flag: "enabled" | "muted" | "solo" | "locked",
+  ) => void;
   onMove: (track: Track, dir: -1 | 1) => void;
   onRemove: (track: Track) => void;
   onPackGaps: (track: Track) => void;
   onVolumeChange: (track: Track, volumeDb: number) => void;
+  labelEnabled: string;
   labelMute: string;
   labelSolo: string;
   labelLock: string;
@@ -1400,6 +1509,7 @@ const LaneHeaders = memo(function LaneHeaders({
           onPackGaps={onPackGaps}
           onVolumeChange={onVolumeChange}
           labels={{
+            enabled: labelEnabled,
             mute: labelMute,
             solo: labelSolo,
             lock: labelLock,
@@ -1554,12 +1664,16 @@ function TrackHeader({
   height: number;
   canMoveUp: boolean;
   canMoveDown: boolean;
-  onToggle: (track: Track, flag: "muted" | "solo" | "locked") => void;
+  onToggle: (
+    track: Track,
+    flag: "enabled" | "muted" | "solo" | "locked",
+  ) => void;
   onMove: (track: Track, dir: -1 | 1) => void;
   onRemove: (track: Track) => void;
   onPackGaps: (track: Track) => void;
   onVolumeChange: (track: Track, volumeDb: number) => void;
   labels: {
+    enabled: string;
     mute: string;
     solo: string;
     lock: string;
@@ -1581,7 +1695,9 @@ function TrackHeader({
       className="flex items-center gap-1 border-t border-[var(--color-border)] px-2"
       style={{ height }}
     >
-      <div className="flex min-w-0 flex-1 flex-col justify-center">
+      {/* min-w floor: the fixed controls to the right must never squeeze the
+          track name to zero width — it truncates, it does not disappear. */}
+      <div className="flex min-w-14 flex-1 flex-col justify-center overflow-hidden">
         <span className="truncate text-[var(--text-ui-xs)] font-medium">
           {track.name}
         </span>
@@ -1611,6 +1727,19 @@ function TrackHeader({
           <ChevronDown size={11} />
         </button>
       </div>
+      {/* Visibility/audibility switch (`Track.enabled`) — honoured by the
+          preview and the export for EVERY track kind, unlike mute/solo which
+          are audio-only. Offered here regardless of `audible` so a Caption or
+          Overlay track can be hidden too. */}
+      <FlagToggle
+        active={!track.enabled}
+        onClick={() => onToggle(track, "enabled")}
+        label={labels.enabled}
+        on={<EyeOff size={13} />}
+        off={<Eye size={13} />}
+        activeClass="text-[var(--color-danger)]"
+        testId={`track-enabled-${track.id}`}
+      />
       {audible && (
         <>
           <FlagToggle
@@ -1691,6 +1820,7 @@ function FlagToggle({
   on,
   off,
   activeClass,
+  testId,
 }: {
   active: boolean;
   onClick: () => void;
@@ -1698,10 +1828,12 @@ function FlagToggle({
   on: React.ReactNode;
   off: React.ReactNode;
   activeClass: string;
+  testId?: string;
 }) {
   return (
     <button
       type="button"
+      data-testid={testId}
       onClick={onClick}
       aria-pressed={active}
       title={label}

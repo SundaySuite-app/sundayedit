@@ -1,6 +1,13 @@
 # PR/branch gate (Phase 0.2). Release builds live in release.yml (tag-driven).
 # This runs lint + typecheck + unit tests + e2e for the web layer, and
 # fmt + clippy + tests for the Rust backend.
+#
+# Three jobs:
+#   web           — the renderer (lint, types, vitest, build, Playwright)
+#   rust          — the backend: fmt, clippy, `cargo test`, AND the #[ignore]d
+#                   tests that shell out to a REAL ffmpeg (see that job)
+#   rust-features — the `whisper` / `llm` / `diarize` code paths, which the
+#                   default build does not compile at all (see that job)
 
 name: ci
 
@@ -53,3 +60,135 @@ jobs:
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - name: test
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      # ── Real ffmpeg renders ──────────────────────────────────────────────
+      # Everything above this line asserts filtergraph STRINGS: `cargo test`
+      # skips every `#[ignore]`d test, and the ignored set is precisely the one
+      # that RUNS ffmpeg and ffprobes the result. So CI used to report a green
+      # compose engine having never rendered a frame — while the export is the
+      # source of truth for what the product promises.
+      #
+      # The sidecars are already on disk (fetched above) under their Tauri
+      # target-triple names; the tests spawn plain `ffmpeg` / `ffprobe`, so
+      # expose them under those names on PATH.
+      - name: Expose the fetched sidecars as plain `ffmpeg` / `ffprobe`
+        run: |
+          set -euo pipefail
+          # Same triple fetch-ffmpeg.mjs used to name them.
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          if [ -z "$host" ]; then
+            echo "could not read the host triple out of \`rustc -vV\`" >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/ffbin"
+          ln -sf "$PWD/src-tauri/binaries/ffmpeg-$host"  "$RUNNER_TEMP/ffbin/ffmpeg"
+          ln -sf "$PWD/src-tauri/binaries/ffprobe-$host" "$RUNNER_TEMP/ffbin/ffprobe"
+          echo "$RUNNER_TEMP/ffbin" >> "$GITHUB_PATH"
+          # Prove both actually run (a dangling symlink fails here, loudly).
+          # Written to a file rather than piped into `head`: under `pipefail`,
+          # `head -1` closing the pipe can SIGPIPE ffmpeg and fail the step.
+          "$RUNNER_TEMP/ffbin/ffmpeg" -version > "$RUNNER_TEMP/ffmpeg-version.txt"
+          "$RUNNER_TEMP/ffbin/ffprobe" -version > "$RUNNER_TEMP/ffprobe-version.txt"
+          head -1 "$RUNNER_TEMP/ffmpeg-version.txt" "$RUNNER_TEMP/ffprobe-version.txt"
+
+      # Most live tests generate their own media, but the compose ones want two
+      # real source files (SUNDAYEDIT_TEST_VIDEO / _2) — historically an
+      # owner-supplied sample.mp4, which is why they never ran here. Two
+      # 5-second lavfi clips (distinct pictures, distinct tones, both with
+      # audio) satisfy every assertion those tests make, and cost ~0.2 s to
+      # make. No fixture is committed and nothing is downloaded.
+      - name: Generate the two sample clips the live compose tests need
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/media"
+          ffmpeg -v error -y \
+            -f lavfi -i "testsrc2=size=640x360:rate=30:duration=5" \
+            -f lavfi -i "sine=frequency=440:sample_rate=44100:duration=5" \
+            -c:v libx264 -pix_fmt yuv420p -preset ultrafast -c:a aac -shortest \
+            "$RUNNER_TEMP/media/sample.mp4"
+          ffmpeg -v error -y \
+            -f lavfi -i "smptebars=size=640x360:rate=30:duration=5" \
+            -f lavfi -i "sine=frequency=880:sample_rate=44100:duration=5" \
+            -c:v libx264 -pix_fmt yuv420p -preset ultrafast -c:a aac -shortest \
+            "$RUNNER_TEMP/media/sample2.mp4"
+          {
+            echo "SUNDAYEDIT_TEST_VIDEO=$RUNNER_TEMP/media/sample.mp4"
+            echo "SUNDAYEDIT_TEST_VIDEO2=$RUNNER_TEMP/media/sample2.mp4"
+          } >> "$GITHUB_ENV"
+
+      # Runs the WHOLE ignored set — all 41 of them, no subsetting: 17 in the
+      # lib (live compose, edge-case compose regressions, filmstrip, karaoke
+      # burn-in) plus 24 integration tests (audio measurement, xfade
+      # vocabulary, effects parity, transition transforms, odd dimensions).
+      # ~30 s on top of an already-built test binary.
+      #
+      # STILL NOT COVERED HERE — owner-only, deliberately: the two live Whisper
+      # tests in services/asr/local.rs. They are `#[cfg(feature = "whisper")]`
+      # (so they do not even exist in this build) and need a multi-GB model
+      # downloaded onto the machine plus a real 16 kHz mono WAV. Run them by
+      # hand per the recipe in that file.
+      - name: test (real ffmpeg renders — the #[ignore]d set)
+        run: cargo test --manifest-path src-tauri/Cargo.toml -- --ignored
+
+  # ── Feature-gated code ─────────────────────────────────────────────────────
+  # The default feature set is `[]`, but releases build `--features whisper,llm`
+  # (see release.yml). So every `#[cfg(feature = "whisper")]` / `"llm"` line —
+  # including the whisper-rs abort-callback workaround documented in
+  # services/asr/local.rs — used to be compiled for the first time ON RELEASE
+  # DAY, from a tag, with no way back but a new tag.
+  #
+  # This job compiles them on every PR. It is deliberately its own job rather
+  # than more steps on `rust`: whisper-rs builds whisper.cpp through cmake, so
+  # it needs a C++ toolchain and its own cargo cache (a different feature set is
+  # a different set of artifacts), and running it in parallel keeps it off the
+  # critical path.
+  #
+  # A failure here is NOT unrelated noise — it is a release-build failure found
+  # early. macos-latest matches the release runner, including the Apple-Silicon
+  # `metal` backend selected per-target in Cargo.toml and the cmake baseline
+  # include that the runner's compiler needs (below).
+  rust-features:
+    name: rust (whisper + llm)
+    runs-on: macos-latest
+    env:
+      # Same override the release build uses. GitHub's macos-latest is an M1
+      # whose Xcode mis-detects i8mm under `-mcpu=native`, and ggml-cpu-quants.c
+      # then fails to build. Forcing GGML_NATIVE=OFF makes detection and
+      # compilation share one baseline. Keep in step with release.yml — this job
+      # is also what proves that file still works.
+      CMAKE_PROJECT_TOP_LEVEL_INCLUDES: ${{ github.workspace }}/src-tauri/cmake/ggml-ci-portable.cmake
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: clippy
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # As in the `rust` job: tauri-build refuses to run without the sidecars,
+      # and build scripts run under `cargo check` too.
+      - name: Fetch ffmpeg/ffprobe sidecars
+        run: node scripts/fetch-ffmpeg.mjs
+      # Separate cache key from the `rust` job — cargo keys artifacts by feature
+      # set, and this one carries the whisper.cpp cmake build, which is the
+      # expensive part to rebuild.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: whisper-llm
+      - name: Check cmake is present (whisper.cpp needs it)
+        run: cmake --version
+
+      # 1. Exactly what release.yml builds. If this is red, the next tag fails.
+      - name: cargo check --features whisper,llm
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --features whisper,llm
+
+      # 2. Stricter, and one feature wider: `diarize` (the sidecar shell-out in
+      #    services/diarize.rs) is not in the release feature set but is real
+      #    code, and `--all-features` is the only build that compiles it. clippy
+      #    rather than check so the repo's `-D warnings` gate — which the `rust`
+      #    job only applies to default features — reaches the gated code too.
+      - name: clippy --all-features
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings

@@ -476,6 +476,68 @@ pub fn add_timeline_item(
     finalize(next)
 }
 
+/// Duplicate a clip: a deep copy of `item_id` (same media, in/out, speed,
+/// gain/fades, transform, effects, text, enabled/locked) with a fresh `new_id`,
+/// placed immediately after the original on the SAME track.
+///
+/// Placement follows the same lane conventions `add_timeline_item` /
+/// `move_timeline_item` use for Video/Audio tracks (Caption content isn't a
+/// `TimelineItem`; Overlay legitimately allows overlap, so it gets no clamp —
+/// mirroring `neighbour_bounds`'s unbounded window for non-lane tracks):
+///   - room for the whole copy right after the original → it lands there,
+///     untouched;
+///   - a smaller-but-usable gap before the next clip → the copy's tail trims
+///     to fit it, exactly like a fresh drop from `add_timeline_item`;
+///   - no usable room at all (butt-joined to the next clip, or the gap is
+///     narrower than one source frame at this clip's `speed`) → the copy
+///     appends at the end of the track instead, at full length.
+///
+/// `transition_in` is cleared on the copy: it described a crossfade against
+/// whatever preceded the ORIGINAL, and the copy's own predecessor is a
+/// different clip (the original itself) — the same reasoning
+/// `split_timeline_item` uses to clear it on the new right-hand piece.
+pub fn duplicate_timeline_item(
+    project: &Project,
+    item_id: &str,
+    new_id: String,
+) -> AppResult<Project> {
+    let (_, original) = find_item(project, item_id)?;
+    let mut clone = original.clone();
+    clone.id = new_id;
+    clone.transition_in = None;
+
+    let mut start = original.timeline_end_ms();
+    let (_, next_start) = neighbour_bounds(project, original);
+    if let Some(ns) = next_start {
+        let gap = ns - start;
+        let speed = original.effective_speed();
+        let max_out = original.in_ms + ((gap.max(0) as f64) * speed).floor() as i64;
+        if gap >= 1 && max_out > clone.in_ms {
+            // Room for at least a trimmed copy right after the original.
+            clone.out_ms = clone.out_ms.min(max_out);
+        } else {
+            // No usable room immediately after (butt-joined to the next clip,
+            // or the gap is narrower than one source frame at this speed) —
+            // append at the end of the track instead, full length. Scanning
+            // ALL items on the track (not just `others`) so this is correct
+            // even when the original is the only clip there.
+            start = project
+                .timeline_items
+                .iter()
+                .filter(|it| it.track_id == original.track_id)
+                .map(|it| it.timeline_end_ms())
+                .max()
+                .unwrap_or(start)
+                .max(start);
+        }
+    }
+    clone.timeline_start_ms = start;
+
+    let mut next = project.clone();
+    next.timeline_items.push(clone);
+    finalize(next)
+}
+
 /// Split a clip in two at `at_timeline_ms` on the timeline. The split point is
 /// mapped back into the source (respecting `speed`); the left piece keeps the
 /// original id + leading transition, the right piece gets `new_id`. The split
@@ -1833,6 +1895,131 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code(), "validation");
+    }
+
+    // ── duplicate_timeline_item ──────────────────────────────────────────────
+    #[test]
+    fn duplicate_timeline_item_places_copy_immediately_after() {
+        let mut p = base();
+        p.timeline_items = vec![item("i1", "v1", Some("m1"), 0, 0, 2000)];
+        let r = duplicate_timeline_item(&p, "i1", "i2".into()).unwrap();
+        assert_eq!(r.timeline_items.len(), 2);
+        let clone = &r.timeline_items[1];
+        assert_eq!(clone.id, "i2");
+        assert_eq!(clone.timeline_start_ms, 2000);
+        assert_eq!((clone.in_ms, clone.out_ms), (0, 2000));
+        // The original is untouched.
+        assert_eq!(r.timeline_items[0].timeline_start_ms, 0);
+    }
+
+    #[test]
+    fn duplicate_timeline_item_deep_copies_playback_fields() {
+        let mut p = base();
+        let mut original = item("i1", "v1", Some("m1"), 0, 500, 2500);
+        original.speed = 1.5;
+        original.gain_db = -6.0;
+        original.fade_in_ms = 100;
+        original.transform.opacity = 0.5;
+        original.transition_in = Some(Transition {
+            kind: "crossfade".into(),
+            duration_ms: 300,
+        });
+        p.timeline_items = vec![original];
+        let r = duplicate_timeline_item(&p, "i1", "i2".into()).unwrap();
+        let clone = &r.timeline_items[1];
+        assert_eq!(clone.speed, 1.5);
+        assert_eq!(clone.gain_db, -6.0);
+        assert_eq!(clone.fade_in_ms, 100);
+        assert_eq!(clone.transform.opacity, 0.5);
+        // Cleared — the copy's predecessor is the original, not whatever the
+        // original crossfaded in from (mirrors `split_timeline_item`).
+        assert!(clone.transition_in.is_none());
+    }
+
+    #[test]
+    fn duplicate_timeline_item_trims_tail_to_fit_a_small_gap() {
+        let mut p = base();
+        // i1 ends at 1000; i2 starts at 1300 — a 300ms gap, smaller than i1's
+        // own 1000ms length.
+        p.timeline_items = vec![
+            item("i1", "v1", Some("m1"), 0, 0, 1000),
+            item("i2", "v1", Some("m1"), 1300, 0, 1000),
+        ];
+        let r = duplicate_timeline_item(&p, "i1", "i2b".into()).unwrap();
+        let clone = r.timeline_items.iter().find(|it| it.id == "i2b").unwrap();
+        assert_eq!(clone.timeline_start_ms, 1000);
+        assert_eq!((clone.in_ms, clone.out_ms), (0, 300));
+        assert_eq!(clone.timeline_end_ms(), 1300); // butts exactly against i2
+    }
+
+    #[test]
+    fn duplicate_timeline_item_trim_respects_speed() {
+        let mut p = base();
+        let mut original = item("i1", "v1", Some("m1"), 0, 0, 2000);
+        original.speed = 2.0; // 2000ms of source plays in 1000ms of timeline
+        p.timeline_items = vec![
+            original,
+            // Gap of exactly 300 timeline-ms after i1 (ends at 1000).
+            item("i2", "v1", Some("m1"), 1300, 0, 1000),
+        ];
+        let r = duplicate_timeline_item(&p, "i1", "i2b".into()).unwrap();
+        let clone = r.timeline_items.iter().find(|it| it.id == "i2b").unwrap();
+        assert_eq!(clone.timeline_start_ms, 1000);
+        // 300 timeline-ms * 2.0 speed = 600 source-ms.
+        assert_eq!((clone.in_ms, clone.out_ms), (0, 600));
+        assert_eq!(clone.timeline_end_ms(), 1300);
+    }
+
+    #[test]
+    fn duplicate_timeline_item_pushes_to_track_end_when_butt_joined() {
+        let mut p = base();
+        // i2 starts exactly where i1 ends — zero gap, no room to slot into.
+        p.timeline_items = vec![
+            item("i1", "v1", Some("m1"), 0, 0, 1000),
+            item("i2", "v1", Some("m1"), 1000, 0, 500),
+        ];
+        let r = duplicate_timeline_item(&p, "i1", "i1b".into()).unwrap();
+        let clone = r.timeline_items.iter().find(|it| it.id == "i1b").unwrap();
+        // Appended after i2 (ends at 1500), full length preserved.
+        assert_eq!(clone.timeline_start_ms, 1500);
+        assert_eq!((clone.in_ms, clone.out_ms), (0, 1000));
+    }
+
+    #[test]
+    fn duplicate_timeline_item_never_overlaps_on_a_lane_track() {
+        let mut p = base();
+        p.timeline_items = vec![
+            item("i1", "v1", Some("m1"), 0, 0, 1000),
+            item("i2", "v1", Some("m1"), 1300, 0, 1000),
+        ];
+        let r = duplicate_timeline_item(&p, "i1", "i1b".into()).unwrap();
+        // finalize() runs validate_timeline(), which rejects overlap — this
+        // just documents the guarantee explicitly.
+        assert!(r.validate_timeline().is_ok());
+    }
+
+    #[test]
+    fn duplicate_timeline_item_on_overlay_track_gets_no_overlap_clamp() {
+        let mut p = base();
+        p.tracks = vec![track("ov", TrackKind::Overlay, 0)];
+        // A second item already occupies the exact span the duplicate of i1
+        // would land on — legal on Overlay, unlike Video/Audio.
+        p.timeline_items = vec![
+            item("i1", "ov", Some("m1"), 0, 0, 1000),
+            item("i2", "ov", Some("m1"), 1000, 0, 1000),
+        ];
+        let r = duplicate_timeline_item(&p, "i1", "i1b".into()).unwrap();
+        let clone = r.timeline_items.iter().find(|it| it.id == "i1b").unwrap();
+        // Lands immediately after i1 (1000), fully overlapping i2 — allowed.
+        assert_eq!(clone.timeline_start_ms, 1000);
+        assert_eq!((clone.in_ms, clone.out_ms), (0, 1000));
+    }
+
+    #[test]
+    fn duplicate_timeline_item_missing_is_not_found() {
+        let p = base();
+        let err = duplicate_timeline_item(&p, "nope", "x".into()).unwrap_err();
+        assert_eq!(err.code(), "not_found");
     }
 
     // ── split_timeline_item ─────────────────────────────────────────────────
