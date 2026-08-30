@@ -421,3 +421,59 @@ to flip itself and the user never learns why.
   **transform and effects**, which the `<video>` path cannot. What it does not
   model: `crop`, and stacked layers (one element, one texture) — both reported
   as `unsupported` by `describeScene` rather than silently diverging.
+
+## ADR-014 — We ship macOS + Windows only; Linux-only advisories are not product vulnerabilities
+
+**Status:** Accepted (2026-08-30)
+
+`release.yml` builds exactly two platforms:
+
+```yaml
+matrix:
+  include:
+    - platform: macos-latest
+      args: "--target universal-apple-darwin --features whisper,llm"
+    - platform: windows-latest
+```
+
+There is no Linux release job, and no Linux artifact has ever left this repo.
+`ci.yml`'s only Linux runner (`web:`) runs Node — it never invokes cargo. All
+Rust checks run on `macos-latest`.
+
+This has a standing consequence for dependency triage, which is why it is
+written down rather than rediscovered each time.
+
+**`Cargo.lock` is cross-platform; the shipped dependency graph is not.** The
+lockfile records the union of every target's resolution, so scanners flag
+crates we never compile. Tauri's Linux backend (GTK/WebKitGTK) is the big one:
+`glib`, `gtk`, `atk`, `gdk`, `gio`, `pango`, `soup3`, `webkit2gtk`,
+`javascriptcore-rs`. None of them exist on our targets.
+
+Verify before acting on such an advisory, from `src-tauri/`:
+
+```
+cargo tree -i <crate> --target aarch64-apple-darwin  --edges normal
+cargo tree -i <crate> --target x86_64-pc-windows-msvc --edges normal
+cargo tree -i <crate> --target x86_64-unknown-linux-gnu --edges normal
+```
+
+`warning: nothing to print.` on a target means the crate is absent there. If it
+is absent from both shipped targets, the advisory does not describe a hole in
+the product, and the alert is dismissed as **not used** with that evidence —
+not silently ignored. Keeping such alerts open is itself a hazard: the noise
+hides the next real finding.
+
+Worked example — GHSA-wrw7-89jp-8q8g (`glib` 0.18.5, unsoundness in
+`VariantStrIter`'s `Iterator`/`DoubleEndedIterator` impls), dismissed
+2026-08-30:
+
+- absent on `aarch64-apple-darwin` and `x86_64-pc-windows-msvc`
+- present only on `x86_64-unknown-linux-gnu`, via
+  `glib ← atk/gdk/gio ← gtk 0.18.2 ← tauri 2.11.5`
+- unfixable regardless: `gtk 0.18.2` requires `glib = "^0.18"`, so
+  `cargo update -p glib` locks 0 packages. glib 0.20 needs Tauri itself to move
+  off the gtk 0.18 stack — upstream's call, and worth nothing to us until we
+  ship Linux.
+
+**If we ever add a Linux target, this ADR is void** and the whole GTK stack
+must be re-triaged as shipped code.
