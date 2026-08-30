@@ -4,4 +4,14 @@ import type { TrackKind } from "./TrackKind";
 /**
  * A horizontal lane on the timeline. `index` is the stacking order (0 = bottom).
  */
-export type Track = { id: string, kind: TrackKind, name: string, index: number, enabled: boolean, locked: boolean, muted: boolean, solo: boolean, };
+export type Track = { id: string, kind: TrackKind, name: string, index: number, enabled: boolean, locked: boolean, muted: boolean, solo: boolean, 
+/**
+ * Track fader, in dB relative to unity. `0.0` = unity (and, being the
+ * `#[serde(default)]`, what every pre-R2 project file loads with).
+ *
+ * Adds to each item's own `TimelineItem::gain_db` — dB ADD, so the export
+ * collapses the pair into ONE `volume={sum}dB` node per item instead of
+ * two. `muted`/`solo` stay separate booleans: muting is not "−∞ dB", it is
+ * a switch you can flip back without losing the fader position.
+ */
+volume_db: number, };

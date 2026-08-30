@@ -67,6 +67,7 @@ function backend(): void {
     locked: boolean;
     muted: boolean;
     solo: boolean;
+    volume_db: number;
   };
   type Transform = {
     x: number;
@@ -87,6 +88,9 @@ function backend(): void {
     out_ms: number;
     timeline_start_ms: number;
     speed: number;
+    gain_db: number;
+    fade_in_ms: number;
+    fade_out_ms: number;
     transform: Transform;
     effects: unknown[];
     transition_in: Transition | null;
@@ -501,6 +505,7 @@ function backend(): void {
       locked: false,
       muted: false,
       solo: false,
+      volume_db: 0,
     };
     return { ...project, tracks: [...tracks(project), track] };
   }
@@ -565,6 +570,9 @@ function backend(): void {
       out_ms: outMs,
       timeline_start_ms: timelineStartMs,
       speed: 1,
+      gain_db: 0,
+      fade_in_ms: 0,
+      fade_out_ms: 0,
       transform: identityTransform(),
       effects: [],
       transition_in: null,
@@ -709,6 +717,51 @@ function backend(): void {
     );
     return { ...project, timeline_items: next };
   }
+  /** Mirrors `model::clamp_gain_db`: clamp to [-60, 12], NaN → unity. */
+  const clampGainDb = (db: number): number =>
+    Number.isNaN(db) ? 0 : Math.min(12, Math.max(-60, db));
+  /**
+   * Mirror of `timeline_ops::set_item_audio` (R2): any field left `null`
+   * (the inspector drives one slider at a time) is unchanged; gain clamps to
+   * [-60, 12], each fade clamps to the clip's OWN current timeline length —
+   * the same normalisation `finalize`/`clamp_playback_params` applies on the
+   * real backend after every op.
+   */
+  function setItemAudio(
+    project: Project,
+    itemId: string,
+    gainDb: number | null,
+    fadeInMs: number | null,
+    fadeOutMs: number | null,
+  ): Project {
+    const it = findItem(project, itemId);
+    const len = Math.max(0, itemSpan(it).end - itemSpan(it).start);
+    const next: TimelineItem = {
+      ...it,
+      gain_db: gainDb === null ? it.gain_db : clampGainDb(gainDb),
+      fade_in_ms:
+        fadeInMs === null
+          ? it.fade_in_ms
+          : Math.min(Math.max(0, fadeInMs), len),
+      fade_out_ms:
+        fadeOutMs === null
+          ? it.fade_out_ms
+          : Math.min(Math.max(0, fadeOutMs), len),
+    };
+    const arr = items(project).map((x) => (x.id === itemId ? next : x));
+    return { ...project, timeline_items: arr };
+  }
+  /** Mirror of `timeline_ops::set_track_volume` (R2): clamped, like the item gain. */
+  function setTrackVolume(
+    project: Project,
+    trackId: string,
+    volumeDb: number,
+  ): Project {
+    const next = tracks(project).map((tk) =>
+      tk.id === trackId ? { ...tk, volume_db: clampGainDb(volumeDb) } : tk,
+    );
+    return { ...project, tracks: next };
+  }
   /**
    * Mirror of `timeline_ops::set_effect` (E6): one entry per KIND, params
    * clamped to the curated registry's ranges, a non-curated kind rejected.
@@ -797,6 +850,9 @@ function backend(): void {
       out_ms: durationMs,
       timeline_start_ms: timelineStartMs,
       speed: 1,
+      gain_db: 0,
+      fade_in_ms: 0,
+      fade_out_ms: 0,
       transform: identityTransform(),
       effects: [],
       transition_in: null,
@@ -989,6 +1045,24 @@ function backend(): void {
             solo: (args.solo as boolean | null) ?? null,
           }),
         );
+      case "op_set_item_audio":
+        return Promise.resolve(
+          setItemAudio(
+            project,
+            args.itemId as string,
+            (args.gainDb as number | null) ?? null,
+            (args.fadeInMs as number | null) ?? null,
+            (args.fadeOutMs as number | null) ?? null,
+          ),
+        );
+      case "op_set_track_volume":
+        return Promise.resolve(
+          setTrackVolume(
+            project,
+            args.trackId as string,
+            args.volumeDb as number,
+          ),
+        );
       case "op_add_timeline_item":
         return Promise.resolve(
           addTimelineItem(
@@ -1108,6 +1182,7 @@ function backend(): void {
           locked: false,
           muted: false,
           solo: false,
+          volume_db: 0,
         };
         const captionTrack: Track = {
           id: nleId(),
@@ -1118,6 +1193,7 @@ function backend(): void {
           locked: false,
           muted: false,
           solo: false,
+          volume_db: 0,
         };
         const placed: TimelineItem = {
           id: nleId(),
@@ -1128,6 +1204,9 @@ function backend(): void {
           out_ms: durationMs,
           timeline_start_ms: 0,
           speed: 1,
+          gain_db: 0,
+          fade_in_ms: 0,
+          fade_out_ms: 0,
           transform: identityTransform(),
           effects: [],
           transition_in: null,

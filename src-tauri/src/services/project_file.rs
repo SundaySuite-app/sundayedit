@@ -28,7 +28,7 @@ use crate::model::{
     TimelineItem, Track, Word,
 };
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Open (creating if missing) a `.sundayedit` SQLite file and ensure schema.
 async fn open_pool(path: &Path) -> AppResult<SqlitePool> {
@@ -162,7 +162,8 @@ async fn ensure_schema(pool: &SqlitePool) -> AppResult<()> {
             enabled  INTEGER NOT NULL,
             locked   INTEGER NOT NULL,
             muted    INTEGER NOT NULL,
-            solo     INTEGER NOT NULL
+            solo     INTEGER NOT NULL,
+            volume_db REAL NOT NULL DEFAULT 0.0
         );
         "#,
     )
@@ -186,7 +187,10 @@ async fn ensure_schema(pool: &SqlitePool) -> AppResult<()> {
             transition_json   TEXT,
             text_json         TEXT,
             enabled           INTEGER NOT NULL,
-            locked            INTEGER NOT NULL
+            locked            INTEGER NOT NULL,
+            gain_db           REAL NOT NULL DEFAULT 0.0,
+            fade_in_ms        INTEGER NOT NULL DEFAULT 0,
+            fade_out_ms       INTEGER NOT NULL DEFAULT 0
         );
         "#,
     )
@@ -198,6 +202,21 @@ async fn ensure_schema(pool: &SqlitePool) -> AppResult<()> {
     let _ = sqlx::query("ALTER TABLE caption ADD COLUMN track_id TEXT")
         .execute(pool)
         .await;
+
+    // Schema v5: per-clip audio (gain + fades) and the per-track fader.
+    // Same idempotent-ALTER trick: on a fresh table each fails with "duplicate
+    // column" and is ignored; on a file written by a pre-R2 build they add the
+    // column and every existing row gets the DEFAULT, which is exactly the
+    // `#[serde(default)]` the model declares. A v4 project therefore loads
+    // sounding bit-identical to how it was saved.
+    for stmt in [
+        "ALTER TABLE track ADD COLUMN volume_db REAL NOT NULL DEFAULT 0.0",
+        "ALTER TABLE timeline_item ADD COLUMN gain_db REAL NOT NULL DEFAULT 0.0",
+        "ALTER TABLE timeline_item ADD COLUMN fade_in_ms INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE timeline_item ADD COLUMN fade_out_ms INTEGER NOT NULL DEFAULT 0",
+    ] {
+        let _ = sqlx::query(stmt).execute(pool).await;
+    }
 
     sqlx::query("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?1)")
         .bind(SCHEMA_VERSION.to_string())
@@ -315,8 +334,8 @@ pub async fn save(project: &Project, path: &Path) -> AppResult<()> {
         sqlx::query(
             r#"
             INSERT INTO track (id, position, kind, name, track_index,
-                enabled, locked, muted, solo)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                enabled, locked, muted, solo, volume_db)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
             "#,
         )
         .bind(&t.id)
@@ -328,6 +347,7 @@ pub async fn save(project: &Project, path: &Path) -> AppResult<()> {
         .bind(if t.locked { 1 } else { 0 })
         .bind(if t.muted { 1 } else { 0 })
         .bind(if t.solo { 1 } else { 0 })
+        .bind(t.volume_db)
         .execute(&mut *tx)
         .await?;
     }
@@ -342,8 +362,8 @@ pub async fn save(project: &Project, path: &Path) -> AppResult<()> {
             INSERT INTO timeline_item (id, position, track_id, kind,
                 source_media_id, in_ms, out_ms, timeline_start_ms, speed,
                 transform_json, effects_json, transition_json, text_json,
-                enabled, locked)
-            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                enabled, locked, gain_db, fade_in_ms, fade_out_ms)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
             "#,
         )
         .bind(&it.id)
@@ -366,6 +386,9 @@ pub async fn save(project: &Project, path: &Path) -> AppResult<()> {
         .bind(it.text.as_ref().map(serde_json::to_string).transpose()?)
         .bind(if it.enabled { 1 } else { 0 })
         .bind(if it.locked { 1 } else { 0 })
+        .bind(it.gain_db)
+        .bind(it.fade_in_ms)
+        .bind(it.fade_out_ms)
         .execute(&mut *tx)
         .await?;
     }
@@ -466,6 +489,7 @@ pub async fn load(path: &Path) -> AppResult<Project> {
             locked: r.get::<i64, _>("locked") != 0,
             muted: r.get::<i64, _>("muted") != 0,
             solo: r.get::<i64, _>("solo") != 0,
+            volume_db: r.get::<f64, _>("volume_db") as f32,
         });
     }
 
@@ -499,6 +523,9 @@ pub async fn load(path: &Path) -> AppResult<Project> {
             text,
             enabled: r.get::<i64, _>("enabled") != 0,
             locked: r.get::<i64, _>("locked") != 0,
+            gain_db: r.get::<f64, _>("gain_db") as f32,
+            fade_in_ms: r.get("fade_in_ms"),
+            fade_out_ms: r.get("fade_out_ms"),
         });
     }
 
@@ -668,6 +695,10 @@ mod tests {
                     locked: false,
                     muted: false,
                     solo: false,
+                    // Non-default on purpose: the round-trip test compares the
+                    // WHOLE project, so a fader left at 0.0 would pass even if
+                    // the column were never written.
+                    volume_db: -3.5,
                 },
                 Track {
                     id: "tc".into(),
@@ -678,6 +709,7 @@ mod tests {
                     locked: false,
                     muted: false,
                     solo: false,
+                    volume_db: 0.0,
                 },
             ],
             timeline_items: vec![TimelineItem {
@@ -689,6 +721,9 @@ mod tests {
                 out_ms: 4000,
                 timeline_start_ms: 0,
                 speed: 1.0,
+                gain_db: -6.5,
+                fade_in_ms: 250,
+                fade_out_ms: 400,
                 transform: crate::model::Transform::default(),
                 effects: vec![crate::model::Effect {
                     id: "e1".into(),
@@ -725,6 +760,82 @@ mod tests {
             .await
             .unwrap();
         pool.close().await;
+    }
+
+    /// Turn a file just written by this build into a faithful PRE-R2 (schema
+    /// v4) simulation: physically drop the audio columns, so the file looks
+    /// exactly like one written before per-clip gain and fades existed. The
+    /// v5 `ensure_schema` ALTERs then have to put them back with their
+    /// defaults on the next `load`.
+    async fn strip_r2_audio_columns(path: &Path) {
+        let url = format!("sqlite:{}", path.to_string_lossy());
+        let opts = SqliteConnectOptions::from_str(&url).unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        for stmt in [
+            "ALTER TABLE track DROP COLUMN volume_db",
+            "ALTER TABLE timeline_item DROP COLUMN gain_db",
+            "ALTER TABLE timeline_item DROP COLUMN fade_in_ms",
+            "ALTER TABLE timeline_item DROP COLUMN fade_out_ms",
+        ] {
+            sqlx::query(stmt).execute(&pool).await.unwrap_or_else(|e| {
+                panic!("could not strip R2 audio column via `{stmt}`: {e}");
+            });
+        }
+        pool.close().await;
+    }
+
+    /// A project file written before R2 has no audio columns at all. Opening
+    /// it must succeed and land every clip and track on the documented
+    /// defaults — unity gain, no fades — so an old project sounds EXACTLY as
+    /// it did before the feature shipped.
+    #[tokio::test]
+    async fn pre_r2_file_loads_with_default_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pre_r2.sundayedit");
+        save(&sample_project(), &path).await.unwrap();
+        strip_r2_audio_columns(&path).await;
+
+        let loaded = load(&path).await.unwrap();
+
+        // The fixture deliberately saved NON-default audio; after stripping,
+        // every one of those numbers must come back as the default rather
+        // than as a load error or a stale value.
+        let it = &loaded.timeline_items[0];
+        assert_eq!(it.gain_db, 0.0, "gain must default to unity");
+        assert_eq!(it.fade_in_ms, 0, "fade-in must default to none");
+        assert_eq!(it.fade_out_ms, 0, "fade-out must default to none");
+        for t in &loaded.tracks {
+            assert_eq!(t.volume_db, 0.0, "track {} fader must default", t.id);
+        }
+        // Nothing else about the old file may be disturbed by the migration.
+        assert_eq!(it.speed, 1.0);
+        assert_eq!(loaded.timeline_items.len(), 1);
+        assert_eq!(loaded.tracks.len(), 2);
+    }
+
+    /// Saving a migrated pre-R2 file writes the new columns back — i.e. the
+    /// ALTERs really added usable columns, not just readable ones.
+    #[tokio::test]
+    async fn migrated_pre_r2_file_can_store_audio_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pre_r2_rw.sundayedit");
+        save(&sample_project(), &path).await.unwrap();
+        strip_r2_audio_columns(&path).await;
+
+        let mut migrated = load(&path).await.unwrap();
+        migrated.timeline_items[0].gain_db = -9.0;
+        migrated.timeline_items[0].fade_in_ms = 120;
+        migrated.tracks[0].volume_db = 4.0;
+        save(&migrated, &path).await.unwrap();
+
+        let again = load(&path).await.unwrap();
+        assert_eq!(again.timeline_items[0].gain_db, -9.0);
+        assert_eq!(again.timeline_items[0].fade_in_ms, 120);
+        assert_eq!(again.tracks[0].volume_db, 4.0);
     }
 
     #[tokio::test]

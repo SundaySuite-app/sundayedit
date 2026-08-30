@@ -25,6 +25,9 @@ let mockState: {
   /** The element's own `seeking` flag — the policy's seek-storm guard. */
   seeking: boolean;
   playbackRate: number;
+  /** R2 audio: the element's gain, driven by the active clip's `gain_db` +
+   *  its track's `volume_db`. */
+  volume: number;
 };
 let playSpy: ReturnType<typeof vi.spyOn>;
 let pauseSpy: ReturnType<typeof vi.spyOn>;
@@ -36,6 +39,7 @@ function installVideoMock() {
     duration: 60,
     seeking: false,
     playbackRate: 1,
+    volume: 1,
   };
   const proto = window.HTMLMediaElement.prototype;
   vi.spyOn(proto, "seeking", "get").mockImplementation(() => mockState.seeking);
@@ -59,6 +63,10 @@ function installVideoMock() {
     mockState.currentTime = v;
   });
   vi.spyOn(proto, "paused", "get").mockImplementation(() => mockState.paused);
+  vi.spyOn(proto, "volume", "get").mockImplementation(() => mockState.volume);
+  vi.spyOn(proto, "volume", "set").mockImplementation((v: number) => {
+    mockState.volume = v;
+  });
   vi.spyOn(proto, "duration", "get").mockImplementation(
     () => mockState.duration,
   );
@@ -326,6 +334,7 @@ function track(id: string, index: number): Track {
     locked: false,
     muted: false,
     solo: false,
+    volume_db: 0,
   };
 }
 
@@ -363,6 +372,9 @@ function item(
     out_ms: outMs,
     timeline_start_ms: startMs,
     speed: 1,
+    gain_db: 0,
+    fade_in_ms: 0,
+    fade_out_ms: 0,
     transform: {
       x: 0,
       y: 0,
@@ -440,6 +452,118 @@ describe("MediaPlayer — NLE mapping", () => {
     pumpFrame();
     expect(mockState.playbackRate).toBeCloseTo(2.0);
     expect(mockState.currentTime).toBeCloseTo(2.0);
+  });
+});
+
+describe("MediaPlayer — R2 audio (item gain + track volume)", () => {
+  it("applies a negative clip gain to the element's volume", () => {
+    // -6 dB ≈ 0.501 linear.
+    const p = nleProject(
+      [track("t", 0)],
+      [{ ...item("i", "t", "m", 0, 0, 2000), gain_db: -6 }],
+      [media("m", "/ok/clip.mp4")],
+    );
+    render(
+      <MediaPlayer
+        project={p}
+        playheadMs={0}
+        rate={0}
+        durationMs={2000}
+        fps={30}
+      />,
+    );
+    pumpFrame();
+    expect(mockState.volume).toBeCloseTo(0.5012, 3);
+  });
+
+  it("dB-adds the track fader to the clip's own gain", () => {
+    const p = nleProject(
+      [{ ...track("t", 0), volume_db: -6 }],
+      [{ ...item("i", "t", "m", 0, 0, 2000), gain_db: -6 }],
+      [media("m", "/ok/clip.mp4")],
+    );
+    render(
+      <MediaPlayer
+        project={p}
+        playheadMs={0}
+        rate={0}
+        durationMs={2000}
+        fps={30}
+      />,
+    );
+    pumpFrame();
+    // Combined -12 dB ≈ 0.251 linear — NOT the same as either fader alone,
+    // and not their product either (that would be double-converting dB).
+    expect(mockState.volume).toBeCloseTo(0.2512, 3);
+  });
+
+  it("clamps a positive combined gain to unity — the element cannot boost", () => {
+    const p = nleProject(
+      [{ ...track("t", 0), volume_db: 6 }],
+      [{ ...item("i", "t", "m", 0, 0, 2000), gain_db: 6 }],
+      [media("m", "/ok/clip.mp4")],
+    );
+    render(
+      <MediaPlayer
+        project={p}
+        playheadMs={0}
+        rate={0}
+        durationMs={2000}
+        fps={30}
+      />,
+    );
+    pumpFrame();
+    expect(mockState.volume).toBe(1);
+  });
+
+  it("leaves the element at full volume in legacy single-source mode", () => {
+    // No `project` timeline at all — the pre-R2 code path, which never had a
+    // gain concept and must not suddenly silence itself.
+    render(
+      <MediaPlayer
+        src="asset://x.mp4"
+        playheadMs={0}
+        rate={0}
+        durationMs={60_000}
+        fps={30}
+      />,
+    );
+    pumpFrame();
+    expect(mockState.volume).toBe(1);
+  });
+
+  it("re-reads the gain when the active clip changes mid-timeline", () => {
+    const p = nleProject(
+      [track("t", 0)],
+      [
+        { ...item("a", "t", "m", 0, 0, 1000), gain_db: 0 },
+        { ...item("b", "t", "m", 1000, 0, 1000), gain_db: -20 },
+      ],
+      [media("m", "/ok/clip.mp4")],
+    );
+    const { rerender } = render(
+      <MediaPlayer
+        project={p}
+        playheadMs={0}
+        rate={0}
+        durationMs={2000}
+        fps={30}
+      />,
+    );
+    pumpFrame();
+    expect(mockState.volume).toBeCloseTo(1, 3);
+
+    rerender(
+      <MediaPlayer
+        project={p}
+        playheadMs={1500}
+        rate={0}
+        durationMs={2000}
+        fps={30}
+      />,
+    );
+    pumpFrame();
+    expect(mockState.volume).toBeCloseTo(0.1, 2);
   });
 });
 

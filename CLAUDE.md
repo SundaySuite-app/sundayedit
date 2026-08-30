@@ -105,13 +105,13 @@ tests/fixtures/       Test video files (Creative Commons)
 
 > **Note:** there are no SQL migration files and no `db/` Rust module. The
 > SQLite schema is created in-code in `services/project_file.rs::ensure_schema`
-> (`SCHEMA_VERSION = 4`), which also backfills a default video + caption track
+> (`SCHEMA_VERSION = 5`), which also backfills a default video + caption track
 > when opening older files.
 
 ## Project file format
 
 `.sundayedit` files are SQLite databases — decided and shipped
-(`services/project_file.rs`, `SCHEMA_VERSION = 4`, in-code schema creation +
+(`services/project_file.rs`, `SCHEMA_VERSION = 5`, in-code schema creation +
 in-code migrations; a `tracks_persisted` meta marker distinguishes genuine
 v≤3 files, so load-time timeline backfill never resurrects a deliberately
 emptied timeline). Containing:

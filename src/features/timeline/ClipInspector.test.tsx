@@ -171,6 +171,248 @@ describe("ClipInspector — delete (ripple)", () => {
   });
 });
 
+// ── Audio (R2) ────────────────────────────────────────────────────────────
+describe("ClipInspector — audio section visibility", () => {
+  it("shows gain + fades for an audio-bearing av clip", () => {
+    renderInspector();
+    expect(screen.getByTestId("inspector-gain")).not.toBeNull();
+    expect(screen.getByLabelText("Fade in (ms)")).not.toBeNull();
+    expect(screen.getByLabelText("Fade out (ms)")).not.toBeNull();
+  });
+
+  it("hides the audio section when the clip's own media has no audio stream", () => {
+    const silentProject: Project = {
+      ...SAMPLE_PROJECT,
+      media: [{ ...SAMPLE_PROJECT.media[0], id: "m-silent", has_audio: false }],
+    };
+    useProjectStore.setState({ project: silentProject });
+    const silentItem: TimelineItem = {
+      ...ITEM,
+      id: "ti-silent",
+      source_media_id: "m-silent",
+    };
+    renderInspector(silentItem);
+    expect(screen.queryByTestId("inspector-gain")).toBeNull();
+    expect(screen.queryByLabelText("Fade in (ms)")).toBeNull();
+  });
+
+  it("hides the audio section for a text overlay clip (no source media at all)", () => {
+    const textItem: TimelineItem = {
+      ...ITEM,
+      id: "ti-text",
+      kind: "text",
+      source_media_id: null,
+      text: { text: "Hello", style_id: null },
+    };
+    renderInspector(textItem);
+    expect(screen.queryByTestId("inspector-gain")).toBeNull();
+  });
+});
+
+describe("ClipInspector — gain slider", () => {
+  /** Apply an op_set_item_audio payload the way the backend would. */
+  function applySetItemAudio(rawArgs: unknown): Project {
+    const args = rawArgs as {
+      project: Project;
+      itemId: string;
+      gainDb: number | null;
+      fadeInMs: number | null;
+      fadeOutMs: number | null;
+    };
+    return {
+      ...args.project,
+      updated_at: args.project.updated_at + 1,
+      timeline_items: args.project.timeline_items.map((ti) =>
+        ti.id === args.itemId
+          ? {
+              ...ti,
+              gain_db: args.gainDb ?? ti.gain_db,
+              fade_in_ms: args.fadeInMs ?? ti.fade_in_ms,
+              fade_out_ms: args.fadeOutMs ?? ti.fade_out_ms,
+            }
+          : ti,
+      ),
+    };
+  }
+
+  const gainSlider = () =>
+    screen.getByTestId("inspector-gain") as HTMLInputElement;
+
+  it("drags through several ticks but lands ONE undo entry at the release value", async () => {
+    invoke.mockImplementation((cmd: unknown, rawArgs: unknown) => {
+      expect(cmd).toBe("op_set_item_audio");
+      return Promise.resolve(applySetItemAudio(rawArgs));
+    });
+    renderInspector();
+
+    fireEvent.change(gainSlider(), { target: { value: "-6" } });
+    fireEvent.change(gainSlider(), { target: { value: "-3" } });
+    fireEvent.change(gainSlider(), { target: { value: "2" } });
+
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() =>
+      expect(
+        useProjectStore.getState().project?.timeline_items[0].gain_db,
+      ).toBe(2),
+    );
+    // ONE undo step for the whole drag, not one per tick.
+    expect(useProjectStore.getState().past).toEqual([SAMPLE_PROJECT]);
+  });
+
+  it("snaps a drag near 0 dB to exactly unity (the detent)", async () => {
+    invoke.mockImplementation((_cmd: unknown, rawArgs: unknown) =>
+      Promise.resolve(applySetItemAudio(rawArgs)),
+    );
+    renderInspector();
+
+    fireEvent.change(gainSlider(), { target: { value: "0.2" } });
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("op_set_item_audio", {
+        project: SAMPLE_PROJECT,
+        itemId: "ti1",
+        gainDb: 0,
+        fadeInMs: null,
+        fadeOutMs: null,
+      }),
+    );
+  });
+
+  it("hides the reset button at 0 dB and shows it once dragged away", () => {
+    const { unmount } = renderInspector();
+    expect(screen.queryByTestId("inspector-gain-reset")).toBeNull();
+    unmount();
+
+    renderInspector({ ...ITEM, gain_db: -6 });
+    expect(screen.queryByTestId("inspector-gain-reset")).not.toBeNull();
+  });
+
+  it("the reset button commits exactly 0 dB", async () => {
+    invoke.mockImplementation((_cmd: unknown, rawArgs: unknown) =>
+      Promise.resolve(applySetItemAudio(rawArgs)),
+    );
+    renderInspector({ ...ITEM, gain_db: -6 });
+
+    fireEvent.click(screen.getByTestId("inspector-gain-reset"));
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("op_set_item_audio", {
+        project: SAMPLE_PROJECT,
+        itemId: "ti1",
+        gainDb: 0,
+        fadeInMs: null,
+        fadeOutMs: null,
+      }),
+    );
+  });
+});
+
+describe("ClipInspector — combined-gain honesty (preview can't boost past unity)", () => {
+  it("shows no warning when the combined level is unity or quieter", () => {
+    const { unmount } = renderInspector({ ...ITEM, gain_db: 0 });
+    expect(screen.queryByTestId("inspector-gain-clipped")).toBeNull();
+    unmount();
+
+    renderInspector({ ...ITEM, gain_db: -6 });
+    expect(screen.queryByTestId("inspector-gain-clipped")).toBeNull();
+  });
+
+  it("warns with the combined dB figure when the clip's OWN gain is positive", () => {
+    renderInspector({ ...ITEM, gain_db: 6 });
+    const note = screen.getByTestId("inspector-gain-clipped");
+    expect(note.textContent).toContain("+6.0 dB");
+  });
+
+  it("counts the track's fader too, not just the clip's own gain", () => {
+    // Clip gain alone is unity, but the TRACK ("tv") is boosted +3 dB — the
+    // combined level the export will render is what must be judged.
+    useProjectStore.setState({
+      project: {
+        ...SAMPLE_PROJECT,
+        tracks: SAMPLE_PROJECT.tracks.map((tr) =>
+          tr.id === "tv" ? { ...tr, volume_db: 3 } : tr,
+        ),
+      },
+    });
+    renderInspector({ ...ITEM, gain_db: 0 });
+    const note = screen.getByTestId("inspector-gain-clipped");
+    expect(note.textContent).toContain("+3.0 dB");
+  });
+});
+
+describe("ClipInspector — fades", () => {
+  const fadeIn = () =>
+    screen.getByLabelText("Fade in (ms)") as HTMLInputElement;
+  const fadeOut = () =>
+    screen.getByLabelText("Fade out (ms)") as HTMLInputElement;
+
+  it("always states fades are applied at export, not previewed", () => {
+    renderInspector();
+    expect(screen.getByText(/render(ed)? at export/i)).not.toBeNull();
+  });
+
+  it("commits fade-in via op_set_item_audio on blur, leaving fade-out alone", async () => {
+    const next: Project = { ...SAMPLE_PROJECT, updated_at: 1 };
+    invoke.mockResolvedValueOnce(next);
+    renderInspector();
+
+    fireEvent.change(fadeIn(), { target: { value: "500" } });
+    fireEvent.blur(fadeIn());
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("op_set_item_audio", {
+        project: SAMPLE_PROJECT,
+        itemId: "ti1",
+        gainDb: null,
+        fadeInMs: 500,
+        fadeOutMs: null,
+      }),
+    );
+    expect(invoke).toHaveBeenCalledTimes(1);
+    // The op lands on the shared undo stack via store.run, same as trim.
+    await vi.waitFor(() =>
+      expect(useProjectStore.getState().project).toEqual(next),
+    );
+    expect(useProjectStore.getState().past).toEqual([SAMPLE_PROJECT]);
+  });
+
+  it("commits fade-out independently", async () => {
+    invoke.mockResolvedValueOnce({ ...SAMPLE_PROJECT, updated_at: 1 });
+    renderInspector();
+
+    fireEvent.change(fadeOut(), { target: { value: "300" } });
+    fireEvent.blur(fadeOut());
+
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("op_set_item_audio", {
+        project: SAMPLE_PROJECT,
+        itemId: "ti1",
+        gainDb: null,
+        fadeInMs: null,
+        fadeOutMs: 300,
+      }),
+    );
+  });
+
+  it("does not round-trip when a fade value is unchanged on blur", () => {
+    renderInspector();
+    fireEvent.blur(fadeIn());
+    fireEvent.change(fadeOut(), { target: { value: "0" } });
+    fireEvent.blur(fadeOut());
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("resets the fade buffers when the selected clip changes", () => {
+    const { rerender } = renderInspector();
+    fireEvent.change(fadeIn(), { target: { value: "999" } });
+    expect(fadeIn().value).toBe("999");
+
+    rerender(<ClipInspector item={OTHER_ITEM} onClose={vi.fn()} />);
+    expect(fadeIn().value).toBe(String(OTHER_ITEM.fade_in_ms));
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
 describe("ClipInspector — transition", () => {
   it("hides the duration field when no transition is set (no op possible)", () => {
     renderInspector();

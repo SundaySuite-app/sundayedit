@@ -26,6 +26,7 @@ function track(id: string, index: number, extra?: Partial<Track>): Track {
     locked: false,
     muted: false,
     solo: false,
+    volume_db: 0,
     ...extra,
   };
 }
@@ -48,6 +49,9 @@ describe("itemSpan — slow speed", () => {
           in_ms: 0,
           out_ms: 1000,
           speed: 0.5,
+          gain_db: 0,
+          fade_in_ms: 0,
+          fade_out_ms: 0,
         }),
       ),
     ).toEqual({ start_ms: 100, end_ms: 2100 });

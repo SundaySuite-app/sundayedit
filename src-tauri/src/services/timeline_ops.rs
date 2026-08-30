@@ -26,9 +26,17 @@ use crate::services::video::{self, VideoMetadata};
 
 // ── finalize ──────────────────────────────────────────────────────────────────
 
-/// Run both invariant checks and return the project, mapping either failure
-/// to `AppError::Invariant`.
-fn finalize(next: Project) -> AppResult<Project> {
+/// Normalise the clamp-only fields, run both invariant checks, and return the
+/// project, mapping either failure to `AppError::Invariant`.
+///
+/// `clamp_playback_params` runs FIRST and for EVERY op, not just the audio
+/// ones: a fade is measured against the clip's timeline length, and half the
+/// ops in this module (trim, split, ripple, relink) change that length. Doing
+/// the clamp here means a 5 s fade on a clip trimmed down to 2 s comes back
+/// out at 2 s without `trim_timeline_item` ever having heard of fades — the
+/// alternative is the seam bug where each op remembers some of the fields.
+fn finalize(mut next: Project) -> AppResult<Project> {
+    next.clamp_playback_params();
     next.validate_timeline().map_err(AppError::Invariant)?;
     next.validate().map_err(AppError::Invariant)?;
     Ok(next)
@@ -259,6 +267,7 @@ pub fn add_track(
         locked: false,
         muted: false,
         solo: false,
+        volume_db: 0.0,
     });
     finalize(next)
 }
@@ -451,6 +460,9 @@ pub fn add_timeline_item(
         out_ms,
         timeline_start_ms: start,
         speed: 1.0,
+        gain_db: 0.0,
+        fade_in_ms: 0,
+        fade_out_ms: 0,
         transform: Transform::default(),
         effects: vec![],
         transition_in: None,
@@ -1014,6 +1026,60 @@ pub fn set_effect(
     finalize(next)
 }
 
+// ── audio levels (R2) ─────────────────────────────────────────────────────────
+
+/// Set any subset of a clip's audio parameters. `None` leaves a field
+/// unchanged — the same "omit to keep" shape `set_track_flags` and
+/// `trim_timeline_item` already use, so the inspector can drive one slider
+/// without having to resend the other two.
+///
+/// Everything is CLAMPED rather than rejected, and the clamping is NOT done
+/// here: `finalize` runs `Project::clamp_playback_params` on the result, which
+/// is the same code the trim/split ops go through. A fade longer than the clip
+/// therefore lands at exactly the clip's length whether it got there by this
+/// op or by a later trim.
+pub fn set_item_audio(
+    project: &Project,
+    item_id: &str,
+    gain_db: Option<f32>,
+    fade_in_ms: Option<i64>,
+    fade_out_ms: Option<i64>,
+) -> AppResult<Project> {
+    let mut next = project.clone();
+    let it = find_item_mut(&mut next, item_id)?;
+    if let Some(v) = gain_db {
+        it.gain_db = v;
+    }
+    if let Some(v) = fade_in_ms {
+        it.fade_in_ms = v;
+    }
+    if let Some(v) = fade_out_ms {
+        it.fade_out_ms = v;
+    }
+    finalize(next)
+}
+
+/// Set a track's fader, in dB. Clamped to `[GAIN_DB_MIN, GAIN_DB_MAX]` by
+/// `finalize`.
+///
+/// Deliberately separate from `set_track_flags`: mute/solo are switches whose
+/// state you can flip back, the fader is a continuous value the UI drags in
+/// bursts (`commit` with a `coalesceKey`), and folding them together would put
+/// a slider drag and a mute toggle in the same undo entry.
+pub fn set_track_volume(project: &Project, track_id: &str, volume_db: f32) -> AppResult<Project> {
+    let mut next = project.clone();
+    let track = next
+        .tracks
+        .iter_mut()
+        .find(|t| t.id == track_id)
+        .ok_or_else(|| AppError::NotFound {
+            entity: "track",
+            id: track_id.to_string(),
+        })?;
+    track.volume_db = volume_db;
+    finalize(next)
+}
+
 /// Remove a clip's effect of the given kind. Removing one that isn't there is a
 /// no-op, not an error (idempotent, like `clear_transition`).
 pub fn remove_effect(project: &Project, item_id: &str, kind: &str) -> AppResult<Project> {
@@ -1049,6 +1115,9 @@ pub fn add_text_item(
         out_ms: duration_ms,
         timeline_start_ms: timeline_start_ms.max(0),
         speed: 1.0,
+        gain_db: 0.0,
+        fade_in_ms: 0,
+        fade_out_ms: 0,
         transform: Transform::default(),
         effects: vec![],
         transition_in: None,
@@ -1197,6 +1266,7 @@ mod tests {
             locked: false,
             muted: false,
             solo: false,
+            volume_db: 0.0,
         }
     }
 
@@ -1217,6 +1287,9 @@ mod tests {
             out_ms,
             timeline_start_ms: start,
             speed: 1.0,
+            gain_db: 0.0,
+            fade_in_ms: 0,
+            fade_out_ms: 0,
             transform: Transform::default(),
             effects: vec![],
             transition_in: None,
@@ -1981,6 +2054,180 @@ mod tests {
     fn set_transform_missing_is_not_found() {
         let p = base();
         let err = set_transform(&p, "nope", Transform::default()).unwrap_err();
+        assert_eq!(err.code(), "not_found");
+    }
+
+    // ── set_item_audio / set_track_volume (R2) ──────────────────────────────
+
+    fn with_audio_item() -> Project {
+        let mut p = base();
+        // 4 s clip so fade clamping has room to be interesting.
+        p.timeline_items = vec![item("i1", "v1", Some("m1"), 0, 0, 4000)];
+        p
+    }
+
+    #[test]
+    fn set_item_audio_sets_all_three() {
+        let p = with_audio_item();
+        let r = set_item_audio(&p, "i1", Some(-6.0), Some(500), Some(750)).unwrap();
+        let it = &r.timeline_items[0];
+        assert_eq!(it.gain_db, -6.0);
+        assert_eq!(it.fade_in_ms, 500);
+        assert_eq!(it.fade_out_ms, 750);
+    }
+
+    /// `None` means "leave alone" — the inspector drives one slider at a time.
+    #[test]
+    fn set_item_audio_leaves_omitted_fields_untouched() {
+        let p = with_audio_item();
+        let a = set_item_audio(&p, "i1", Some(-3.0), Some(200), Some(300)).unwrap();
+
+        let b = set_item_audio(&a, "i1", Some(-9.0), None, None).unwrap();
+        assert_eq!(b.timeline_items[0].gain_db, -9.0);
+        assert_eq!(b.timeline_items[0].fade_in_ms, 200, "fade-in untouched");
+        assert_eq!(b.timeline_items[0].fade_out_ms, 300, "fade-out untouched");
+
+        let c = set_item_audio(&b, "i1", None, Some(10), None).unwrap();
+        assert_eq!(c.timeline_items[0].gain_db, -9.0, "gain untouched");
+        assert_eq!(c.timeline_items[0].fade_in_ms, 10);
+
+        let d = set_item_audio(&c, "i1", None, None, None).unwrap();
+        assert_eq!(
+            d.timeline_items[0], c.timeline_items[0],
+            "all-None is a no-op"
+        );
+    }
+
+    #[test]
+    fn set_item_audio_clamps_gain_both_ways() {
+        let p = with_audio_item();
+        assert_eq!(
+            set_item_audio(&p, "i1", Some(500.0), None, None)
+                .unwrap()
+                .timeline_items[0]
+                .gain_db,
+            crate::model::GAIN_DB_MAX
+        );
+        assert_eq!(
+            set_item_audio(&p, "i1", Some(-500.0), None, None)
+                .unwrap()
+                .timeline_items[0]
+                .gain_db,
+            crate::model::GAIN_DB_MIN
+        );
+        assert_eq!(
+            set_item_audio(&p, "i1", Some(f32::NAN), None, None)
+                .unwrap()
+                .timeline_items[0]
+                .gain_db,
+            0.0,
+            "NaN has no in-range meaning — unity is the only safe reading"
+        );
+    }
+
+    #[test]
+    fn set_item_audio_clamps_fades_to_the_clip_length() {
+        let p = with_audio_item();
+        let r = set_item_audio(&p, "i1", None, Some(99_000), Some(-40)).unwrap();
+        assert_eq!(
+            r.timeline_items[0].fade_in_ms, 4000,
+            "capped at clip length"
+        );
+        assert_eq!(r.timeline_items[0].fade_out_ms, 0, "negative means none");
+    }
+
+    /// The seam this whole `finalize`-normalises design exists for: a fade set
+    /// on a long clip must shrink when a LATER, unrelated op shortens it. If
+    /// `trim_timeline_item` had to remember fades, it eventually wouldn't.
+    #[test]
+    fn trimming_a_clip_shrinks_a_fade_that_no_longer_fits() {
+        let p = with_audio_item();
+        let faded = set_item_audio(&p, "i1", None, Some(3000), Some(3000)).unwrap();
+        assert_eq!(faded.timeline_items[0].fade_in_ms, 3000);
+
+        let trimmed = trim_timeline_item(&faded, "i1", None, Some(1000), None).unwrap();
+        assert_eq!(trimmed.timeline_items[0].timeline_len_ms(), 1000);
+        assert_eq!(
+            trimmed.timeline_items[0].fade_in_ms, 1000,
+            "the fade must not survive longer than the clip it fades"
+        );
+        assert_eq!(trimmed.timeline_items[0].fade_out_ms, 1000);
+    }
+
+    /// A split hands BOTH halves a shorter length; neither may keep an
+    /// oversized fade.
+    #[test]
+    fn splitting_a_faded_clip_clamps_both_halves() {
+        let p = with_audio_item();
+        let faded = set_item_audio(&p, "i1", Some(-4.0), Some(3500), Some(3500)).unwrap();
+        let split = split_timeline_item(&faded, "i1", 1000, "i2".into()).unwrap();
+        assert_eq!(split.timeline_items.len(), 2);
+        for it in &split.timeline_items {
+            let len = it.timeline_len_ms();
+            assert!(
+                it.fade_in_ms <= len,
+                "fade_in {} > len {len}",
+                it.fade_in_ms
+            );
+            assert!(
+                it.fade_out_ms <= len,
+                "fade_out {} > len {len}",
+                it.fade_out_ms
+            );
+            assert_eq!(it.gain_db, -4.0, "gain survives the split on both halves");
+        }
+    }
+
+    #[test]
+    fn set_item_audio_missing_item_is_not_found() {
+        let p = with_audio_item();
+        let err = set_item_audio(&p, "nope", Some(0.0), None, None).unwrap_err();
+        assert_eq!(err.code(), "not_found");
+    }
+
+    #[test]
+    fn set_track_volume_sets_and_clamps() {
+        let p = with_audio_item();
+        assert_eq!(
+            set_track_volume(&p, "v1", -8.0).unwrap().tracks[0].volume_db,
+            -8.0
+        );
+        assert_eq!(
+            set_track_volume(&p, "v1", 999.0).unwrap().tracks[0].volume_db,
+            crate::model::GAIN_DB_MAX
+        );
+        assert_eq!(
+            set_track_volume(&p, "v1", -999.0).unwrap().tracks[0].volume_db,
+            crate::model::GAIN_DB_MIN
+        );
+        assert_eq!(
+            set_track_volume(&p, "v1", f32::NAN).unwrap().tracks[0].volume_db,
+            0.0
+        );
+    }
+
+    /// The fader is a level, not a switch: it must not disturb mute/solo, and
+    /// mute/solo must not disturb it.
+    #[test]
+    fn track_volume_and_track_flags_are_independent() {
+        let p = with_audio_item();
+        let v = set_track_volume(&p, "v1", -12.0).unwrap();
+        let m = set_track_flags(&v, "v1", None, None, Some(true), None).unwrap();
+        assert_eq!(
+            m.tracks[0].volume_db, -12.0,
+            "muting keeps the fader position"
+        );
+        assert!(m.tracks[0].muted);
+
+        let v2 = set_track_volume(&m, "v1", -2.0).unwrap();
+        assert!(v2.tracks[0].muted, "moving the fader does not unmute");
+        assert_eq!(v2.tracks[0].volume_db, -2.0);
+    }
+
+    #[test]
+    fn set_track_volume_missing_track_is_not_found() {
+        let p = with_audio_item();
+        let err = set_track_volume(&p, "nope", 0.0).unwrap_err();
         assert_eq!(err.code(), "not_found");
     }
 

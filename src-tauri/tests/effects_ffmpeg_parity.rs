@@ -119,6 +119,7 @@ fn project_with(effects: Vec<Effect>, src: &str) -> Project {
         locked: false,
         muted: false,
         solo: false,
+        volume_db: 0.0,
     };
     let item = TimelineItem {
         id: "i0".into(),
@@ -129,6 +130,9 @@ fn project_with(effects: Vec<Effect>, src: &str) -> Project {
         out_ms: CLIP_MS,
         timeline_start_ms: 0,
         speed: 1.0,
+        gain_db: 0.0,
+        fade_in_ms: 0,
+        fade_out_ms: 0,
         transform: Transform::default(),
         effects,
         transition_in: None,

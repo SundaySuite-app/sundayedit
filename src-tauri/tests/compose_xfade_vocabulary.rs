@@ -165,6 +165,7 @@ fn track(id: &str, kind: TrackKind, index: i32) -> Track {
         locked: false,
         muted: false,
         solo: false,
+        volume_db: 0.0,
     }
 }
 
@@ -185,6 +186,9 @@ fn item(
         out_ms,
         timeline_start_ms: start,
         speed: 1.0,
+        gain_db: 0.0,
+        fade_in_ms: 0,
+        fade_out_ms: 0,
         transform: Transform::default(),
         effects: vec![],
         transition_in: None,
