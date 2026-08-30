@@ -152,6 +152,7 @@ function routeCaptionsToCaptionTrack(
       locked: false,
       muted: false,
       solo: false,
+      volume_db: 0,
     };
     tracks = [...tracks, captionTrack];
   }

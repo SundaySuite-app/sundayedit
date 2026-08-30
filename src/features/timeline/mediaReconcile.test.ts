@@ -475,3 +475,77 @@ describe("reconcileMedia — purity and configuration", () => {
     expect(seeks(reconcileMedia(PLAYING, [drifted]))).toHaveLength(1);
   });
 });
+
+describe("reconcileMedia — volume (R2 audio)", () => {
+  it("sets the element's volume when it disagrees with the target", () => {
+    const actions = reconcileMedia(PLAYING, [
+      element({ volume: 1, targetVolume: 0.5 }),
+    ]);
+    expect(actions).toContainEqual({
+      type: "setVolume",
+      itemId: "clip-1",
+      volume: 0.5,
+      reason: "volume-change",
+    });
+  });
+
+  it("is silent once the element already matches the target", () => {
+    const actions = reconcileMedia(PLAYING, [
+      element({ volume: 0.5, targetVolume: 0.5 }),
+    ]);
+    expect(actions.some((a) => a.type === "setVolume")).toBe(false);
+  });
+
+  it("ignores sub-epsilon differences (no thrash on float noise)", () => {
+    const actions = reconcileMedia(PLAYING, [
+      element({ volume: 0.5, targetVolume: 0.5009 }),
+    ]);
+    expect(actions.some((a) => a.type === "setVolume")).toBe(false);
+  });
+
+  it("treats an element with no recorded volume as full (1) before correcting", () => {
+    const actions = reconcileMedia(PLAYING, [
+      element({ volume: undefined, targetVolume: 0.25 }),
+    ]);
+    expect(actions).toContainEqual({
+      type: "setVolume",
+      itemId: "clip-1",
+      volume: 0.25,
+      reason: "volume-change",
+    });
+  });
+
+  it("never manages volume when the caller has no target for this element", () => {
+    // `targetVolume` omitted entirely — legacy single-source mode, no gain
+    // concept at all. Must not manufacture a correction out of nothing.
+    const actions = reconcileMedia(PLAYING, [element({ volume: 0.3 })]);
+    expect(actions.some((a) => a.type === "setVolume")).toBe(false);
+  });
+
+  it("applies the volume correction independently of an inactive (parked) element", () => {
+    const actions = reconcileMedia(PLAYING, [
+      element({
+        targetTimeMs: null,
+        paused: true, // already parked — no pause action to compete with
+        volume: 1,
+        targetVolume: 0.4,
+        prewarmTimeMs: null,
+      }),
+    ]);
+    expect(actions).toEqual([
+      {
+        type: "setVolume",
+        itemId: "clip-1",
+        volume: 0.4,
+        reason: "volume-change",
+      },
+    ]);
+  });
+
+  it("applies the volume correction alongside a transport action, not instead of it", () => {
+    const actions = reconcileMedia(PLAYING, [
+      element({ paused: true, volume: 1, targetVolume: 0.6 }),
+    ]);
+    expect(actions.map((a) => a.type)).toEqual(["setVolume", "play"]);
+  });
+});

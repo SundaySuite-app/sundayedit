@@ -235,6 +235,29 @@ pub fn op_set_effect(
     timeline_ops::set_effect(&project, &item_id, &kind, &params, enabled)
 }
 
+/// Set any subset of a clip's audio parameters (gain / fade-in / fade-out).
+/// Omitted fields are left unchanged; everything is clamped server-side.
+#[tauri::command]
+pub fn op_set_item_audio(
+    project: Project,
+    item_id: String,
+    gain_db: Option<f32>,
+    fade_in_ms: Option<i64>,
+    fade_out_ms: Option<i64>,
+) -> AppResult<Project> {
+    timeline_ops::set_item_audio(&project, &item_id, gain_db, fade_in_ms, fade_out_ms)
+}
+
+/// Set a track's fader, in dB. Clamped to [-60, +12] server-side.
+#[tauri::command]
+pub fn op_set_track_volume(
+    project: Project,
+    track_id: String,
+    volume_db: f32,
+) -> AppResult<Project> {
+    timeline_ops::set_track_volume(&project, &track_id, volume_db)
+}
+
 /// Remove a clip's effect of the given kind (no-op when absent).
 #[tauri::command]
 pub fn op_remove_effect(project: Project, item_id: String, kind: String) -> AppResult<Project> {

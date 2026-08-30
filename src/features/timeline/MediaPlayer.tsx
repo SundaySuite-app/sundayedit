@@ -43,6 +43,7 @@ import {
 } from "./mediaReconcile";
 import { snapMsToFrame } from "./playbackClock";
 import { activeVideoItem, sourceTimeSec } from "./previewMap";
+import { combinedGainDb, previewVolumeFor } from "./audioLevels";
 
 interface Props {
   /**
@@ -136,6 +137,9 @@ function applyAction(video: HTMLVideoElement, action: MediaAction): boolean {
       return true;
     case "setRate":
       if (action.rate !== undefined) video.playbackRate = action.rate;
+      return false;
+    case "setVolume":
+      if (action.volume !== undefined) video.volume = action.volume;
       return false;
   }
 }
@@ -234,6 +238,11 @@ export function MediaPlayer({
       let rawMs: number;
       let boundMs: number;
       let speed = 1;
+      // R2 audio: the element's target volume, dB→linear already applied.
+      // `undefined` in legacy single-source mode — there is no per-clip gain
+      // concept there, so the element is left at its default (full) volume,
+      // byte-for-byte the pre-R2 behaviour.
+      let targetVolume: number | undefined;
 
       if (!s.proxySrc && s.project && s.project.timeline_items.length > 0) {
         // ── NLE multi-track: drive the active clip's source media. ──
@@ -253,6 +262,7 @@ export function MediaPlayer({
               seeking: video.seeking,
               readyState: metadataReadyState(video),
               playbackRate: video.playbackRate,
+              volume: video.volume,
             },
           };
         }
@@ -270,6 +280,16 @@ export function MediaPlayer({
         rawMs = sourceTimeSec(active.item, s.playheadMs) * 1000;
         boundMs = active.media.duration_ms;
         speed = active.item.speed;
+        // The clip's gain dB-added to its OWN track's fader — the same
+        // expression `services::compose::total_db` sums, so a clip that will
+        // export louder/quieter previews that way too (within what a
+        // `<video>` element can reproduce; see `previewVolumeFor`).
+        const track = s.project.tracks.find(
+          (tr) => tr.id === active.item.track_id,
+        );
+        targetVolume = previewVolumeFor(
+          combinedGainDb(active.item.gain_db, track?.volume_db ?? 0),
+        ).volume;
       } else {
         // ── Legacy single-source: element spans the whole timeline. ──
         rawMs = s.playheadMs;
@@ -311,6 +331,8 @@ export function MediaPlayer({
           readyState: metadataReadyState(video),
           playbackRate: video.playbackRate,
           speed,
+          volume: video.volume,
+          targetVolume,
           hasBeenSeeked: hasBeenSeeked.current,
         },
       };

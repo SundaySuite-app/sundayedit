@@ -37,6 +37,9 @@ import {
 } from "./effects/registry";
 import { itemSpan } from "./laneLayout";
 import { getPlayheadMs, usePlayheadInsideSpan } from "./playhead";
+import { combinedGainDb, formatDb } from "./audioLevels";
+import { GainSlider } from "./GainSlider";
+import { useCoalescedCommit } from "./useCoalescedCommit";
 
 /**
  * Transition kinds we expose in the picker. `""` = no transition. Every
@@ -139,6 +142,62 @@ export function ClipInspector({
     () => setDurBuf(String(transition?.duration_ms ?? "")),
     [item.id, transition?.duration_ms],
   );
+
+  // ── Audio (R2) ────────────────────────────────────────────────────────────
+  // Offered on the same items the export will actually mix into the audio
+  // graph — `services::compose::has_audio`, i.e. the source media reports an
+  // audio stream. A text/graphic overlay or a video with no soundtrack would
+  // happily store a `gain_db`/fade the render then ignores, the same
+  // "the UI promises what the export can't deliver" failure the visual
+  // effects registry (ADR-013) exists to prevent for the video side.
+  const isAudibleClip = useProjectStore(
+    (s) =>
+      item.kind === "av" &&
+      (s.project?.media.find((m) => m.id === item.source_media_id)?.has_audio ??
+        false),
+  );
+  // The item's OWN track's fader — needed to show the COMBINED level (the
+  // number the export actually renders, `services::compose::total_db`), not
+  // just this slider's own value in isolation.
+  const trackVolumeDb = useProjectStore(
+    (s) =>
+      s.project?.tracks.find((tr) => tr.id === item.track_id)?.volume_db ?? 0,
+  );
+  const combinedDb = combinedGainDb(item.gain_db, trackVolumeDb);
+  // A <video> element cannot boost above unity — a positive combined level
+  // previews quieter than the export will render. Say so rather than pretend
+  // the preview played the boost (the honesty rule this codebase runs on).
+  const previewClipsGain = combinedDb > 0;
+
+  const coalescedCommit = useCoalescedCommit();
+  function commitGainDb(db: number) {
+    coalescedCommit(`audio-gain:${item.id}`, (p) =>
+      ipc.timeline.setItemAudio(p, item.id, { gainDb: db }),
+    );
+  }
+
+  const [fadeInBuf, setFadeInBuf] = useState(String(item.fade_in_ms));
+  const [fadeOutBuf, setFadeOutBuf] = useState(String(item.fade_out_ms));
+  useEffect(
+    () => setFadeInBuf(String(item.fade_in_ms)),
+    [item.id, item.fade_in_ms],
+  );
+  useEffect(
+    () => setFadeOutBuf(String(item.fade_out_ms)),
+    [item.id, item.fade_out_ms],
+  );
+  function commitFade(edge: "in" | "out", raw: string) {
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return;
+    if (edge === "in" && value === item.fade_in_ms) return;
+    if (edge === "out" && value === item.fade_out_ms) return;
+    commit((p) =>
+      ipc.timeline.setItemAudio(p, item.id, {
+        fadeInMs: edge === "in" ? value : undefined,
+        fadeOutMs: edge === "out" ? value : undefined,
+      }),
+    );
+  }
 
   function commit(op: (p: Project) => Promise<Project>) {
     void run(op).catch(() => {
@@ -269,6 +328,43 @@ export function ClipInspector({
             {t("inspectorDelete")}
           </button>
         </Section>
+
+        {/* Audio (R2) */}
+        {isAudibleClip && (
+          <Section title={t("inspectorAudioHeader")}>
+            <GainSlider
+              label={t("inspectorGain")}
+              value={item.gain_db}
+              onChange={commitGainDb}
+              testId="inspector-gain"
+            />
+            {previewClipsGain && (
+              <p
+                data-testid="inspector-gain-clipped"
+                className="text-[10px] text-[var(--color-warning)]"
+              >
+                {t("inspectorGainClipped", { db: formatDb(combinedDb) })}
+              </p>
+            )}
+            <div className="grid grid-cols-2 gap-2">
+              <NumberField
+                label={t("inspectorFadeIn")}
+                value={fadeInBuf}
+                onChange={setFadeInBuf}
+                onCommit={() => commitFade("in", fadeInBuf)}
+              />
+              <NumberField
+                label={t("inspectorFadeOut")}
+                value={fadeOutBuf}
+                onChange={setFadeOutBuf}
+                onCommit={() => commitFade("out", fadeOutBuf)}
+              />
+            </div>
+            <p className="text-[10px] text-[var(--color-fg-subtle)]">
+              {t("inspectorFadeAppliesAtExport")}
+            </p>
+          </Section>
+        )}
 
         {/* Transition */}
         <Section title={t("inspectorTransitionHeader")}>

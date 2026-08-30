@@ -191,6 +191,71 @@ test("removing media still referenced by a clip surfaces the rejection", async (
   await expect(page.getByRole("alert")).toContainText("still referenced");
 });
 
+// ── real-UI: R2 audio controls ────────────────────────────────────────────────
+
+test("the inspector's gain slider commits through the store, with a reset once it drifts from 0 dB", async ({
+  page,
+}) => {
+  await page.getByTitle("sermon.mp4").dispatchEvent("click");
+  const inspector = page.getByTestId("clip-inspector");
+  const gain = inspector.getByTestId("inspector-gain");
+  await expect(gain).toHaveValue("0");
+  await expect(inspector.getByTestId("inspector-gain-reset")).toHaveCount(0);
+
+  // Range inputs aren't `.fill()`-able; arrow keys move by `step` (0.5 dB).
+  await gain.focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(gain).toHaveValue("-0.5");
+  // op_set_item_audio landed — the clip box survives, nothing rejected.
+  await expect(page.getByTitle("sermon.mp4")).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(inspector.getByTestId("inspector-gain-reset")).toBeVisible();
+
+  // The reset affordance commits exactly 0 dB and then hides itself.
+  await inspector.getByTestId("inspector-gain-reset").click();
+  await expect(gain).toHaveValue("0");
+  await expect(inspector.getByTestId("inspector-gain-reset")).toHaveCount(0);
+});
+
+test("fade in/out commit through the inspector's number fields", async ({
+  page,
+}) => {
+  await page.getByTitle("sermon.mp4").dispatchEvent("click");
+  const inspector = page.getByTestId("clip-inspector");
+  // Norwegian labels — `openDemoProject` boots the editor in "no".
+  const fadeIn = inspector.getByLabel("Inntoning (ms)");
+  const fadeOut = inspector.getByLabel("Uttoning (ms)");
+
+  await fadeIn.fill("500");
+  await fadeIn.blur();
+  await expect(fadeIn).toHaveValue("500");
+
+  await fadeOut.fill("300");
+  await fadeOut.blur();
+  await expect(fadeOut).toHaveValue("300");
+
+  // Both round-tripped through op_set_item_audio without a rejection.
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+test("the track header's fader adjusts the video track's volume and resets on double-click", async ({
+  page,
+}) => {
+  const volume = page.getByTestId("track-volume-tv");
+  await expect(volume).toHaveValue("0");
+
+  await volume.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(volume).toHaveValue("0.5");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+
+  // The docked timeline's header area overlaps this row (same reason other
+  // tests in this file `dispatchEvent("click")` the clip box instead of a
+  // real click) — dispatch the dblclick directly rather than fighting it.
+  await volume.dispatchEvent("dblclick");
+  await expect(volume).toHaveValue("0");
+});
+
 // ── IPC-contract drivers (clip ops with no clickable trigger) ────────────────
 
 test("add-timeline-item op places a clip on a track", async ({ page }) => {
@@ -401,6 +466,71 @@ test("set-transform op replaces a clip's geometry", async ({ page }) => {
     transform,
   });
   expect(next.timeline_items[0].transform).toEqual(transform);
+});
+
+// ── audio (R2) ───────────────────────────────────────────────────────────────
+// The command names + camelCase args + clamp semantics `ipc.timeline.setItemAudio`
+// / `setTrackVolume` send — mirrors `services::timeline_ops::set_item_audio` /
+// `set_track_volume` (clamp to [-60, 12], NaN → unity, a fade clamped to the
+// clip's OWN timeline length).
+
+test("set-item-audio op sets gain and both fades, clamping out-of-range input", async ({
+  page,
+}) => {
+  const next = await invoke<DemoProject>(page, "op_set_item_audio", {
+    project: demoProject(),
+    itemId: "ti1",
+    gainDb: -6,
+    fadeInMs: 500,
+    // The demo clip is 18 000 ms long — a fade longer than the clip clamps
+    // to the clip's own length, not the raw requested value.
+    fadeOutMs: 99_000,
+  });
+  const item = next.timeline_items[0];
+  expect(item.gain_db).toBe(-6);
+  expect(item.fade_in_ms).toBe(500);
+  expect(item.fade_out_ms).toBe(18_000);
+});
+
+test("set-item-audio op leaves omitted (null) fields untouched", async ({
+  page,
+}) => {
+  const first = await invoke<DemoProject>(page, "op_set_item_audio", {
+    project: demoProject(),
+    itemId: "ti1",
+    gainDb: -3,
+    fadeInMs: 200,
+    fadeOutMs: null,
+  });
+  const second = await invoke<DemoProject>(page, "op_set_item_audio", {
+    project: first,
+    itemId: "ti1",
+    gainDb: null,
+    fadeInMs: null,
+    fadeOutMs: 300,
+  });
+  const item = second.timeline_items[0];
+  expect(item.gain_db).toBe(-3); // untouched by the second call
+  expect(item.fade_in_ms).toBe(200); // untouched by the second call
+  expect(item.fade_out_ms).toBe(300);
+});
+
+test("set-track-volume op sets the fader, clamped to [-60, 12]", async ({
+  page,
+}) => {
+  const next = await invoke<DemoProject>(page, "op_set_track_volume", {
+    project: demoProject(),
+    trackId: "tv",
+    volumeDb: 3,
+  });
+  expect(next.tracks.find((t) => t.id === "tv")?.volume_db).toBe(3);
+
+  const clamped = await invoke<DemoProject>(page, "op_set_track_volume", {
+    project: demoProject(),
+    trackId: "tv",
+    volumeDb: 1000,
+  });
+  expect(clamped.tracks.find((t) => t.id === "tv")?.volume_db).toBe(12);
 });
 
 // ── curated effects (E6) ─────────────────────────────────────────────────────
@@ -621,6 +751,9 @@ type DemoItem = {
   out_ms: number;
   timeline_start_ms: number;
   speed: number;
+  gain_db: number;
+  fade_in_ms: number;
+  fade_out_ms: number;
   transform: DemoTransform;
   effects: unknown[];
   transition_in: { kind: string; duration_ms: number } | null;
@@ -637,6 +770,7 @@ type DemoTrack = {
   locked: boolean;
   muted: boolean;
   solo: boolean;
+  volume_db: number;
 };
 type DemoProject = {
   name: string;
@@ -667,6 +801,7 @@ function track(
     locked: false,
     muted: false,
     solo: false,
+    volume_db: 0,
   };
 }
 
@@ -691,6 +826,9 @@ function demoProject(): DemoProject {
         out_ms: 18_000,
         timeline_start_ms: 0,
         speed: 1,
+        gain_db: 0,
+        fade_in_ms: 0,
+        fade_out_ms: 0,
         transform: identityTransform(),
         effects: [],
         transition_in: null,

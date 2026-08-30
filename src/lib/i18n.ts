@@ -428,6 +428,7 @@ const en = {
   mediaBinAddAudioTrack: "Audio track",
   mediaBinAddOverlayTrack: "Overlay track",
   trackMute: "Mute",
+  trackVolume: "Volume",
   trackSolo: "Solo",
   trackLock: "Lock",
   trackRemove: "Remove track",
@@ -551,6 +552,18 @@ const en = {
   inspectorScale: "Scale",
   inspectorX: "X",
   inspectorY: "Y",
+
+  // ── Audio (R2) ───────────────────────────────────────────────────────────
+  inspectorAudioHeader: "Audio",
+  inspectorGain: "Gain",
+  inspectorGainClipped:
+    "Preview caps at 0 dB combined — export still applies the full {db} boost.",
+  inspectorFadeIn: "Fade in (ms)",
+  inspectorFadeOut: "Fade out (ms)",
+  inspectorFadeAppliesAtExport:
+    "Fades render at export — the preview plays this clip at a flat volume.",
+  audioResetToUnity: "Reset to 0 dB",
+
   inspectorClose: "Close inspector",
 
   // ── Curated clip effects (E6) ───────────────────────────────────────────
@@ -989,6 +1002,7 @@ const no: Catalog = {
   mediaBinAddAudioTrack: "Lydspor",
   mediaBinAddOverlayTrack: "Overleggspor",
   trackMute: "Demp",
+  trackVolume: "Volum",
   trackSolo: "Solo",
   trackLock: "Lås",
   trackRemove: "Fjern spor",
@@ -1074,6 +1088,18 @@ const no: Catalog = {
   inspectorScale: "Skala",
   inspectorX: "X",
   inspectorY: "Y",
+
+  // ── Lyd (R2) ─────────────────────────────────────────────────────────────
+  inspectorAudioHeader: "Lyd",
+  inspectorGain: "Nivå",
+  inspectorGainClipped:
+    "Forhåndsvisningen dekker maks 0 dB samlet — eksporten bruker likevel hele forsterkningen på {db}.",
+  inspectorFadeIn: "Inntoning (ms)",
+  inspectorFadeOut: "Uttoning (ms)",
+  inspectorFadeAppliesAtExport:
+    "Inn-/uttoning gjengis ved eksport — forhåndsvisningen spiller denne klippen med flatt nivå.",
+  audioResetToUnity: "Tilbakestill til 0 dB",
+
   inspectorClose: "Lukk inspektør",
 
   // ── Kuraterte klippeffekter (E6) ────────────────────────────────────────
@@ -1519,6 +1545,7 @@ const sv: Catalog = {
   mediaBinAddAudioTrack: "Ljudspår",
   mediaBinAddOverlayTrack: "Överläggsspår",
   trackMute: "Tysta",
+  trackVolume: "Volym",
   trackSolo: "Solo",
   trackLock: "Lås",
   trackRemove: "Ta bort spår",
@@ -1596,6 +1623,18 @@ const sv: Catalog = {
   inspectorScale: "Skala",
   inspectorX: "X",
   inspectorY: "Y",
+
+  // ── Ljud (R2) ────────────────────────────────────────────────────────────
+  inspectorAudioHeader: "Ljud",
+  inspectorGain: "Nivå",
+  inspectorGainClipped:
+    "Förhandsvisningen begränsas till 0 dB totalt — exporten använder ändå hela förstärkningen på {db}.",
+  inspectorFadeIn: "Intoning (ms)",
+  inspectorFadeOut: "Uttoning (ms)",
+  inspectorFadeAppliesAtExport:
+    "In-/uttoning renderas vid export — förhandsvisningen spelar klippet med platt nivå.",
+  audioResetToUnity: "Återställ till 0 dB",
+
   inspectorClose: "Stäng inspektör",
 
   // ── Kurerade klippeffekter (E6) ─────────────────────────────────────────
@@ -2032,6 +2071,7 @@ const da: Catalog = {
   mediaBinAddAudioTrack: "Lydspor",
   mediaBinAddOverlayTrack: "Overlay-spor",
   trackMute: "Dæmp",
+  trackVolume: "Lydstyrke",
   trackSolo: "Solo",
   trackLock: "Lås",
   trackRemove: "Fjern spor",
@@ -2109,6 +2149,18 @@ const da: Catalog = {
   inspectorScale: "Skala",
   inspectorX: "X",
   inspectorY: "Y",
+
+  // ── Lyd (R2) ─────────────────────────────────────────────────────────────
+  inspectorAudioHeader: "Lyd",
+  inspectorGain: "Niveau",
+  inspectorGainClipped:
+    "Forhåndsvisningen begrænses til 0 dB samlet — eksporten anvender stadig hele forstærkningen på {db}.",
+  inspectorFadeIn: "Indtoning (ms)",
+  inspectorFadeOut: "Udtoning (ms)",
+  inspectorFadeAppliesAtExport:
+    "Ind-/udtoning gengives ved eksport — forhåndsvisningen afspiller dette klip med fladt niveau.",
+  audioResetToUnity: "Nulstil til 0 dB",
+
   inspectorClose: "Luk inspektør",
 
   // ── Kuraterede klipeffekter (E6) ────────────────────────────────────────
@@ -2554,6 +2606,7 @@ const de: Catalog = {
   mediaBinAddAudioTrack: "Audiospur",
   mediaBinAddOverlayTrack: "Overlay-Spur",
   trackMute: "Stumm",
+  trackVolume: "Lautstärke",
   trackSolo: "Solo",
   trackLock: "Sperren",
   trackRemove: "Spur entfernen",
@@ -2631,6 +2684,18 @@ const de: Catalog = {
   inspectorScale: "Skalierung",
   inspectorX: "X",
   inspectorY: "Y",
+
+  // ── Audio (R2) ───────────────────────────────────────────────────────────
+  inspectorAudioHeader: "Audio",
+  inspectorGain: "Pegel",
+  inspectorGainClipped:
+    "Die Vorschau deckelt bei 0 dB gesamt — der Export wendet weiterhin die volle Anhebung von {db} an.",
+  inspectorFadeIn: "Einblendung (ms)",
+  inspectorFadeOut: "Ausblendung (ms)",
+  inspectorFadeAppliesAtExport:
+    "Ein-/Ausblendungen werden erst beim Export gerendert — die Vorschau spielt diesen Clip mit gleichbleibendem Pegel ab.",
+  audioResetToUnity: "Auf 0 dB zurücksetzen",
+
   inspectorClose: "Inspektor schließen",
 
   // ── Kuratierte Clip-Effekte (E6) ────────────────────────────────────────
@@ -3074,6 +3139,7 @@ const fr: Catalog = {
   mediaBinAddAudioTrack: "Piste audio",
   mediaBinAddOverlayTrack: "Piste de superposition",
   trackMute: "Muet",
+  trackVolume: "Volume",
   trackSolo: "Solo",
   trackLock: "Verrouiller",
   trackRemove: "Supprimer la piste",
@@ -3151,6 +3217,18 @@ const fr: Catalog = {
   inspectorScale: "Échelle",
   inspectorX: "X",
   inspectorY: "Y",
+
+  // ── Audio (R2) ───────────────────────────────────────────────────────────
+  inspectorAudioHeader: "Audio",
+  inspectorGain: "Gain",
+  inspectorGainClipped:
+    "L'aperçu plafonne à 0 dB combiné — l'export applique quand même l'amplification totale de {db}.",
+  inspectorFadeIn: "Fondu d'entrée (ms)",
+  inspectorFadeOut: "Fondu de sortie (ms)",
+  inspectorFadeAppliesAtExport:
+    "Les fondus sont rendus à l'export — l'aperçu lit ce clip à un niveau constant.",
+  audioResetToUnity: "Réinitialiser à 0 dB",
+
   inspectorClose: "Fermer l’inspecteur",
 
   // ── Effets de clip sélectionnés (E6) ────────────────────────────────────
@@ -3588,6 +3666,7 @@ const pl: Catalog = {
   mediaBinAddAudioTrack: "Ścieżka audio",
   mediaBinAddOverlayTrack: "Ścieżka nakładki",
   trackMute: "Wycisz",
+  trackVolume: "Głośność",
   trackSolo: "Solo",
   trackLock: "Zablokuj",
   trackRemove: "Usuń ścieżkę",
@@ -3665,6 +3744,18 @@ const pl: Catalog = {
   inspectorScale: "Skala",
   inspectorX: "X",
   inspectorY: "Y",
+
+  // ── Dźwięk (R2) ──────────────────────────────────────────────────────────
+  inspectorAudioHeader: "Dźwięk",
+  inspectorGain: "Wzmocnienie",
+  inspectorGainClipped:
+    "Podgląd ogranicza się do 0 dB łącznie — eksport i tak zastosuje pełne wzmocnienie {db}.",
+  inspectorFadeIn: "Wejście (ms)",
+  inspectorFadeOut: "Wyjście (ms)",
+  inspectorFadeAppliesAtExport:
+    "Rozjaśnienia/wyciszenia są renderowane przy eksporcie — podgląd odtwarza ten klip na stałym poziomie.",
+  audioResetToUnity: "Resetuj do 0 dB",
+
   inspectorClose: "Zamknij inspektora",
 
   // ── Wyselekcjonowane efekty klipu (E6) ──────────────────────────────────

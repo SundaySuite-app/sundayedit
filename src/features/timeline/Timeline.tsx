@@ -82,6 +82,13 @@ import { MEDIA_DND_MIME } from "@/features/media/MediaBin";
 import { useThumbnail } from "@/features/media/thumbnails";
 import { useMediaAvailability } from "@/features/media/useMediaAvailability";
 import { useFilmstripTiles } from "./filmstrip";
+import {
+  GAIN_DB_MIN,
+  GAIN_DB_MAX,
+  applyGainDetent,
+  formatDb,
+} from "./audioLevels";
+import { useCoalescedCommit } from "./useCoalescedCommit";
 
 interface Props {
   project: Project;
@@ -100,8 +107,9 @@ const LANE_H = 52;
 // Widened from 150 (E3-UI): the "close gaps" button adds a 7th icon to an
 // audible track's header row (chevrons + mute + solo + lock + pack + remove),
 // and 150px squeezed the name label to zero width — invisible per Playwright,
-// truncated-to-nothing for real users.
-const GUTTER_W = 184;
+// truncated-to-nothing for real users. Widened again from 184 (R2 audio): the
+// compact track-fader slider is an 8th control on that same row.
+const GUTTER_W = 212;
 
 /** Caption move/resize drag (flagship captions on a caption track). */
 type CaptionDrag = {
@@ -964,6 +972,23 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     [run],
   );
 
+  // Track fader (R2 audio) — the backend clamps, so this round-trips through
+  // Rust like every other timeline op, but a slider is dragged in bursts: land
+  // it with the coalescing commit (one undo step per drag) instead of `run`
+  // (one per tick). `useCallback` keeps this identity stable across renders —
+  // `LaneHeaders`/`TrackHeader` sit in a memoized subtree the playback clock
+  // re-renders ~60×/s, and a prop that changed identity every tick would
+  // defeat that memoization for every track header, every frame.
+  const coalescedCommit = useCoalescedCommit();
+  const setTrackVolume = useCallback(
+    (track: Track, volumeDb: number) => {
+      coalescedCommit(`track-volume:${track.id}`, (p) =>
+        ipc.timeline.setTrackVolume(p, track.id, volumeDb),
+      );
+    },
+    [coalescedCommit],
+  );
+
   // Close every gap on a track: each clip slides back against its
   // predecessor (locked clips stay anchored — see services::timeline_ops's
   // gap engine). A no-op on a gapless track lands harmlessly on the undo
@@ -1204,6 +1229,7 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
               onMove={reorder}
               onRemove={removeTrack}
               onPackGaps={packTrackGaps}
+              onVolumeChange={setTrackVolume}
               // Individual strings (not an object) so memo's shallow compare
               // holds even though `t` is a fresh closure every render.
               labelMute={t("trackMute")}
@@ -1213,6 +1239,7 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
               labelDown={t("trackMoveDown")}
               labelRemove={t("trackRemove")}
               labelCloseGaps={t("trackCloseGaps")}
+              labelVolume={t("trackVolume")}
             />
           </div>
         </div>
@@ -1333,6 +1360,7 @@ const LaneHeaders = memo(function LaneHeaders({
   onMove,
   onRemove,
   onPackGaps,
+  onVolumeChange,
   labelMute,
   labelSolo,
   labelLock,
@@ -1340,12 +1368,14 @@ const LaneHeaders = memo(function LaneHeaders({
   labelDown,
   labelRemove,
   labelCloseGaps,
+  labelVolume,
 }: {
   stacked: Track[];
   onToggle: (track: Track, flag: "muted" | "solo" | "locked") => void;
   onMove: (track: Track, dir: -1 | 1) => void;
   onRemove: (track: Track) => void;
   onPackGaps: (track: Track) => void;
+  onVolumeChange: (track: Track, volumeDb: number) => void;
   labelMute: string;
   labelSolo: string;
   labelLock: string;
@@ -1353,6 +1383,7 @@ const LaneHeaders = memo(function LaneHeaders({
   labelDown: string;
   labelRemove: string;
   labelCloseGaps: string;
+  labelVolume: string;
 }) {
   return (
     <>
@@ -1367,6 +1398,7 @@ const LaneHeaders = memo(function LaneHeaders({
           onMove={onMove}
           onRemove={onRemove}
           onPackGaps={onPackGaps}
+          onVolumeChange={onVolumeChange}
           labels={{
             mute: labelMute,
             solo: labelSolo,
@@ -1375,6 +1407,7 @@ const LaneHeaders = memo(function LaneHeaders({
             down: labelDown,
             remove: labelRemove,
             closeGaps: labelCloseGaps,
+            volume: labelVolume,
           }}
         />
       ))}
@@ -1514,6 +1547,7 @@ function TrackHeader({
   onMove,
   onRemove,
   onPackGaps,
+  onVolumeChange,
   labels,
 }: {
   track: Track;
@@ -1524,6 +1558,7 @@ function TrackHeader({
   onMove: (track: Track, dir: -1 | 1) => void;
   onRemove: (track: Track) => void;
   onPackGaps: (track: Track) => void;
+  onVolumeChange: (track: Track, volumeDb: number) => void;
   labels: {
     mute: string;
     solo: string;
@@ -1532,6 +1567,7 @@ function TrackHeader({
     down: string;
     remove: string;
     closeGaps: string;
+    volume: string;
   };
 }) {
   const audible = track.kind === "video" || track.kind === "audio";
@@ -1592,6 +1628,25 @@ function TrackHeader({
             on={<Headphones size={13} />}
             off={<Headphones size={13} />}
             activeClass="text-[var(--color-accent-400)]"
+          />
+          {/* Track fader (R2 audio). Compact: no visible label/readout (the
+              184px gutter has no room), but the title carries the exact dB
+              and a double-click resets to 0 — same detent-at-unity contract
+              as the inspector's gain slider, just without its own button. */}
+          <input
+            type="range"
+            data-testid={`track-volume-${track.id}`}
+            aria-label={`${labels.volume} ${formatDb(track.volume_db)}`}
+            title={`${labels.volume}: ${formatDb(track.volume_db)}`}
+            min={GAIN_DB_MIN}
+            max={GAIN_DB_MAX}
+            step={0.5}
+            value={track.volume_db}
+            onChange={(e) =>
+              onVolumeChange(track, applyGainDetent(Number(e.target.value)))
+            }
+            onDoubleClick={() => onVolumeChange(track, 0)}
+            className="h-1 w-8 shrink-0 accent-[var(--color-accent-500)]"
           />
         </>
       )}

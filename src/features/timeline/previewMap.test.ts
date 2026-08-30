@@ -19,6 +19,7 @@ function track(id: string, index: number, extra?: Partial<Track>): Track {
     locked: false,
     muted: false,
     solo: false,
+    volume_db: 0,
     ...extra,
   };
 }
@@ -58,6 +59,9 @@ function item(
     out_ms: outMs,
     timeline_start_ms: startMs,
     speed: 1,
+    gain_db: 0,
+    fade_in_ms: 0,
+    fade_out_ms: 0,
     transform: {
       x: 0,
       y: 0,

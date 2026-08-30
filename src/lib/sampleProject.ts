@@ -197,6 +197,7 @@ export const SAMPLE_PROJECT: Project = {
       locked: false,
       muted: false,
       solo: false,
+      volume_db: 0,
     },
     {
       id: "tc",
@@ -207,6 +208,7 @@ export const SAMPLE_PROJECT: Project = {
       locked: false,
       muted: false,
       solo: false,
+      volume_db: 0,
     },
   ],
   timeline_items: [
@@ -219,6 +221,9 @@ export const SAMPLE_PROJECT: Project = {
       out_ms: 18_000,
       timeline_start_ms: 0,
       speed: 1,
+      gain_db: 0,
+      fade_in_ms: 0,
+      fade_out_ms: 0,
       transform: {
         x: 0,
         y: 0,

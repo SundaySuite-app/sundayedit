@@ -93,6 +93,8 @@ pub fn run() {
             commands::timeline_ops::op_set_transform,
             // Curated clip effects (E6) — the preview↔ffmpeg parity registry
             commands::timeline_ops::op_set_effect,
+            commands::timeline_ops::op_set_item_audio,
+            commands::timeline_ops::op_set_track_volume,
             commands::timeline_ops::op_remove_effect,
             commands::timeline_ops::op_add_text_item,
             // AI glossary suggestions (Phase 3.4 mode 3)

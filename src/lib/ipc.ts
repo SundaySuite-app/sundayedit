@@ -300,6 +300,33 @@ export const timeline = {
   /** Remove a clip's effect of the given kind (no-op when absent). */
   removeEffect: (project: Project, itemId: string, kind: string) =>
     call<Project>("op_remove_effect", { project, itemId, kind }),
+  /**
+   * Set any subset of a clip's audio parameters (R2). Omit a field to leave it
+   * unchanged — so one slider can be dragged without resending the others.
+   *
+   * Everything is clamped server-side: `gainDb` to [-60, +12], each fade to
+   * [0, the clip's own timeline length]. The clamp also re-runs on every LATER
+   * op, so a fade survives a trim by shrinking rather than by lying.
+   */
+  setItemAudio: (
+    project: Project,
+    itemId: string,
+    audio: { gainDb?: number; fadeInMs?: number; fadeOutMs?: number },
+  ) =>
+    call<Project>("op_set_item_audio", {
+      project,
+      itemId,
+      gainDb: audio.gainDb ?? null,
+      fadeInMs: audio.fadeInMs ?? null,
+      fadeOutMs: audio.fadeOutMs ?? null,
+    }),
+  /**
+   * Set a track's fader, in dB (clamped to [-60, +12] server-side). Separate
+   * from `setTrackFlags` on purpose: mute/solo are switches, this is a
+   * continuous value dragged in bursts — pass a `coalesceKey` when committing.
+   */
+  setTrackVolume: (project: Project, trackId: string, volumeDb: number) =>
+    call<Project>("op_set_track_volume", { project, trackId, volumeDb }),
   /** Add a standalone text overlay clip (no source media). */
   addTextItem: (
     project: Project,

@@ -9,4 +9,19 @@ import type { Transition } from "./Transition";
  * A single clip placed on a track. `in_ms`/`out_ms` index into the source
  * media; `timeline_start_ms` is where it sits on the timeline.
  */
-export type TimelineItem = { id: string, track_id: string, kind: TimelineItemKind, source_media_id: string | null, in_ms: number, out_ms: number, timeline_start_ms: number, speed: number, transform: Transform, effects: Array<Effect>, transition_in: Transition | null, text: TextSpec | null, enabled: boolean, locked: boolean, };
+export type TimelineItem = { id: string, track_id: string, kind: TimelineItemKind, source_media_id: string | null, in_ms: number, out_ms: number, timeline_start_ms: number, speed: number, transform: Transform, effects: Array<Effect>, transition_in: Transition | null, text: TextSpec | null, enabled: boolean, locked: boolean, 
+/**
+ * Clip gain, in dB relative to the source level. `0.0` = untouched (and
+ * the `#[serde(default)]`, so pre-R2 files load bit-identical).
+ */
+gain_db: number, 
+/**
+ * Fade-in length, measured on the TIMELINE from the clip's own start.
+ * Clamped to the clip's timeline length by [`Project::clamp_playback_params`].
+ */
+fade_in_ms: number, 
+/**
+ * Fade-out length, measured on the TIMELINE backwards from the clip's own
+ * end. Clamped like `fade_in_ms`.
+ */
+fade_out_ms: number, };

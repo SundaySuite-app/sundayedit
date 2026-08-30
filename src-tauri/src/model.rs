@@ -400,6 +400,24 @@ pub struct Track {
     pub locked: bool,
     pub muted: bool,
     pub solo: bool,
+    /// Track fader, in dB relative to unity. `0.0` = unity (and, being the
+    /// `#[serde(default)]`, what every pre-R2 project file loads with).
+    ///
+    /// Adds to each item's own `TimelineItem::gain_db` — dB ADD, so the export
+    /// collapses the pair into ONE `volume={sum}dB` node per item instead of
+    /// two. `muted`/`solo` stay separate booleans: muting is not "−∞ dB", it is
+    /// a switch you can flip back without losing the fader position.
+    #[serde(default)]
+    pub volume_db: f32,
+}
+
+impl Track {
+    /// The fader value the render is allowed to use — clamped, so a
+    /// hand-edited project file cannot make the export emit a level the ops
+    /// would never have stored. See [`clamp_gain_db`].
+    pub fn effective_volume_db(&self) -> f32 {
+        clamp_gain_db(self.volume_db)
+    }
 }
 
 /// A rectangular crop, as fractions of the source frame.
@@ -499,9 +517,72 @@ pub struct TimelineItem {
     pub text: Option<TextSpec>,
     pub enabled: bool,
     pub locked: bool,
+    /// Clip gain, in dB relative to the source level. `0.0` = untouched (and
+    /// the `#[serde(default)]`, so pre-R2 files load bit-identical).
+    #[serde(default)]
+    pub gain_db: f32,
+    /// Fade-in length, measured on the TIMELINE from the clip's own start.
+    /// Clamped to the clip's timeline length by [`Project::clamp_playback_params`].
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub fade_in_ms: i64,
+    /// Fade-out length, measured on the TIMELINE backwards from the clip's own
+    /// end. Clamped like `fade_in_ms`.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub fade_out_ms: i64,
+}
+
+/// Lower bound for any dB level in the project — `TimelineItem::gain_db` and
+/// `Track::volume_db` alike. −60 dB is 1/1000 of the amplitude: silent for any
+/// practical purpose, but still a number the mix can climb back out of.
+pub const GAIN_DB_MIN: f32 = -60.0;
+/// Upper bound for any dB level. +12 dB is four doublings of amplitude — as
+/// much lift as we will hand a user before the source noise floor is the
+/// dominant sound.
+pub const GAIN_DB_MAX: f32 = 12.0;
+
+/// Clamp a dB level into `[GAIN_DB_MIN, GAIN_DB_MAX]`, mapping NaN to unity.
+///
+/// House rule is CLAMP, not reject — but the clamp lives in exactly ONE
+/// function so the ops (which normalise what gets stored), the project file
+/// (which may hold a hand-edited number) and the ffmpeg graph (which must
+/// never emit `volume=1e9dB`) cannot drift apart about what a stored level
+/// means. That drift is the seam bug this codebase keeps producing.
+pub fn clamp_gain_db(db: f32) -> f32 {
+    if db.is_nan() {
+        0.0
+    } else {
+        db.clamp(GAIN_DB_MIN, GAIN_DB_MAX)
+    }
+}
+
+/// Sane bounds for `TimelineItem::speed`. The low end matches the `0.01` floor
+/// `timeline_end_ms` has always applied (a slower clip would run 100× long);
+/// the high end keeps the `atempo` chain the export builds to a handful of
+/// stages.
+pub const SPEED_MIN: f32 = 0.01;
+pub const SPEED_MAX: f32 = 100.0;
+
+/// Clamp a playback speed into `[SPEED_MIN, SPEED_MAX]`, mapping NaN to 1.0.
+pub fn clamp_speed(speed: f32) -> f32 {
+    if speed.is_nan() {
+        1.0
+    } else {
+        speed.clamp(SPEED_MIN, SPEED_MAX)
+    }
 }
 
 impl TimelineItem {
+    /// The speed the render must use. Deliberately the SAME expression
+    /// `timeline_end_ms` divides by — if the export scaled time by a different
+    /// number than the one the timeline geometry was computed from, a clip
+    /// would render longer or shorter than the lane it occupies.
+    pub fn effective_speed(&self) -> f64 {
+        // NB: `f64::max` returns the non-NaN operand, so NaN lands on 0.01.
+        (self.speed as f64).max(SPEED_MIN as f64)
+    }
+
     /// Where this item ends on the timeline, accounting for `speed`.
     ///
     /// Computed in **f64** with truncation toward zero — the exact arithmetic
@@ -512,7 +593,40 @@ impl TimelineItem {
     /// tests/timeline_end_parity.rs.
     pub fn timeline_end_ms(&self) -> i64 {
         self.timeline_start_ms
-            + (((self.out_ms - self.in_ms) as f64) / (self.speed as f64).max(0.01)) as i64
+            + (((self.out_ms - self.in_ms) as f64) / self.effective_speed()) as i64
+    }
+
+    /// How long this clip occupies the timeline, in ms (never negative).
+    pub fn timeline_len_ms(&self) -> i64 {
+        (self.timeline_end_ms() - self.timeline_start_ms).max(0)
+    }
+
+    /// The clip gain the render is allowed to use — clamped. See
+    /// [`clamp_gain_db`].
+    pub fn effective_gain_db(&self) -> f32 {
+        clamp_gain_db(self.gain_db)
+    }
+
+    /// Fade-in length the render may use: clamped to `[0, timeline_len_ms]`.
+    /// A fade longer than the clip is meaningless, and emitting one would make
+    /// ffmpeg ramp past the clip's end where nothing is playing.
+    pub fn effective_fade_in_ms(&self) -> i64 {
+        self.fade_in_ms.clamp(0, self.timeline_len_ms())
+    }
+
+    /// Fade-out length the render may use: clamped to `[0, timeline_len_ms]`.
+    pub fn effective_fade_out_ms(&self) -> i64 {
+        self.fade_out_ms.clamp(0, self.timeline_len_ms())
+    }
+
+    /// True when this clip's audio is untouched — no gain, no fades, unit
+    /// speed. The compose fast path keys off this: a clip carrying ANY of them
+    /// must not be handed to the burn-in shortcut, which passes audio through
+    /// verbatim and would silently drop every setting.
+    pub fn has_default_audio(&self) -> bool {
+        self.effective_gain_db() == 0.0
+            && self.effective_fade_in_ms() == 0
+            && self.effective_fade_out_ms() == 0
     }
 }
 
@@ -605,6 +719,30 @@ impl Project {
             last_end = c.end_ms;
         }
         Ok(())
+    }
+
+    /// Bring every playback/level number into its legal range, in place.
+    ///
+    /// Called by `timeline_ops::finalize`, so EVERY op normalises: a fade set
+    /// on a 10 s clip that a later split shortens to 2 s comes back out at
+    /// 2 s, without the split op having to know that fades exist. That is the
+    /// point — `validate_timeline` cannot do this job (it takes `&self` and
+    /// the house rule is clamp, not reject), and doing it per-op is exactly
+    /// how the trim/split/fade seam would rot.
+    ///
+    /// Speed is normalised FIRST because the clip's timeline length — the
+    /// bound the fades are clamped against — is derived from it.
+    pub fn clamp_playback_params(&mut self) {
+        for t in &mut self.tracks {
+            t.volume_db = clamp_gain_db(t.volume_db);
+        }
+        for it in &mut self.timeline_items {
+            it.speed = clamp_speed(it.speed);
+            it.gain_db = clamp_gain_db(it.gain_db);
+            let len = it.timeline_len_ms();
+            it.fade_in_ms = it.fade_in_ms.clamp(0, len);
+            it.fade_out_ms = it.fade_out_ms.clamp(0, len);
+        }
     }
 
     /// Validate the multi-track timeline invariants:
@@ -744,6 +882,7 @@ impl Project {
                 locked: false,
                 muted: false,
                 solo: false,
+                volume_db: 0.0,
             },
             Track {
                 id: caption_track_id.clone(),
@@ -754,6 +893,7 @@ impl Project {
                 locked: false,
                 muted: false,
                 solo: false,
+                volume_db: 0.0,
             },
         ];
         for c in self.captions.iter_mut() {
@@ -773,6 +913,9 @@ impl Project {
                 out_ms: self.video_duration_ms,
                 timeline_start_ms: 0,
                 speed: 1.0,
+                gain_db: 0.0,
+                fade_in_ms: 0,
+                fade_out_ms: 0,
                 transform: Transform::default(),
                 effects: vec![],
                 transition_in: None,
@@ -816,6 +959,7 @@ mod timeline_tests {
             locked: false,
             muted: false,
             solo: false,
+            volume_db: 0.0,
         }
     }
 
@@ -836,6 +980,9 @@ mod timeline_tests {
             out_ms,
             timeline_start_ms: start,
             speed: 1.0,
+            gain_db: 0.0,
+            fade_in_ms: 0,
+            fade_out_ms: 0,
             transform: Transform::default(),
             effects: vec![],
             transition_in: None,
@@ -899,6 +1046,134 @@ mod timeline_tests {
         assert_eq!(it.timeline_end_ms(), 3000);
         it.speed = 2.0;
         assert_eq!(it.timeline_end_ms(), 2000);
+    }
+
+    // ── R2 audio: clamping is defined ONCE, here ─────────────────────────────
+
+    #[test]
+    fn gain_clamps_to_the_documented_range() {
+        assert_eq!(clamp_gain_db(0.0), 0.0);
+        assert_eq!(clamp_gain_db(-6.0), -6.0);
+        assert_eq!(clamp_gain_db(GAIN_DB_MIN), GAIN_DB_MIN);
+        assert_eq!(clamp_gain_db(GAIN_DB_MAX), GAIN_DB_MAX);
+        assert_eq!(clamp_gain_db(-1000.0), GAIN_DB_MIN);
+        assert_eq!(clamp_gain_db(1000.0), GAIN_DB_MAX);
+        assert_eq!(clamp_gain_db(f32::NEG_INFINITY), GAIN_DB_MIN);
+        assert_eq!(clamp_gain_db(f32::INFINITY), GAIN_DB_MAX);
+        // NaN has no in-range meaning; unity is the only safe reading, and
+        // `f32::clamp` PANICS rather than saturating, so this branch matters.
+        assert_eq!(clamp_gain_db(f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn speed_clamps_to_the_documented_range() {
+        assert_eq!(clamp_speed(1.0), 1.0);
+        assert_eq!(clamp_speed(0.0), SPEED_MIN);
+        assert_eq!(clamp_speed(-2.0), SPEED_MIN);
+        assert_eq!(clamp_speed(1e9), SPEED_MAX);
+        assert_eq!(clamp_speed(f32::NAN), 1.0);
+    }
+
+    /// `effective_speed` MUST be the same divisor `timeline_end_ms` uses —
+    /// if the export scaled time by a different number than the geometry was
+    /// computed from, a clip would render longer than its lane.
+    #[test]
+    fn effective_speed_is_the_divisor_timeline_end_uses() {
+        for s in [1.0f32, 2.0, 0.5, 1.1, 0.0, -3.0, f32::NAN] {
+            let mut it = item("i", "t1", Some("m1"), 0, 0, 2000);
+            it.speed = s;
+            let expected = ((2000f64) / it.effective_speed()) as i64;
+            assert_eq!(
+                it.timeline_end_ms(),
+                expected,
+                "speed {s} disagreed with effective_speed"
+            );
+        }
+    }
+
+    #[test]
+    fn fades_are_clamped_to_the_clips_own_timeline_length() {
+        let mut it = item("i", "t1", Some("m1"), 0, 0, 2000);
+        it.fade_in_ms = 500;
+        it.fade_out_ms = 9_000;
+        assert_eq!(it.effective_fade_in_ms(), 500);
+        assert_eq!(
+            it.effective_fade_out_ms(),
+            2000,
+            "capped at the clip length"
+        );
+        it.fade_in_ms = -100;
+        assert_eq!(it.effective_fade_in_ms(), 0, "negative fades mean none");
+    }
+
+    /// A 2× clip occupies HALF the timeline, so its fades are bounded by the
+    /// halved length — not by the source span.
+    #[test]
+    fn fade_bound_follows_speed() {
+        let mut it = item("i", "t1", Some("m1"), 0, 0, 2000);
+        it.speed = 2.0;
+        it.fade_out_ms = 1500;
+        assert_eq!(it.timeline_len_ms(), 1000);
+        assert_eq!(it.effective_fade_out_ms(), 1000);
+    }
+
+    #[test]
+    fn clamp_playback_params_normalises_stored_values() {
+        let mut p = base();
+        p.tracks[0].volume_db = 99.0;
+        let mut it = item("i1", "t1", Some("m1"), 0, 0, 2000);
+        it.gain_db = -400.0;
+        it.fade_in_ms = 50_000;
+        it.fade_out_ms = -7;
+        it.speed = 0.0;
+        p.timeline_items = vec![it];
+
+        p.clamp_playback_params();
+
+        assert_eq!(p.tracks[0].volume_db, GAIN_DB_MAX);
+        assert_eq!(p.timeline_items[0].gain_db, GAIN_DB_MIN);
+        assert_eq!(p.timeline_items[0].speed, SPEED_MIN);
+        // speed was normalised FIRST, so the fade bound is the (now very long)
+        // timeline length that speed implies — the point being that the two
+        // are clamped in the right ORDER, not that the number is pretty.
+        assert_eq!(p.timeline_items[0].fade_in_ms, 50_000);
+        assert_eq!(p.timeline_items[0].fade_out_ms, 0);
+    }
+
+    #[test]
+    fn clamp_playback_params_is_idempotent() {
+        let mut p = base();
+        p.tracks[0].volume_db = 300.0;
+        let mut it = item("i1", "t1", Some("m1"), 0, 0, 2000);
+        it.gain_db = f32::NAN;
+        it.fade_in_ms = 9_999;
+        p.timeline_items = vec![it];
+
+        p.clamp_playback_params();
+        let once = p.clone();
+        p.clamp_playback_params();
+        assert_eq!(
+            p, once,
+            "clamping twice must change nothing the second time"
+        );
+    }
+
+    #[test]
+    fn has_default_audio_notices_every_field() {
+        let base_item = item("i", "t1", Some("m1"), 0, 0, 2000);
+        assert!(base_item.has_default_audio());
+
+        let mut g = base_item.clone();
+        g.gain_db = -0.5;
+        assert!(!g.has_default_audio(), "a gain is not default audio");
+
+        let mut fi = base_item.clone();
+        fi.fade_in_ms = 1;
+        assert!(!fi.has_default_audio(), "a fade-in is not default audio");
+
+        let mut fo = base_item.clone();
+        fo.fade_out_ms = 1;
+        assert!(!fo.has_default_audio(), "a fade-out is not default audio");
     }
 
     #[test]

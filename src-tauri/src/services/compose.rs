@@ -12,8 +12,11 @@
 //!     `enable='between(...)'` time-window) onto the running composite,
 //!     chaining LOW track index → HIGH (top). An item carrying a
 //!     `transition_in` crossfades via `xfade` instead of a hard overlay.
-//!   - Per audio-bearing item: `atrim`/`asetpts`/`adelay`, combined via
-//!     `amix=inputs=K:normalize=0`.
+//!   - Per audio-bearing item: `atrim`/`asetpts`, then `atempo` (speed),
+//!     `volume` (clip gain + track fader, dB-added into ONE node), `afade`
+//!     in/out, and finally `adelay` to its timeline position — combined via
+//!     `amix=inputs=K:normalize=0`, with `alimiter` on the bus when the mix
+//!     can actually clip (see `BUS_LIMITER`).
 //!   - The caption layer is applied LAST: `ass=<escaped sidecar path>`
 //!     (produced by `export::write_ass`, written to a unique temp path like
 //!     `run_burnin` does), reusing `escape_filter_path`.
@@ -72,6 +75,90 @@ impl Default for ComposeSettings {
 fn secs(ms: i64) -> String {
     format!("{:.3}", ms as f64 / 1000.0)
 }
+
+/// Format a dB level for a filter argument. Fixed precision keeps the graph
+/// stable across f32 round-trips (`-6.0000001dB` in a snapshot helps nobody).
+fn db(v: f32) -> String {
+    format!("{:.4}", v)
+}
+
+/// Format a playback speed for `setpts` / `atempo`.
+fn rate(v: f64) -> String {
+    format!("{:.6}", v)
+}
+
+/// Is this speed close enough to 1.0 that no time-scaling node is needed?
+/// The tolerance is well below what a UI slider can express and well above
+/// f32→f64 round-trip noise, so a "1.0" clip never grows an `atempo` node.
+fn is_unit_speed(speed: f64) -> bool {
+    (speed - 1.0).abs() < 1e-6
+}
+
+/// Decompose a playback speed into a chain of `atempo` filters.
+///
+/// `atempo` accepts only 0.5..=2.0 per instance — a 4× clip needs
+/// `atempo=2.0,atempo=2.0`, and a 0.25× clip needs `atempo=0.5,atempo=0.5`.
+/// Emitting the raw factor is not "mostly right": ffmpeg REJECTS the option
+/// and the whole export dies, so the chaining is what makes speed usable at
+/// all outside a narrow band.
+///
+/// Returns an empty vec at unit speed, so a normal clip's audio chain is
+/// byte-identical to what it was before speed was implemented.
+fn atempo_chain(speed: f64) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if is_unit_speed(speed) || !(speed.is_finite() && speed > 0.0) {
+        return out;
+    }
+    let mut remaining = speed;
+    // `clamp_speed` bounds speed to [0.01, 100], i.e. at most 7 doublings or
+    // 7 halvings. The guard is belt-and-braces against a hand-edited file that
+    // somehow reaches the builder unnormalised — it must not spin forever.
+    let mut guard = 0;
+    while remaining > 2.0 && guard < 32 {
+        out.push("atempo=2.0".to_string());
+        remaining /= 2.0;
+        guard += 1;
+    }
+    while remaining < 0.5 && guard < 32 {
+        out.push("atempo=0.5".to_string());
+        remaining *= 2.0;
+        guard += 1;
+    }
+    if !is_unit_speed(remaining) {
+        out.push(format!("atempo={}", rate(remaining)));
+    }
+    out
+}
+
+/// Peak limiter for the MIXED audio bus.
+///
+/// **Headroom decision.** `amix=normalize=0` SUMS its inputs: a sermon bed at
+/// −3 dBFS plus a music bed at −3 dBFS is +3 dBFS, and the encoder hard-clips
+/// the overshoot. The two obvious cures are both dishonest:
+///
+///   * `normalize=1` divides every input by K, so adding a quiet b-roll clip
+///     would duck the sermon by 6 dB — the gain the user dialled in would stop
+///     meaning anything, and it would change with every clip added; and
+///   * a fixed headroom trim (`volume=-6dB` on the bus) quietly makes the
+///     whole render 6 dB quieter than the levels the user set and monitored.
+///
+/// So: KEEP `normalize=0` — a gain of −6 dB really is −6 dB, and a single
+/// untouched clip stays bit-identical to what this engine rendered before R2 —
+/// and catch the overshoot with a lookahead limiter on the bus instead, which
+/// is transparent until something actually exceeds the ceiling.
+///
+/// Two details that are load-bearing rather than taste:
+///   * `level=disabled` — `alimiter`'s `level` option DEFAULTS TO ENABLED and
+///     auto-normalises the result back up to 0 dBFS. Left at its default it
+///     would make a deliberately quiet mix LOUDER, i.e. undo the very gains
+///     this feature exists to honour.
+///   * `limit=0.891` ≈ −1 dBFS, not 1.0. The ceiling has to sit below full
+///     scale so the AAC encoder's inter-sample peaks have somewhere to go.
+///
+/// Cost: `alimiter`'s lookahead delays the bus by `attack` (5 ms). That is an
+/// order of magnitude below the audibility threshold for lip-sync, and it is
+/// only paid when the limiter is inserted at all (see `needs_bus_limiter`).
+const BUS_LIMITER: &str = "alimiter=level=disabled:limit=0.891:attack=5:release=50";
 
 /// Map a stored transition kind — the ClipInspector picker vocabulary
 /// ("fade" / "crossfade" / "dip") — to a name ffmpeg's `xfade` filter actually
@@ -314,8 +401,15 @@ pub fn is_simple_timeline(project: &Project) -> bool {
 }
 
 /// Is `item` the backfilled baseline clip — the ENTIRE primary video placed at
-/// timeline 0 with no trim/speed/transform/effects/transition? Rendering that
-/// through burn-in is identical to compositing it, so it keeps the fast path.
+/// timeline 0 with no trim/speed/transform/effects/transition, and untouched
+/// audio? Rendering that through burn-in is identical to compositing it, so it
+/// keeps the fast path.
+///
+/// The audio clause is not decoration: `burnin::build_ffmpeg_args` PASSES THE
+/// SOURCE AUDIO THROUGH verbatim. A clip carrying a gain, a fade, or a track
+/// fader that still took this shortcut would export at the original level with
+/// no signal that anything was ignored — the exact "preview promises what the
+/// export does not render" failure this codebase guards against.
 fn is_pristine_primary_item(project: &Project, item: &TimelineItem) -> bool {
     let Some(media) = item
         .source_media_id
@@ -335,6 +429,10 @@ fn is_pristine_primary_item(project: &Project, item: &TimelineItem) -> bool {
         && item.transform == Transform::default()
         && item.effects.iter().all(|e| !e.enabled)
         && item.transition_in.is_none()
+        && item.has_default_audio()
+        && track_of(project, item)
+            .map(|t| t.effective_volume_db() == 0.0)
+            .unwrap_or(true)
 }
 
 /// Build the FULL ffmpeg argument vector for a compose render. Pure — no IO.
@@ -402,10 +500,25 @@ pub fn build_filter_complex(
         // `enable=between(...)` window hides the misalignment but not the
         // freeze. (An item consumed by `xfade` re-zeroes PTS in its normalise
         // chain, so the shift is harmless there.)
-        let setpts = if it.timeline_start_ms > 0 {
-            format!("setpts=PTS-STARTPTS+{}/TB", secs(it.timeline_start_ms))
+        //
+        // SPEED (R2): `timeline_end_ms`, the preview clock, the lane layout
+        // and the filmstrip mapping have all honoured `TimelineItem.speed`
+        // since it was introduced; this graph did not, so a sped-up clip would
+        // have exported at 1× — running past the lane it occupies and
+        // desyncing everything after it. `(PTS-STARTPTS)/speed` compresses the
+        // clip's own time by exactly the factor `timeline_end_ms` divides by
+        // (`effective_speed`, deliberately the same expression), and the
+        // timeline shift is added AFTER the division so it is not scaled too.
+        let speed = it.effective_speed();
+        let base = if is_unit_speed(speed) {
+            "PTS-STARTPTS".to_string()
         } else {
-            "setpts=PTS-STARTPTS".to_string()
+            format!("(PTS-STARTPTS)/{}", rate(speed))
+        };
+        let setpts = if it.timeline_start_ms > 0 {
+            format!("setpts={base}+{}/TB", secs(it.timeline_start_ms))
+        } else {
+            format!("setpts={base}")
         };
         let mut chain: Vec<String> = vec![
             format!("trim=start={}:end={}", secs(it.in_ms), secs(it.out_ms)),
@@ -507,32 +620,93 @@ pub fn build_filter_complex(
         .filter(|it| it.enabled && has_audio(project, it))
         .collect();
     let mut audio_labels: Vec<String> = Vec::new();
+    // Does anything in the mix push level UP? Only a positive total gain can
+    // make the bus exceed what the sources already were; fades and cuts only
+    // ever attenuate.
+    let mut any_boost = false;
     for (n, it) in audio_items.iter().enumerate() {
         if !track_audible(project, it, any_solo) {
             continue;
         }
         let src = input_index(it.source_media_id.as_ref().unwrap());
         let delay = it.timeline_start_ms.max(0);
-        nodes.push(format!(
-            "[{src}:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS,adelay={d}|{d}[pa{n}]",
-            s = secs(it.in_ms),
-            e = secs(it.out_ms),
-            d = delay,
-        ));
+
+        let mut chain: Vec<String> = vec![
+            format!("atrim=start={}:end={}", secs(it.in_ms), secs(it.out_ms)),
+            "asetpts=PTS-STARTPTS".to_string(),
+        ];
+
+        // 1. SPEED, first — everything after it measures time on the clip's
+        //    OWN, already-rescaled timeline, which is the timeline the lane
+        //    (and `timeline_end_ms`) describes.
+        chain.extend(atempo_chain(it.effective_speed()));
+
+        // 2. LEVEL. The clip's gain and its track's fader are BOTH multipliers
+        //    of the same signal, and dB add — so one `volume` node carrying
+        //    the sum is exactly equivalent to two chained nodes, and cheaper.
+        //    Emitted only when it does something, so an untouched clip's chain
+        //    is unchanged from before R2.
+        let track_db = track_of(project, it)
+            .map(|t| t.effective_volume_db())
+            .unwrap_or(0.0);
+        let total_db = it.effective_gain_db() + track_db;
+        if total_db != 0.0 {
+            chain.push(format!("volume={}dB", db(total_db)));
+            if total_db > 0.0 {
+                any_boost = true;
+            }
+        }
+
+        // 3. FADES, BEFORE `adelay`. This is the seam that would rot silently:
+        //    `afade`'s `st=` is a timestamp on the stream it sees, and after
+        //    `adelay` that stream has been pushed to `timeline_start_ms`. Put
+        //    the fades after the delay and a fade-in written as `st=0` would
+        //    ramp over the silence in FRONT of a clip that starts at 0:30 and
+        //    the clip itself would begin at full level. Here the stream is
+        //    still 0-based, so the clip's own start IS 0 and its own end IS
+        //    `timeline_len_ms` (post-`atempo`). Pinned by
+        //    `fade_out_is_positioned_against_the_clip_not_the_timeline`.
+        let len_ms = it.timeline_len_ms();
+        let fade_in = it.effective_fade_in_ms();
+        let fade_out = it.effective_fade_out_ms();
+        if fade_in > 0 {
+            chain.push(format!("afade=t=in:st=0:d={}", secs(fade_in)));
+        }
+        if fade_out > 0 {
+            chain.push(format!(
+                "afade=t=out:st={}:d={}",
+                secs(len_ms - fade_out),
+                secs(fade_out),
+            ));
+        }
+
+        // 4. PLACEMENT last.
+        chain.push(format!("adelay={delay}|{delay}"));
+
+        nodes.push(format!("[{src}:a]{}[pa{n}]", chain.join(",")));
         audio_labels.push(format!("[pa{n}]"));
     }
-    let audio_out = if audio_labels.len() >= 2 {
-        nodes.push(format!(
-            "{}amix=inputs={}:normalize=0[aout]",
-            audio_labels.join(""),
-            audio_labels.len()
-        ));
-        Some("[aout]".to_string())
-    } else if audio_labels.len() == 1 {
-        nodes.push(format!("{}anull[aout]", audio_labels[0]));
-        Some("[aout]".to_string())
-    } else {
+
+    // Headroom: see `BUS_LIMITER`. The limiter is inserted only where the bus
+    // can genuinely exceed full scale — a summed mix, or a clip boosted above
+    // unity. A single clip at or below unity gain therefore renders through
+    // the same bare `anull` it always did, byte for byte.
+    let needs_bus_limiter = audio_labels.len() >= 2 || any_boost;
+    let audio_out = if audio_labels.is_empty() {
         None
+    } else {
+        let mix = if audio_labels.len() >= 2 {
+            format!("amix=inputs={}:normalize=0", audio_labels.len())
+        } else {
+            "anull".to_string()
+        };
+        let bus = if needs_bus_limiter {
+            format!("{mix},{BUS_LIMITER}")
+        } else {
+            mix
+        };
+        nodes.push(format!("{}{bus}[aout]", audio_labels.join("")));
+        Some("[aout]".to_string())
     };
 
     // ── Caption layer LAST: ass overlay on the video composite ──────────────
@@ -1216,6 +1390,7 @@ mod tests {
             locked: false,
             muted: false,
             solo: false,
+            volume_db: 0.0,
         }
     }
 
@@ -1236,6 +1411,9 @@ mod tests {
             out_ms,
             timeline_start_ms: start,
             speed: 1.0,
+            gain_db: 0.0,
+            fade_in_ms: 0,
+            fade_out_ms: 0,
             transform: Transform::default(),
             effects: vec![],
             transition_in: None,
@@ -1500,6 +1678,338 @@ mod tests {
         assert!(args.iter().any(|a| a == "-c:a"));
     }
 
+    // ── R2: gain / fades / headroom / speed ─────────────────────────────────
+
+    /// One untouched clip must emit EXACTLY the chain it emitted before R2 —
+    /// no `volume`, no `afade`, no `atempo`, no limiter. Anything else and the
+    /// feature has silently changed every existing project's sound.
+    #[test]
+    fn an_untouched_single_clip_emits_the_pre_r2_audio_chain() {
+        let p = project(
+            vec![media("m1", "/a.mp4", true)],
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![item("i0", "v1", "m1", 0, 0, 5000)],
+            vec![],
+        );
+        let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+        assert!(
+            g.contains("[0:a]atrim=start=0.000:end=5.000,asetpts=PTS-STARTPTS,adelay=0|0[pa0]"),
+            "got {g}"
+        );
+        assert!(g.contains("[pa0]anull[aout]"), "got {g}");
+        for absent in ["volume=", "afade", "atempo", "alimiter"] {
+            assert!(!g.contains(absent), "unexpected `{absent}` in {g}");
+        }
+    }
+
+    /// The clip's gain and its track's fader are one multiplication of the
+    /// same signal — dB add, so ONE node carries both.
+    #[test]
+    fn item_gain_and_track_volume_are_summed_into_one_volume_node() {
+        let mut tr = track("a1", TrackKind::Audio, 0);
+        tr.volume_db = -4.0;
+        let mut it = item("i0", "a1", "m1", 0, 0, 5000);
+        it.gain_db = -2.0;
+        let p = project(
+            vec![audio_media("m1", "/a.mp3")],
+            vec![tr],
+            vec![it],
+            vec![],
+        );
+        let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+        assert!(g.contains("volume=-6.0000dB"), "got {g}");
+        assert_eq!(g.matches("volume=").count(), 1, "one node, not two: {g}");
+    }
+
+    /// Equal and opposite gain and fader cancel — and a chain that emitted
+    /// `volume=0dB` anyway would be a pointless node in every project.
+    #[test]
+    fn a_cancelling_gain_and_fader_emit_no_volume_node() {
+        let mut tr = track("a1", TrackKind::Audio, 0);
+        tr.volume_db = 3.0;
+        let mut it = item("i0", "a1", "m1", 0, 0, 5000);
+        it.gain_db = -3.0;
+        let p = project(
+            vec![audio_media("m1", "/a.mp3")],
+            vec![tr],
+            vec![it],
+            vec![],
+        );
+        let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+        assert!(!g.contains("volume="), "got {g}");
+    }
+
+    /// THE fade seam. `afade`'s `st=` is a timestamp on the stream the filter
+    /// sees. The fades are emitted BEFORE `adelay`, so that stream is 0-based
+    /// and `st=` is measured from the CLIP's start — not from the timeline's.
+    /// A clip at 0:10 that is 5 s long fades out at st=4.0, never at st=14.0
+    /// (which would land past the end of the clip entirely) and never at
+    /// st=9.0.
+    #[test]
+    fn fade_out_is_positioned_against_the_clip_not_the_timeline() {
+        let mut it = item("i0", "a1", "m1", 10_000, 0, 5000);
+        it.fade_in_ms = 1000;
+        it.fade_out_ms = 1000;
+        let p = project(
+            vec![audio_media("m1", "/a.mp3")],
+            vec![track("a1", TrackKind::Audio, 0)],
+            vec![it],
+            vec![],
+        );
+        let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+        assert!(g.contains("afade=t=in:st=0:d=1.000"), "got {g}");
+        assert!(
+            g.contains("afade=t=out:st=4.000:d=1.000"),
+            "fade-out must sit 1 s before the CLIP's end (4.000), got {g}"
+        );
+        assert!(
+            !g.contains("st=14.000"),
+            "fade landed on timeline time: {g}"
+        );
+        assert!(!g.contains("st=9.000"), "fade landed on timeline time: {g}");
+        // …and the ordering that makes those numbers true.
+        let fade_at = g.find("afade=t=in").unwrap();
+        let delay_at = g.find("adelay=").unwrap();
+        assert!(fade_at < delay_at, "fades must precede adelay: {g}");
+    }
+
+    /// A 2× clip occupies half the timeline, and `atempo` has already halved
+    /// the stream by the time `afade` sees it — so the fade-out is placed
+    /// against the SPED-UP length.
+    #[test]
+    fn fade_out_position_follows_speed() {
+        let mut it = item("i0", "a1", "m1", 0, 0, 4000);
+        it.speed = 2.0;
+        it.fade_out_ms = 500;
+        let p = project(
+            vec![audio_media("m1", "/a.mp3")],
+            vec![track("a1", TrackKind::Audio, 0)],
+            vec![it],
+            vec![],
+        );
+        let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+        assert!(
+            g.contains("afade=t=out:st=1.500:d=0.500"),
+            "2 s of sped-up clip, fading out at 1.5 s; got {g}"
+        );
+        let tempo_at = g.find("atempo").unwrap();
+        let fade_at = g.find("afade").unwrap();
+        assert!(tempo_at < fade_at, "atempo must precede afade: {g}");
+    }
+
+    // ── headroom ────────────────────────────────────────────────────────────
+
+    /// Two summed clips can exceed full scale, so the bus gets its limiter —
+    /// but the mix stays `normalize=0`, because normalising would make every
+    /// user-set gain depend on how many clips happen to overlap.
+    #[test]
+    fn a_summed_mix_keeps_normalize_0_and_gets_the_bus_limiter() {
+        let p = project(
+            vec![media("m1", "/a.mp4", true), audio_media("m2", "/b.mp3")],
+            vec![
+                track("v1", TrackKind::Video, 0),
+                track("a1", TrackKind::Audio, 1),
+            ],
+            vec![
+                item("i0", "v1", "m1", 0, 0, 5000),
+                item("i1", "a1", "m2", 1000, 0, 4000),
+            ],
+            vec![],
+        );
+        let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+        assert!(g.contains("amix=inputs=2:normalize=0"), "got {g}");
+        assert!(g.contains("alimiter="), "a summed bus must be limited: {g}");
+        assert!(
+            g.contains("level=disabled"),
+            "alimiter's auto-level defaults to ON and would undo the user's gains: {g}"
+        );
+        assert!(g.contains("limit=0.891"), "ceiling below full scale: {g}");
+        let mix_at = g.find("amix=").unwrap();
+        let lim_at = g.find("alimiter=").unwrap();
+        assert!(lim_at > mix_at, "the limiter belongs on the MIXED bus: {g}");
+    }
+
+    /// A boost above unity can clip on its own, with nothing to sum against.
+    #[test]
+    fn a_single_boosted_clip_gets_the_bus_limiter() {
+        let mut it = item("i0", "a1", "m1", 0, 0, 5000);
+        it.gain_db = 6.0;
+        let p = project(
+            vec![audio_media("m1", "/a.mp3")],
+            vec![track("a1", TrackKind::Audio, 0)],
+            vec![it],
+            vec![],
+        );
+        let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+        assert!(g.contains("volume=6.0000dB"), "got {g}");
+        assert!(g.contains("alimiter="), "a boost can clip on its own: {g}");
+    }
+
+    /// Attenuation cannot clip, so it must not drag a limiter (and its 5 ms of
+    /// lookahead) into the render.
+    #[test]
+    fn a_single_attenuated_clip_gets_no_limiter() {
+        let mut it = item("i0", "a1", "m1", 0, 0, 5000);
+        it.gain_db = -6.0;
+        it.fade_in_ms = 500;
+        let p = project(
+            vec![audio_media("m1", "/a.mp3")],
+            vec![track("a1", TrackKind::Audio, 0)],
+            vec![it],
+            vec![],
+        );
+        let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+        assert!(g.contains("volume=-6.0000dB"), "got {g}");
+        assert!(!g.contains("alimiter="), "nothing here can clip: {g}");
+    }
+
+    /// A muted track contributes nothing — so its gain must not drag a
+    /// limiter onto a bus it is not even on.
+    #[test]
+    fn a_boost_on_a_muted_track_does_not_arm_the_limiter() {
+        let mut tr = track("a1", TrackKind::Audio, 0);
+        tr.muted = true;
+        let mut it = item("i0", "a1", "m1", 0, 0, 5000);
+        it.gain_db = 12.0;
+        let mut tr2 = track("a2", TrackKind::Audio, 1);
+        tr2.volume_db = -3.0;
+        let p = project(
+            vec![audio_media("m1", "/a.mp3"), audio_media("m2", "/b.mp3")],
+            vec![tr, tr2],
+            vec![it, item("i1", "a2", "m2", 0, 0, 5000)],
+            vec![],
+        );
+        let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+        assert!(!g.contains("alimiter="), "muted clip must not arm it: {g}");
+        assert!(
+            !g.contains("volume=12"),
+            "muted clip must not be mixed: {g}"
+        );
+    }
+
+    // ── speed ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn atempo_chain_stays_inside_ffmpegs_0_5_to_2_window() {
+        assert!(atempo_chain(1.0).is_empty(), "unit speed emits nothing");
+        assert_eq!(atempo_chain(2.0), vec!["atempo=2.000000"]);
+        assert_eq!(atempo_chain(4.0), vec!["atempo=2.0", "atempo=2.000000"]);
+        assert_eq!(atempo_chain(3.0), vec!["atempo=2.0", "atempo=1.500000"]);
+        assert_eq!(atempo_chain(0.5), vec!["atempo=0.500000"]);
+        assert_eq!(atempo_chain(0.25), vec!["atempo=0.5", "atempo=0.500000"]);
+
+        // Every emitted factor must be one ffmpeg will accept, and the product
+        // must be the requested speed — the two properties that matter.
+        for s in [0.01f64, 0.1, 0.3, 0.75, 1.5, 2.5, 8.0, 17.3, 100.0] {
+            let chain = atempo_chain(s);
+            let mut product = 1.0f64;
+            for node in &chain {
+                let v: f64 = node.strip_prefix("atempo=").unwrap().parse().unwrap();
+                assert!(
+                    (0.5..=2.0).contains(&v),
+                    "speed {s} emitted out-of-range `{node}`"
+                );
+                product *= v;
+            }
+            assert!(
+                (product - s).abs() < s * 1e-4,
+                "speed {s} chain {chain:?} multiplies to {product}"
+            );
+        }
+    }
+
+    /// Speed was modelled everywhere and IGNORED by the export: a 2× clip
+    /// rendered at 1×, running past the lane it occupies. Both branches must
+    /// now scale time.
+    #[test]
+    fn speed_scales_both_the_video_and_the_audio_branch() {
+        let mut it = item("i0", "v1", "m1", 0, 0, 4000);
+        it.speed = 2.0;
+        let p = project(
+            vec![media("m1", "/a.mp4", true)],
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![it],
+            vec![],
+        );
+        let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+        assert!(g.contains("setpts=(PTS-STARTPTS)/2.000000"), "got {g}");
+        assert!(g.contains("atempo=2.000000"), "got {g}");
+    }
+
+    /// The timeline shift is added AFTER the division, so it is not scaled
+    /// too — a 2× clip at 0:10 still starts at 0:10.
+    #[test]
+    fn speed_does_not_scale_the_timeline_offset() {
+        let mut it = item("i0", "v1", "m1", 10_000, 0, 4000);
+        it.speed = 2.0;
+        let p = project(
+            vec![media("m1", "/a.mp4", true)],
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![it],
+            vec![],
+        );
+        let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+        assert!(
+            g.contains("setpts=(PTS-STARTPTS)/2.000000+10.000/TB"),
+            "got {g}"
+        );
+        // The overlay window must agree with the halved length.
+        assert!(g.contains("between(t,10.000,12.000)"), "got {g}");
+    }
+
+    #[test]
+    fn unit_speed_emits_no_time_scaling_at_all() {
+        let p = project(
+            vec![media("m1", "/a.mp4", true)],
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![item("i0", "v1", "m1", 0, 0, 4000)],
+            vec![],
+        );
+        let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+        assert!(g.contains("setpts=PTS-STARTPTS"), "got {g}");
+        assert!(!g.contains("/1.000000"), "got {g}");
+        assert!(!g.contains("atempo"), "got {g}");
+    }
+
+    // ── the burn-in fast path must not swallow audio settings ───────────────
+
+    /// `burnin::build_ffmpeg_args` passes source audio through VERBATIM. A
+    /// project whose audio has been touched must therefore leave the fast
+    /// path, or the export ignores every setting with no signal at all.
+    #[test]
+    fn touched_audio_takes_the_project_off_the_simple_burn_in_path() {
+        let baseline = baseline_project();
+        assert!(is_simple_timeline(&baseline), "baseline is simple");
+
+        let mut gained = baseline.clone();
+        gained.timeline_items[0].gain_db = -6.0;
+        assert!(
+            !is_simple_timeline(&gained),
+            "a clip gain must not be swallowed"
+        );
+
+        let mut faded = baseline.clone();
+        faded.timeline_items[0].fade_in_ms = 500;
+        assert!(
+            !is_simple_timeline(&faded),
+            "a fade-in must not be swallowed"
+        );
+
+        let mut faded_out = baseline.clone();
+        faded_out.timeline_items[0].fade_out_ms = 500;
+        assert!(
+            !is_simple_timeline(&faded_out),
+            "a fade-out must not be swallowed"
+        );
+
+        let mut fader = baseline.clone();
+        fader.tracks[0].volume_db = -3.0;
+        assert!(
+            !is_simple_timeline(&fader),
+            "a track fader must not be swallowed"
+        );
+    }
+
     #[test]
     fn no_audio_yields_an_flag() {
         let p = project(
@@ -1758,6 +2268,9 @@ mod tests {
             out_ms: dur,
             timeline_start_ms: start,
             speed: 1.0,
+            gain_db: 0.0,
+            fade_in_ms: 0,
+            fade_out_ms: 0,
             transform: Transform::default(),
             effects: vec![],
             transition_in: None,

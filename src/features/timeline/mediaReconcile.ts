@@ -78,17 +78,23 @@ export type MediaActionReason =
   /** Parking an upcoming clip on its first frame before it is needed. */
   | "prewarm"
   /** Restoring the element's nominal rate once it is back in sync. */
-  | "rate-restore";
+  | "rate-restore"
+  /** The clip's gain, its track's fader, or the active clip itself changed
+   *  (R2 audio). */
+  | "volume-change";
 
 /** One mutation for the executor to apply to one element. */
 export interface MediaAction {
-  type: "seek" | "play" | "pause" | "setRate";
+  type: "seek" | "play" | "pause" | "setRate" | "setVolume";
   /** The timeline item (clip) whose element this is. */
   itemId: string;
   /** Target source time, ms. Set for `seek`. */
   timeMs?: number;
   /** Target `playbackRate`. Set for `setRate`. */
   rate?: number;
+  /** Target `HTMLMediaElement.volume`, already dB→linear and clamped to
+   *  `[0, 1]` by the caller. Set for `setVolume`. */
+  volume?: number;
   reason: MediaActionReason;
 }
 
@@ -123,6 +129,17 @@ export interface MediaElementSnapshot {
   playbackRate: number;
   /** The clip's speed multiplier (`TimelineItem.speed`). Defaults to 1. */
   speed?: number;
+  /** The element's current `.volume` (0..1). Defaults to 1 when omitted, so a
+   *  caller that doesn't track gain at all (legacy single-source mode) never
+   *  manufactures a spurious correction. */
+  volume?: number;
+  /**
+   * The volume this element SHOULD be playing at — already dB→linear and
+   * clamped to `[0, 1]` by the caller (`previewVolumeFor`, R2's dB math is
+   * not this module's job). `undefined` means "don't manage volume for this
+   * element" (no per-clip gain to honour).
+   */
+  targetVolume?: number;
   /** Whether this element has ever been seeked (browsers decode lazily). */
   hasBeenSeeked?: boolean;
   /**
@@ -147,6 +164,8 @@ export interface ReconcileConfig {
   nudgeDown: number;
   /** Ignore `playbackRate` differences smaller than this. */
   rateEpsilon: number;
+  /** Ignore `.volume` differences smaller than this. */
+  volumeEpsilon: number;
   /** Slowest `playbackRate` a browser plays cleanly. */
   minNativeRate: number;
   /** Fastest `playbackRate` a browser plays cleanly. */
@@ -182,6 +201,9 @@ export function defaultReconcileConfig(fps: number): ReconcileConfig {
     nudgeUp: 1.02,
     nudgeDown: 0.98,
     rateEpsilon: 0.001,
+    // Finer than the ~1/255 step a UI slider or the element itself quantises
+    // to, so a real change is never missed and a no-op tick never re-issues.
+    volumeEpsilon: 0.002,
     // A browser plays cleanly across this band; outside it we scrub by seeking.
     minNativeRate: 0.25,
     maxNativeRate: 4,
@@ -216,6 +238,23 @@ function reconcileElement(
 ): void {
   const { itemId } = element;
   const canSeek = !element.seeking && element.readyState >= READY_METADATA;
+
+  // ── Volume (R2 audio) ─────────────────────────────────────────────────────
+  // Checked first and unconditionally — it applies whether the element is
+  // active, prewarming, or paused between clips, and never competes with the
+  // seek/play/pause decisions below (a real `<video>` accepts a volume change
+  // regardless of playback state, so there is no ordering hazard to resolve).
+  if (element.targetVolume !== undefined) {
+    const currentVolume = element.volume ?? 1;
+    if (Math.abs(currentVolume - element.targetVolume) > config.volumeEpsilon) {
+      actions.push({
+        type: "setVolume",
+        itemId,
+        volume: element.targetVolume,
+        reason: "volume-change",
+      });
+    }
+  }
 
   // ── Inactive: park it (prewarm) and make sure it is quiet ────────────────
   if (element.targetTimeMs === null) {
