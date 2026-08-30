@@ -53,6 +53,13 @@ export type { PolishResult }     from "./PolishResult";
 export type { ReflowConfig }     from "./ReflowConfig";
 export type { ReflowIssue }      from "./ReflowIssue";
 export type { ReplaceResult }    from "./ReplaceResult";
+// Sermon Highlight Reel Studio (services/highlight_reel.rs +
+// commands/highlight_reel.rs) — storyboard, fan-out plan, batch progress.
+export type { ReelStoryboard }   from "./ReelStoryboard";
+export type { ReelRenderProgress } from "./ReelRenderProgress";
+export type { ReelRenderResult } from "./ReelRenderResult";
+export type { RenderPlan }       from "./RenderPlan";
+export type { RenderItem }       from "./RenderItem";
 export type { SilenceGap }       from "./SilenceGap";
 export type { Peak }             from "./Peak";
 export type { Project }          from "./Project";

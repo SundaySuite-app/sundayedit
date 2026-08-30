@@ -22,6 +22,7 @@ import {
   Save,
   FolderOpen,
   Clapperboard,
+  Film,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -51,6 +52,7 @@ import { ReflowPanel } from "@/features/reflow/ReflowPanel";
 import { PolishPanel } from "@/features/polish/PolishPanel";
 import { SuggestPanel } from "@/features/suggest/SuggestPanel";
 import { ClipsPanel } from "@/features/clips/ClipsPanel";
+import { ReelPanel } from "@/features/reel/ReelPanel";
 import { TranslatePanel } from "@/features/translate/TranslatePanel";
 import { SpeakersPanel } from "@/features/speakers/SpeakersPanel";
 import { SAMPLE_PROJECT } from "@/lib/sampleProject";
@@ -90,6 +92,7 @@ type DockTool =
   | "translate"
   | "cleanup"
   | "reflow"
+  | "reel"
   | "projectmeta";
 
 // Pipeline / output / config operations that open as a modal over the
@@ -116,6 +119,7 @@ const DOCK_GROUPS: Array<DockToolDef[]> = [
     { id: "translate", icon: Languages, labelKey: "navTranslate" },
     { id: "cleanup", icon: Wand2, labelKey: "navCleanup" },
     { id: "reflow", icon: Gauge, labelKey: "navReflow" },
+    { id: "reel", icon: Film, labelKey: "navReel" },
   ],
 ];
 
@@ -701,6 +705,9 @@ function App() {
               <TranslatePanel project={project} onProjectChange={commitEdit} />
             ) : dockTool === "reflow" ? (
               <ReflowPanel project={project} onProjectChange={commitEdit} />
+            ) : dockTool === "reel" ? (
+              // Renders files; never edits the project — so no commit wiring.
+              <ReelPanel project={project} />
             ) : (
               <CleanupPanel project={project} onProjectChange={commitEdit} />
             )}

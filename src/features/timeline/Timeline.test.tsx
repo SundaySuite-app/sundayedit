@@ -409,6 +409,255 @@ describe("Timeline — blade (B) and Delete clip ops", () => {
   });
 });
 
+// ── ⌘D duplicate, ⌘C/⌘V copy-paste (R3-B) ────────────────────────────────────
+// The typing-guard + "only these three modified chords" scoping is exercised
+// in "Timeline — shuttle/snap keys ignore modified chords" below; this block
+// covers the ops themselves.
+
+describe("Timeline — duplicate (⌘D) and copy/paste (⌘C/⌘V) clip ops", () => {
+  function surfaceOf(container: HTMLElement): HTMLElement {
+    return container.firstElementChild as HTMLElement;
+  }
+
+  beforeEach(() => {
+    invoke.mockImplementation((cmd: unknown, rawArgs: unknown) =>
+      cmd === "waveform_compute"
+        ? Promise.reject(new Error("no waveform under vitest"))
+        : Promise.resolve((rawArgs as { project: Project }).project),
+    );
+  });
+
+  it("⌘D duplicates the selected clip", async () => {
+    const { container } = render(<Timeline project={SAMPLE_PROJECT} />);
+    fireEvent.click(clipBox());
+    fireEvent.keyDown(surfaceOf(container), { key: "d", metaKey: true });
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "op_duplicate_timeline_item",
+        expect.objectContaining({ itemId: "ti1" }),
+      ),
+    );
+  });
+
+  it("Ctrl+D duplicates too (Windows)", async () => {
+    const { container } = render(<Timeline project={SAMPLE_PROJECT} />);
+    fireEvent.click(clipBox());
+    fireEvent.keyDown(surfaceOf(container), { key: "d", ctrlKey: true });
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "op_duplicate_timeline_item",
+        expect.objectContaining({ itemId: "ti1" }),
+      ),
+    );
+  });
+
+  it("⌘D without a selected clip commits nothing", () => {
+    const { container } = render(<Timeline project={SAMPLE_PROJECT} />);
+    fireEvent.keyDown(surfaceOf(container), { key: "d", metaKey: true });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "op_duplicate_timeline_item",
+      expect.anything(),
+    );
+  });
+
+  it("⌘D on a locked clip commits nothing", () => {
+    const locked: Project = {
+      ...SAMPLE_PROJECT,
+      timeline_items: SAMPLE_PROJECT.timeline_items.map((it) =>
+        it.id === "ti1" ? { ...it, locked: true } : it,
+      ),
+    };
+    const { container } = render(<Timeline project={locked} />);
+    fireEvent.click(clipBox());
+    fireEvent.keyDown(surfaceOf(container), { key: "d", metaKey: true });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "op_duplicate_timeline_item",
+      expect.anything(),
+    );
+  });
+
+  it("Cmd+Alt+D is left alone (not a timeline shortcut)", () => {
+    const { container } = render(<Timeline project={SAMPLE_PROJECT} />);
+    fireEvent.click(clipBox());
+    fireEvent.keyDown(surfaceOf(container), {
+      key: "d",
+      metaKey: true,
+      altKey: true,
+    });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "op_duplicate_timeline_item",
+      expect.anything(),
+    );
+  });
+
+  it("⌘C then ⌘V duplicates the copied clip and moves it to the playhead", async () => {
+    invoke.mockImplementation((cmd: unknown, rawArgs: unknown) => {
+      if (cmd === "waveform_compute") {
+        return Promise.reject(new Error("no waveform under vitest"));
+      }
+      if (cmd === "op_duplicate_timeline_item") {
+        const { project, itemId } = rawArgs as {
+          project: Project;
+          itemId: string;
+        };
+        const orig = project.timeline_items.find((i) => i.id === itemId)!;
+        const clone = {
+          ...orig,
+          id: "ti1-dup",
+          timeline_start_ms: orig.timeline_start_ms + 18_000,
+        };
+        return Promise.resolve({
+          ...project,
+          timeline_items: [...project.timeline_items, clone],
+        });
+      }
+      if (cmd === "op_move_timeline_item") {
+        const { project, itemId, newTrackId, newTimelineStartMs } = rawArgs as {
+          project: Project;
+          itemId: string;
+          newTrackId: string;
+          newTimelineStartMs: number;
+        };
+        return Promise.resolve({
+          ...project,
+          timeline_items: project.timeline_items.map((it) =>
+            it.id === itemId
+              ? {
+                  ...it,
+                  track_id: newTrackId,
+                  timeline_start_ms: newTimelineStartMs,
+                }
+              : it,
+          ),
+        });
+      }
+      return Promise.resolve((rawArgs as { project: Project }).project);
+    });
+
+    const { container } = render(<Timeline project={SAMPLE_PROJECT} />);
+    const surface = surfaceOf(container);
+    fireEvent.click(clipBox());
+    fireEvent.keyDown(surface, { key: "c", metaKey: true });
+
+    // Seek the playhead to 2000ms (same geometry as the blade test above).
+    const canvas = container.querySelector("canvas")!;
+    fireEvent.pointerDown(canvas, { clientX: 100 });
+
+    fireEvent.keyDown(surface, { key: "v", metaKey: true });
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "op_duplicate_timeline_item",
+        expect.objectContaining({ itemId: "ti1" }),
+      ),
+    );
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "op_move_timeline_item",
+        expect.objectContaining({
+          itemId: "ti1-dup",
+          newTrackId: "tv",
+          newTimelineStartMs: 2000,
+        }),
+      ),
+    );
+  });
+
+  it("⌘V with nothing copied commits nothing", () => {
+    const { container } = render(<Timeline project={SAMPLE_PROJECT} />);
+    fireEvent.keyDown(surfaceOf(container), { key: "v", metaKey: true });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "op_duplicate_timeline_item",
+      expect.anything(),
+    );
+    expect(invoke).not.toHaveBeenCalledWith(
+      "op_move_timeline_item",
+      expect.anything(),
+    );
+  });
+
+  it("⌘V is a no-op when the SELECTED track's kind doesn't match the copied clip's", async () => {
+    // A second, audio, track+clip — mirrors the pointer drag/drop rule
+    // (`clipDrag.trackKind`): a clip can only land on a track of its own kind.
+    const withAudioTrack: Project = {
+      ...SAMPLE_PROJECT,
+      media: [
+        ...SAMPLE_PROJECT.media,
+        {
+          id: "m2",
+          path: "/demo/music.mp3",
+          content_hash: "demo2",
+          kind: "audio_only",
+          duration_ms: 5000,
+          width: 0,
+          height: 0,
+          fps: 0,
+          has_audio: true,
+          audio_wav_path: null,
+          original_filename: "music.mp3",
+          added_at: 0,
+        },
+      ],
+      tracks: [
+        ...SAMPLE_PROJECT.tracks,
+        {
+          id: "ta",
+          kind: "audio",
+          name: "Audio",
+          index: 2,
+          enabled: true,
+          locked: false,
+          muted: false,
+          solo: false,
+          volume_db: 0,
+        },
+      ],
+      timeline_items: [
+        ...SAMPLE_PROJECT.timeline_items,
+        {
+          id: "ti2",
+          track_id: "ta",
+          kind: "av",
+          source_media_id: "m2",
+          in_ms: 0,
+          out_ms: 5000,
+          timeline_start_ms: 0,
+          speed: 1,
+          gain_db: 0,
+          fade_in_ms: 0,
+          fade_out_ms: 0,
+          transform: {
+            x: 0,
+            y: 0,
+            scale: 1,
+            rotation_deg: 0,
+            opacity: 1,
+            crop: null,
+          },
+          effects: [],
+          transition_in: null,
+          text: null,
+          enabled: true,
+          locked: false,
+        },
+      ],
+    };
+    const { container } = render(<Timeline project={withAudioTrack} />);
+    const surface = surfaceOf(container);
+
+    fireEvent.click(clipBox()); // ti1, video, on "tv"
+    fireEvent.keyDown(surface, { key: "c", metaKey: true });
+
+    fireEvent.click(screen.getByTitle("music.mp3")); // ti2, audio, on "ta"
+    fireEvent.keyDown(surface, { key: "v", metaKey: true });
+
+    expect(invoke).not.toHaveBeenCalledWith(
+      "op_duplicate_timeline_item",
+      expect.anything(),
+    );
+  });
+});
+
 // ── remove track ────────────────────────────────────────────────────────────
 // The ✕ in a track header commits op_remove_track; the backend rejects a
 // non-empty track and the message surfaces as an alert strip instead of
@@ -476,6 +725,58 @@ describe("Timeline — close-gaps track action", () => {
     render(<Timeline project={locked} />);
     const header = screen.getByTestId("track-header-tv");
     expect(within(header).queryByTestId("pack-track-tv")).toBeNull();
+  });
+});
+
+// ── track enabled toggle (R3-B) ──────────────────────────────────────────────
+// `Track.enabled` was already honoured by preview (previewMap.ts) and export
+// (compose_track_flags.rs) and settable through `op_set_track_flags`, but
+// nothing in the UI could flip it — so the smoke-test row asking to verify
+// "disabled track excluded from export" wasn't even reachable by clicking.
+
+describe("Timeline — track enabled/visibility toggle", () => {
+  beforeEach(() => {
+    invoke.mockImplementation((cmd: unknown, rawArgs: unknown) =>
+      cmd === "waveform_compute"
+        ? Promise.reject(new Error("no waveform under vitest"))
+        : Promise.resolve((rawArgs as { project: Project }).project),
+    );
+  });
+
+  it("commits op_set_track_flags {enabled:false} for an enabled track", async () => {
+    render(<Timeline project={SAMPLE_PROJECT} />);
+    const header = screen.getByTestId("track-header-tv");
+    fireEvent.click(within(header).getByTestId("track-enabled-tv"));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "op_set_track_flags",
+        expect.objectContaining({ trackId: "tv", enabled: false }),
+      ),
+    );
+  });
+
+  it("commits {enabled:true} to re-enable an already-disabled track", async () => {
+    const disabled: Project = {
+      ...SAMPLE_PROJECT,
+      tracks: SAMPLE_PROJECT.tracks.map((t) =>
+        t.id === "tv" ? { ...t, enabled: false } : t,
+      ),
+    };
+    render(<Timeline project={disabled} />);
+    const header = screen.getByTestId("track-header-tv");
+    fireEvent.click(within(header).getByTestId("track-enabled-tv"));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        "op_set_track_flags",
+        expect.objectContaining({ trackId: "tv", enabled: true }),
+      ),
+    );
+  });
+
+  it("is offered on a caption track too (not just audible video/audio ones)", () => {
+    render(<Timeline project={SAMPLE_PROJECT} />);
+    const header = screen.getByTestId("track-header-tc");
+    expect(within(header).getByTestId("track-enabled-tc")).toBeTruthy();
   });
 });
 

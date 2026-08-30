@@ -80,6 +80,7 @@ pub fn run() {
             commands::timeline_ops::op_set_track_flags,
             commands::timeline_ops::op_add_timeline_item,
             commands::timeline_ops::op_split_timeline_item,
+            commands::timeline_ops::op_duplicate_timeline_item,
             commands::timeline_ops::op_trim_timeline_item,
             commands::timeline_ops::op_move_timeline_item,
             commands::timeline_ops::op_ripple_delete_item,
@@ -185,6 +186,7 @@ pub fn run() {
             commands::compose::compose_render,
             commands::compose::compose_preview_proxy,
             commands::compose::compose_cancel,
+            commands::compose::compose_default_encoder,
             // Sunday-link deep-link import (Phase 8)
             commands::deeplink::deeplink_parse_import,
             commands::deeplink::deeplink_captions_callback_url,

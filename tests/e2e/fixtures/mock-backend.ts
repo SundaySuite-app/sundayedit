@@ -605,6 +605,22 @@ function backend(): void {
     arr.splice(i, 1, left, right);
     return { ...project, timeline_items: arr };
   }
+  /**
+   * Duplicate a clip right after itself on the same track (mirrors
+   * services::timeline_ops::duplicate_timeline_item — simplified: the mock
+   * layer doesn't reproduce the gap-trim/overlap clamp, just the wiring: new
+   * id, same track, placed at the original's end, transition_in cleared).
+   */
+  function duplicateTimelineItem(project: Project, itemId: string): Project {
+    const orig = findItem(project, itemId);
+    const clone: TimelineItem = {
+      ...orig,
+      id: nleId(),
+      timeline_start_ms: itemSpan(orig).end,
+      transition_in: null,
+    };
+    return { ...project, timeline_items: [...items(project), clone] };
+  }
   function trimTimelineItem(
     project: Project,
     itemId: string,
@@ -872,6 +888,42 @@ function backend(): void {
   const proxyRenders: Array<{ output: string; items: number }> = [];
 
   /**
+   * One landscape + one vertical preset so the burn-in detail/preview pane
+   * (and preset-toggle behaviour) is reachable from E2E. The highlight-reel
+   * fan-out resolves preset ids against this same catalog, exactly as Rust's
+   * `resolve_presets` resolves them against `export_presets::catalog()`.
+   */
+  const EXPORT_PRESETS = [
+    {
+      id: "youtube_16x9",
+      name: "YouTube",
+      description: "Landscape 16:9",
+      aspect: "landscape",
+      width: 1920,
+      height: 1080,
+      max_duration_sec: null,
+      codec: "h264",
+      bitrate_kbps: 8000,
+      also_srt_sidecar: false,
+    },
+    {
+      id: "reels_9x16",
+      name: "Reels",
+      description: "Vertical 9:16",
+      aspect: "portrait",
+      width: 1080,
+      height: 1920,
+      max_duration_sec: 90,
+      codec: "h264",
+      bitrate_kbps: 6000,
+      also_srt_sidecar: true,
+    },
+  ];
+
+  /** Set by `reel_cancel_render`; polled by the batch loop between items. */
+  let reelCancel = false;
+
+  /**
    * Commands the app fires on boot (or on a surface the specs never assert)
    * whose real answer nothing in the suite depends on. They resolve empty —
    * everything else that has no case REJECTS, so a spec cannot pass by
@@ -986,34 +1038,7 @@ function backend(): void {
           project.captions.map(captionText).join(" ").trim(),
         );
       case "export_list_presets":
-        // One landscape + one vertical preset so the burn-in detail/preview
-        // pane (and preset-toggle behaviour) is reachable from E2E.
-        return Promise.resolve([
-          {
-            id: "youtube_16x9",
-            name: "YouTube",
-            description: "Landscape 16:9",
-            aspect: "landscape",
-            width: 1920,
-            height: 1080,
-            max_duration_sec: null,
-            codec: "h264",
-            bitrate_kbps: 8000,
-            also_srt_sidecar: false,
-          },
-          {
-            id: "reels_9x16",
-            name: "Reels",
-            description: "Vertical 9:16",
-            aspect: "portrait",
-            width: 1080,
-            height: 1920,
-            max_duration_sec: 90,
-            codec: "h264",
-            bitrate_kbps: 6000,
-            also_srt_sidecar: true,
-          },
-        ]);
+        return Promise.resolve(EXPORT_PRESETS);
       case "export_validate":
         return Promise.resolve([]);
 
@@ -1082,6 +1107,10 @@ function backend(): void {
             args.itemId as string,
             args.atTimelineMs as number,
           ),
+        );
+      case "op_duplicate_timeline_item":
+        return Promise.resolve(
+          duplicateTimelineItem(project, args.itemId as string),
         );
       case "op_trim_timeline_item":
         return Promise.resolve(
@@ -1353,6 +1382,10 @@ function backend(): void {
       }
       case "compose_cancel":
         return Promise.resolve(undefined);
+      case "compose_default_encoder":
+        // No real hardware to probe in a browser — "cpu" is always a legal,
+        // correct pick, and the E2E specs don't assert on it.
+        return Promise.resolve("cpu");
       case "compose_preview_proxy":
         // The preview-render proxy: real ffmpeg flattens the timeline to a
         // low-res mp4 at `output`. There is nothing to encode here, but the
@@ -1367,6 +1400,131 @@ function backend(): void {
           output: args.output as string,
           items: items(project).length,
         });
+        return Promise.resolve(undefined);
+
+      // ── Sermon Highlight Reel Studio ──
+      // Mirrors commands/highlight_reel.rs closely enough that the WIRING is
+      // under test: `reel_storyboard` never errors for a missing key (it
+      // reports `used_ai:false` and heuristic clips instead), `reel_build_plan`
+      // fans clips × presets out to the SAME `NN-slug__preset.mp4` filenames
+      // the Rust `output_filename` produces, and `reel_render_all` streams
+      // `reel-render-progress` (as window CustomEvents — the mock has no Tauri
+      // event bus, exactly like `compose_render` above) while honouring the
+      // cancel flag, then resolves with the partial outcome.
+      case "reel_storyboard": {
+        const withWords = project.captions.filter((c) => c.words.length > 0);
+        // Two clips keeps the fan-out small and the progress ticks observable.
+        const clips = withWords.slice(0, 2).map((c, i) => ({
+          id: "clip:" + i,
+          title: c.words
+            .slice(0, 4)
+            .map((w) => w.text)
+            .join(" "),
+          hook: "",
+          caption_ids: [c.id],
+          start_ms: c.start_ms,
+          end_ms: c.end_ms,
+        }));
+        const key = (args.apiKey as string | null) ?? "";
+        return Promise.resolve({
+          plan: { talk_summary: "", clips },
+          // No key → the keyless pause heuristic, never an error.
+          used_ai: key.trim().length > 0,
+          ai_error: null,
+        });
+      }
+      case "reel_build_plan": {
+        const plan = args.plan as {
+          clips: { id: string; title: string }[];
+        };
+        const presetIds = args.presetIds as string[];
+        const outputDir = (args.outputDir as string).replace(/[/\\]+$/, "");
+        const slugify = (title: string) =>
+          title
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-+|-+$/g, "")
+            .slice(0, 40) || "clip";
+        const items = plan.clips.flatMap((clip, ci) =>
+          // Unknown ids are dropped, mirroring `resolve_presets`.
+          presetIds.flatMap((presetId) => {
+            const preset = EXPORT_PRESETS.find((p) => p.id === presetId);
+            if (!preset) return [];
+            const presetSlug = presetId.replace(/^export:/, "");
+            const file =
+              String(ci + 1).padStart(2, "0") +
+              "-" +
+              slugify(clip.title) +
+              "__" +
+              presetSlug +
+              ".mp4";
+            return [
+              {
+                id: clip.id + "__" + presetId,
+                clip,
+                preset,
+                output_path: outputDir + "/" + file,
+              },
+            ];
+          }),
+        );
+        return Promise.resolve({ items, total: items.length });
+      }
+      case "reel_render_all": {
+        const plan = args.plan as {
+          items: { id: string; output_path: string }[];
+          total: number;
+        };
+        reelCancel = false;
+        const emit = (
+          completed: number,
+          currentItemId: string | null,
+          failed: number,
+        ) =>
+          window.dispatchEvent(
+            new CustomEvent("reel-render-progress", {
+              detail: {
+                completed,
+                total: plan.total,
+                fraction: plan.total === 0 ? null : completed / plan.total,
+                current_item_id: currentItemId,
+                failed,
+              },
+            }),
+          );
+        const delay =
+          (window as unknown as { __mockReelItemDelayMs?: number })
+            .__mockReelItemDelayMs ?? 400;
+        return new Promise((resolve) => {
+          const rendered: string[] = [];
+          let completed = 0;
+          emit(0, plan.items[0]?.id ?? null, 0);
+          const step = () => {
+            if (reelCancel || completed >= plan.items.length) {
+              emit(completed, null, 0);
+              resolve({
+                rendered,
+                failed: [],
+                cancelled: reelCancel && completed < plan.items.length,
+              });
+              return;
+            }
+            const item = plan.items[completed];
+            emit(completed, item.id, 0);
+            setTimeout(() => {
+              rendered.push(item.output_path);
+              completed += 1;
+              emit(completed, item.id, 0);
+              step();
+            }, delay);
+          };
+          step();
+        });
+      }
+      case "reel_cancel_render":
+        // The Rust flag stops the queue AFTER the clip in flight, so the
+        // in-progress item still finishes here too.
+        reelCancel = true;
         return Promise.resolve(undefined);
 
       // ── path plugin ──
