@@ -15,10 +15,21 @@
 use sundayedit_lib::model::{
     MediaItem, Project, Style, TimelineItem, TimelineItemKind, Track, TrackKind, Transform,
 };
-use sundayedit_lib::services::compose::{
-    build_filter_complex, is_simple_timeline, ComposeSettings,
-};
+use sundayedit_lib::services::compose::{is_simple_timeline, ComposeSettings};
 use sundayedit_lib::services::video::MediaKind;
+
+/// Test shim: the real builder is fallible (it refuses item kinds the compose
+/// graph cannot render — see `compose::validate_composable`); every fixture in
+/// this file is composable.
+fn build_filter_complex(
+    project: &Project,
+    settings: &ComposeSettings,
+    ass_file: Option<&str>,
+    output: &str,
+) -> Vec<String> {
+    sundayedit_lib::services::compose::build_filter_complex(project, settings, ass_file, output)
+        .expect("fixture must be composable")
+}
 
 fn media(id: &str, path: &str, audio: bool) -> MediaItem {
     MediaItem {

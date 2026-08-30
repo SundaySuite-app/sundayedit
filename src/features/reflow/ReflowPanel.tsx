@@ -9,8 +9,9 @@
  * sub-captions.
  *
  * Analysis is pure + offline, so the panel re-checks live whenever the project
- * or the limits change. Repair flows back through onProjectChange so undo (in
- * the editor) and export see the result, exactly like the cleanup tools.
+ * or the limits change. Repair flows back through `onProjectChange` — wired by
+ * App to `useProjectStore.commit` — so the auto-split is one undo step and the
+ * export sees the result, exactly like the cleanup tools.
  */
 
 import { useCallback, useEffect, useState } from "react";

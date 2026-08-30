@@ -8,7 +8,13 @@
  * Non-destructive until the user commits: running shows a side-by-side
  * preview (original → translation) and flags captions whose translation
  * grew much longer (reading-speed risk). "Replace captions" swaps the track
- * in via onProjectChange; the editor's undo can revert it.
+ * in via `onProjectChange`, which App wires to `useProjectStore.commit` — so
+ * the swap is ONE undo step and ⌘Z restores every original caption.
+ *
+ * That last sentence used to be a lie: the panel committed through
+ * `setProject`, which never touched the undo stacks, so the single edit that
+ * rewrites the text of every caption in the project was the one edit the user
+ * could not take back. `TranslatePanel.undo.test.tsx` now proves it.
  */
 
 import { useEffect, useMemo, useState } from "react";

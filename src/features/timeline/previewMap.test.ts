@@ -173,13 +173,44 @@ describe("activeVideoItem", () => {
     expect(activeVideoItem(p, 1000)).toBeNull();
   });
 
-  it("ignores items on non-video tracks", () => {
+  // Regression (diff-preview-hides-overlay-track-video): this used to assert
+  // `toBeNull()` — the preview required `track.kind === "video"`. `compose.rs`
+  // does NOT: `is_visual` looks only at the MEDIA's kind, and `track_visible`
+  // only at the track's `enabled`. So a video clip on an Overlay track (the
+  // media bin offers "add overlay track", the lane drop handler allows it) was
+  // rendered by the export and invisible in the preview — a preview that hides
+  // what the export WILL draw. It must be selected.
+  it("selects a video clip on a non-video track (export parity: is_visual ignores track kind)", () => {
     const p = project(
-      [track("cap", 0, { kind: "caption" })],
-      [item("i", "cap", "m", 0, 0, 4000)],
+      [track("ov", 0, { kind: "overlay" })],
+      [item("i", "ov", "m", 0, 0, 4000)],
+      [media("m", "/m.mp4")],
+    );
+    expect(activeVideoItem(p, 1000)?.item.id).toBe("i");
+  });
+
+  it("still honours a DISABLED non-video track (track_visible)", () => {
+    const p = project(
+      [track("ov", 0, { kind: "overlay", enabled: false })],
+      [item("i", "ov", "m", 0, 0, 4000)],
       [media("m", "/m.mp4")],
     );
     expect(activeVideoItem(p, 1000)).toBeNull();
+  });
+
+  // `track_index` falls back to `i32::MAX` for an item whose track cannot be
+  // resolved, and `track_visible` treats it as visible — so such an item
+  // composites ON TOP of everything. The preview must show the same frame.
+  it("puts an item with an unresolvable track on top (track_index = i32::MAX)", () => {
+    const p = project(
+      [track("v", 0)],
+      [
+        item("onTrack", "v", "m1", 0, 0, 4000),
+        item("orphan", "gone", "m2", 0, 0, 4000),
+      ],
+      [media("m1", "/lo.mp4"), media("m2", "/orphan.mp4")],
+    );
+    expect(activeVideoItem(p, 1000)?.item.id).toBe("orphan");
   });
 
   it("returns null when the source media can't be resolved", () => {

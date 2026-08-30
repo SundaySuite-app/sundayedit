@@ -7,8 +7,11 @@
  *   - Egennavn/glossar (komma-separert liste for Whisper-priming)
  *   - Språk (auto-detect / no / en / sv / da / de / fr / pl)
  *
- * Lives as a dock tool on the right rail. Changes are lifted into the
- * Project via onProjectChange and persisted on the next project_save.
+ * Lives as a dock tool on the right rail. Changes are lifted into the Project
+ * via `onProjectChange`, which App wires to `useProjectStore.commit` under a
+ * coalescing key: every field here is a text input firing per keystroke, so a
+ * typed burst folds into one undo step. Persistence is the store's autosave
+ * (or the next manual save) — see `src/lib/autosave.ts`.
  */
 
 import { FileText } from "lucide-react";

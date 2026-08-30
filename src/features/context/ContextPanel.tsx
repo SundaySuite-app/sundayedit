@@ -8,7 +8,11 @@
  * glossary entries from a first-pass transcript (mode 3) are a later step.
  *
  * The project is the renderer-side source of truth, so edits here are plain
- * state updates via onProjectChange; the backend pass is invoked on demand.
+ * state updates via `onProjectChange`; the backend pass is invoked on demand.
+ * App wires `onProjectChange` to `useProjectStore.commit` with a coalescing
+ * key, so a typed description is ONE undo step rather than one per keystroke
+ * (unkeyed, a long description would evict the 100-deep history the user's
+ * real edits live in).
  */
 
 import { useEffect, useState } from "react";

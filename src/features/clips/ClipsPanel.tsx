@@ -12,7 +12,9 @@
  * can then be rendered as a vertical video with its title overlay burned in.
  *
  * Generating proposes; nothing touches the project until "Bruk plan". The
- * applied plan flows back through onProjectChange so save/export see it.
+ * applied plan flows back through `onProjectChange` — App wires it to
+ * `useProjectStore.commit` — so applying a plan is one undo step and
+ * save/export see it.
  */
 
 import { useEffect, useMemo, useState } from "react";

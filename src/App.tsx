@@ -25,6 +25,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import {
+  ask,
   open as openFileDialog,
   save as saveFileDialog,
 } from "@tauri-apps/plugin-dialog";
@@ -53,7 +54,12 @@ import { ClipsPanel } from "@/features/clips/ClipsPanel";
 import { TranslatePanel } from "@/features/translate/TranslatePanel";
 import { SpeakersPanel } from "@/features/speakers/SpeakersPanel";
 import { SAMPLE_PROJECT } from "@/lib/sampleProject";
-import { useProjectStore, useUndoHotkeys } from "@/lib/useProjectStore";
+import {
+  selectDirty,
+  useProjectStore,
+  useUndoHotkeys,
+} from "@/lib/useProjectStore";
+import { saveProjectTo, useAutosave, useCloseGuard } from "@/lib/autosave";
 import { ipc } from "@/lib/ipc";
 import type {
   Caption,
@@ -159,12 +165,19 @@ function routeCaptionsToCaptionTrack(
 
 function App() {
   const t = useT();
-  // The open project + its undo/redo history live in one shared store. `reset`
-  // replaces the whole project and clears history (open/import/demo/back);
-  // `setProject` is the non-undoable direct replace for edits that were never
-  // part of the undo stack (dock panels, style, transcription results).
+  // The open project + its undo/redo history live in one shared store.
+  //
+  //   reset      — open/import/demo/back: new document, history cleared.
+  //   commit     — an EDIT the caller already computed. UNDOABLE. Every dock
+  //                and modal panel goes through here, so a translate run that
+  //                rewrote every caption is one ⌘Z away (it used to be
+  //                unrecoverable: the panels called `setProject`, which never
+  //                touched the stacks).
+  //   setProject — a replacement that is NOT an edit of the open document
+  //                (transcription results, export-config plumbing).
   const project = useProjectStore((s) => s.project);
   const setProject = useProjectStore((s) => s.setProject);
+  const commitProject = useProjectStore((s) => s.commit);
   const resetProject = useProjectStore((s) => s.reset);
   // ⌘Z / ⌘⇧Z, mounted once for the whole app (no-op until a project exists).
   useUndoHotkeys();
@@ -202,6 +215,57 @@ function App() {
       kind === "err" ? 6000 : 3500,
     );
   }, []);
+
+  // ── Undoable panel commits ────────────────────────────────────────────────
+  // Every dock/modal panel edits the open document, so every panel commits
+  // through `commit`. Two flavours:
+  //
+  //   commitEdit  — one discrete action per commit (run polish, accept a
+  //                 suggestion, replace the captions with a translation,
+  //                 auto-fix readability, ripple-cut fillers). One undo step
+  //                 each, which is exactly right.
+  //   panelCommit — panels whose controls fire per KEYSTROKE (title,
+  //                 description, glossary) or per pointer-move (style
+  //                 sliders). Those get a coalescing key so a typed phrase is
+  //                 ONE undo step; without it a 200-character description
+  //                 would push 200 entries and evict the 100-deep history the
+  //                 user's real edits live in.
+  const commitEdit = useCallback(
+    (p: Project) => commitProject(p),
+    [commitProject],
+  );
+  const panelCommit = useMemo(() => {
+    const keyed = (key: string) => (p: Project) =>
+      commitProject(p, { coalesceKey: key });
+    return {
+      context: keyed("panel:context"),
+      projectmeta: keyed("panel:projectmeta"),
+      style: keyed("panel:style"),
+      exportconfig: keyed("panel:exportconfig"),
+    };
+  }, [commitProject]);
+
+  // Write-behind autosave + the "unsaved changes" close guard. Both no-op
+  // outside Tauri, so browser dev and the Playwright suite are unaffected.
+  useAutosave(
+    useCallback(
+      (message: string) => notify("err", t("autosaveFailed", { message })),
+      [notify, t],
+    ),
+  );
+  useCloseGuard(
+    useCallback(
+      () =>
+        ask(t("unsavedCloseBody"), {
+          title: t("unsavedCloseTitle"),
+          kind: "warning",
+          okLabel: t("unsavedCloseConfirm"),
+          cancelLabel: t("unsavedCloseCancel"),
+        }),
+      [t],
+    ),
+  );
+
   const [downloadedModels, setDownloadedModels] = useState<WhisperModel[]>([]);
   const [downloading, setDownloading] = useState<{
     model: WhisperModel;
@@ -353,18 +417,28 @@ function App() {
     );
   }
 
-  // Save the current project to a `.sundayedit` file the user picks. No-op
-  // outside Tauri (no native dialog) or if the user cancels.
-  async function saveProjectAs() {
+  // Save the current project. A project that already has a file writes
+  // straight to it (⌘S semantics); one that has never been saved prompts for a
+  // path first — autosave deliberately cannot invent a location, so this is
+  // the only thing that can create the file. `pickPath` forces the prompt
+  // ("Save as…"): now that plain Save no longer asks every time, that is the
+  // only way to retarget an already-saved project.
+  async function saveProjectAs(pickPath = false) {
     if (!project) return;
-    const suggested = project.name.replace(/\.[^.]+$/, "");
     try {
-      const path = await saveFileDialog({
-        defaultPath: `${suggested}.sundayedit`,
-        filters: [{ name: "SundayEdit", extensions: ["sundayedit"] }],
-      });
-      if (typeof path !== "string") return; // cancelled
-      await ipc.project.save(project, path);
+      let path = pickPath ? null : useProjectStore.getState().filePath;
+      if (!path) {
+        const suggested = project.name.replace(/\.[^.]+$/, "");
+        const picked = await saveFileDialog({
+          defaultPath: `${suggested}.sundayedit`,
+          filters: [{ name: "SundayEdit", extensions: ["sundayedit"] }],
+        });
+        if (typeof picked !== "string") return; // cancelled
+        path = picked;
+      }
+      // Shared with autosave so both record the same saved snapshot + path —
+      // two bookkeeping paths would let the dirty indicator drift from disk.
+      await saveProjectTo(project, path);
       // A successful save MUST be acknowledged — without this, a failed save was
       // indistinguishable from a successful one (silent data loss).
       notify("ok", `Saved to ${path}`);
@@ -375,6 +449,7 @@ function App() {
   }
 
   // Open a `.sundayedit` file the user picks, replacing the current project.
+  // The path is remembered so ⌘S and autosave write back to the same file.
   async function openProject() {
     try {
       const path = await openFileDialog({
@@ -383,7 +458,7 @@ function App() {
       });
       if (typeof path !== "string") return; // cancelled
       const opened = await ipc.project.open(path);
-      resetProject(opened);
+      resetProject(opened, path);
       setReturnTo(null);
     } catch (e) {
       console.error("project open failed", e);
@@ -456,6 +531,13 @@ function App() {
       group: t("paletteGroupProject"),
       icon: Save,
       run: () => void saveProjectAs(),
+    },
+    {
+      id: "p-save-as",
+      label: t("projectSaveAs"),
+      group: t("paletteGroupProject"),
+      icon: Save,
+      run: () => void saveProjectAs(true),
     },
     {
       id: "p-import",
@@ -542,7 +624,7 @@ function App() {
         <Topbar
           project={project}
           onOpenProject={openProject}
-          onSaveProject={saveProjectAs}
+          onSaveProject={() => void saveProjectAs()}
           onTranscribe={() => setModal("transcribe")}
           onClips={() => setModal("clips")}
           onExport={() => setModal("export")}
@@ -592,31 +674,34 @@ function App() {
             {dockTool === "media" ? (
               <MediaBin project={project} />
             ) : dockTool === "context" ? (
-              <ContextPanel project={project} onProjectChange={setProject} />
+              <ContextPanel
+                project={project}
+                onProjectChange={panelCommit.context}
+              />
             ) : dockTool === "projectmeta" ? (
               <ProjectMetaPanel
                 project={project}
-                onProjectChange={setProject}
+                onProjectChange={panelCommit.projectmeta}
               />
             ) : dockTool === "style" ? (
               <StyleEditor
                 style={project.default_style}
                 onChange={(s: Style) =>
-                  setProject({ ...project, default_style: s })
+                  panelCommit.style({ ...project, default_style: s })
                 }
               />
             ) : dockTool === "speakers" ? (
-              <SpeakersPanel project={project} onProjectChange={setProject} />
+              <SpeakersPanel project={project} onProjectChange={commitEdit} />
             ) : dockTool === "polish" ? (
-              <PolishPanel project={project} onProjectChange={setProject} />
+              <PolishPanel project={project} onProjectChange={commitEdit} />
             ) : dockTool === "suggest" ? (
-              <SuggestPanel project={project} onProjectChange={setProject} />
+              <SuggestPanel project={project} onProjectChange={commitEdit} />
             ) : dockTool === "translate" ? (
-              <TranslatePanel project={project} onProjectChange={setProject} />
+              <TranslatePanel project={project} onProjectChange={commitEdit} />
             ) : dockTool === "reflow" ? (
-              <ReflowPanel project={project} onProjectChange={setProject} />
+              <ReflowPanel project={project} onProjectChange={commitEdit} />
             ) : (
-              <CleanupPanel project={project} onProjectChange={setProject} />
+              <CleanupPanel project={project} onProjectChange={commitEdit} />
             )}
           </div>
         </aside>
@@ -637,6 +722,12 @@ function App() {
               project={project}
               model={model}
               downloadedModels={downloadedModels}
+              // Not an edit: LocalPanel reports where it cached the extracted
+              // WAV, and transcription installs a whole new caption track
+              // rather than modifying the open one. Both stay on `setProject`
+              // (non-undoable) — and `setProject` now clears `future`, so a
+              // transcription landing after an undo can no longer be blown
+              // away by a stray ⌘⇧Z.
               onProjectChange={setProject}
               onTranscribed={(captions) => {
                 // Functional merge so the audio_wav_path LocalPanel just set
@@ -666,14 +757,14 @@ function App() {
           onClose={() => setModal(null)}
           widthClass="max-w-4xl"
         >
-          <ClipsPanel project={project} onProjectChange={setProject} />
+          <ClipsPanel project={project} onProjectChange={commitEdit} />
         </Modal>
       )}
       {modal === "export" && (
         <Modal title={t("navExport")} onClose={() => setModal(null)}>
           <ExportPanel
             project={project}
-            onProjectChange={setProject}
+            onProjectChange={panelCommit.exportconfig}
             returnTo={returnTo}
           />
         </Modal>
@@ -722,6 +813,7 @@ function Topbar({
       <span className="flex shrink-0 items-center gap-1 text-[var(--text-ui-xs)] text-[var(--color-fg-subtle)]">
         <Clock size={11} /> {fmtDuration(project.video_duration_ms)}
       </span>
+      <SaveState />
 
       <div className="flex-1" />
 
@@ -758,6 +850,55 @@ function Topbar({
         <SettingsIcon size={16} />
       </button>
     </div>
+  );
+}
+
+/**
+ * Saved / unsaved indicator.
+ *
+ * Reads the SAME `selectDirty` the close guard and the autosave scheduler
+ * read, so the badge can never claim "Saved" while the guard would warn. It
+ * subscribes to the store directly rather than taking props: the topbar
+ * re-renders on every project change anyway, and prop-drilling a third source
+ * of truth is exactly how the badge would drift.
+ */
+function SaveState() {
+  const t = useT();
+  const dirty = useProjectStore(selectDirty);
+  const saving = useProjectStore((s) => s.saving);
+  const filePath = useProjectStore((s) => s.filePath);
+
+  const label = saving
+    ? t("saveStateSaving")
+    : dirty
+      ? t("saveStateUnsaved")
+      : t("saveStateSaved");
+
+  return (
+    <span
+      data-testid="save-state"
+      data-dirty={dirty ? "1" : "0"}
+      title={filePath ?? t("saveStateNoFile")}
+      className={cn(
+        "flex shrink-0 items-center gap-1.5 text-[var(--text-ui-xs)]",
+        dirty && !saving
+          ? "text-[var(--color-warning)]"
+          : "text-[var(--color-fg-subtle)]",
+      )}
+    >
+      <span
+        aria-hidden="true"
+        className={cn(
+          "h-1.5 w-1.5 rounded-full",
+          saving
+            ? "bg-[var(--color-fg-subtle)]"
+            : dirty
+              ? "bg-[var(--color-warning)]"
+              : "bg-[var(--color-accent-500)]",
+        )}
+      />
+      {label}
+    </span>
   );
 }
 

@@ -7,8 +7,10 @@
  *   - Subtitle style: size, colour, background
  *   - Max chars per line (32 / 42 / 52)
  *
- * State is lifted straight into the Project via onProjectChange; the
- * back-end persists it with the next project_save call.
+ * State is lifted straight into the Project via `onProjectChange`, which App
+ * wires to `useProjectStore.commit` under a coalescing key (the size and
+ * chars-per-line controls fire in bursts). Persistence is the store's autosave
+ * or the next manual save — see `src/lib/autosave.ts`.
  */
 
 import { Settings2 } from "lucide-react";

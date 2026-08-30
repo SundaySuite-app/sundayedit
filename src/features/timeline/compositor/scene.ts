@@ -36,7 +36,7 @@
 import type { Project } from "@/lib/bindings/Project";
 import type { TKey } from "@/lib/i18n";
 import { stackColorMatrix } from "../effects/registry";
-import { activeVideoItem } from "../previewMap";
+import { visualItemsAt } from "../previewMap";
 
 export interface CompositorLayer {
   itemId: string;
@@ -74,10 +74,14 @@ const FALLBACK_HEIGHT = 1080;
 /**
  * Describe the frame the compositor should draw for `playheadMs`.
  *
- * Layer selection is `previewMap.activeVideoItem` — the SAME top-most-enabled-
- * video-track rule the `<video>` path uses, which is itself export parity with
- * `compose.rs::is_visual`. Sharing it is what stops the two preview paths
- * showing different clips at the same playhead.
+ * Layer selection AND the stacked-layers count both come from the one
+ * `previewMap.visualItemsAt` call — the single mirror of `compose.rs`'s visual
+ * stack. Deriving both from the same list is the point: this file used to
+ * re-implement the rule privately in `countVisualItemsAt`, and the copy was
+ * wrong in the same way the old `activeVideoItem` was (it required
+ * `track.kind === "video"`). A video clip on an Overlay track was therefore
+ * neither drawn NOR counted — so the "preview is approximate" badge stayed
+ * silent about the very stack it exists to warn about.
  */
 export function describeScene(
   project: Project | undefined,
@@ -92,10 +96,11 @@ export function describeScene(
   const empty: CompositorScene = { width, height, layers: [], unsupported: [] };
   if (!project) return empty;
 
-  const active = activeVideoItem(project, playheadMs);
-  if (!active) return empty;
+  // Bottom → top, exactly as the export chains its overlay nodes.
+  const stack = visualItemsAt(project, playheadMs);
+  if (stack.length === 0) return empty;
 
-  const { item, media } = active;
+  const { item, media } = stack[stack.length - 1];
   const t = item.transform;
   const unsupported: CompositorScene["unsupported"] = [];
   if (t.crop) unsupported.push("crop");
@@ -103,7 +108,7 @@ export function describeScene(
   // More than one visual clip under the playhead means the export composites a
   // stack the single-element preview cannot show. Counting is cheap and the
   // honesty is worth it.
-  if (countVisualItemsAt(project, playheadMs) > 1) {
+  if (stack.length > 1) {
     unsupported.push("stacked-layers");
   }
 
@@ -146,24 +151,4 @@ export function approximationNotice(
     t(u === "crop" ? "previewApproxCrop" : "previewApproxStack"),
   );
   return `${t("previewApproximate")}: ${parts.join(", ")}`;
-}
-
-/** How many enabled visual clips on enabled video tracks span `playheadMs`. */
-function countVisualItemsAt(project: Project, playheadMs: number): number {
-  const videoTracks = new Set(
-    project.tracks
-      .filter((t) => t.kind === "video" && t.enabled)
-      .map((t) => t.id),
-  );
-  let n = 0;
-  for (const item of project.timeline_items) {
-    if (!item.enabled || !videoTracks.has(item.track_id)) continue;
-    const media = project.media.find((m) => m.id === item.source_media_id);
-    if (!media || media.kind !== "video") continue;
-    const speed = Math.max(0.01, item.speed);
-    const end =
-      item.timeline_start_ms + Math.trunc((item.out_ms - item.in_ms) / speed);
-    if (playheadMs >= item.timeline_start_ms && playheadMs < end) n++;
-  }
-  return n;
 }

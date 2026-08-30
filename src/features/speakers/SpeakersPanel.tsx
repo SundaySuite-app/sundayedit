@@ -7,7 +7,9 @@
  *
  * "Detect speakers" needs extracted audio (project.audio_wav_path); without
  * it — or in a build without the diarize sidecar — the call returns a clear
- * error shown inline. Roster edits are pure round-trips through the backend.
+ * error shown inline. Roster edits are pure round-trips through the backend,
+ * committed through `onProjectChange` (= `useProjectStore.commit`), so a
+ * detection run and each rename/recolour/merge are undoable steps.
  */
 
 import { useState } from "react";

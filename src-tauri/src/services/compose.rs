@@ -210,6 +210,73 @@ fn transform_filters(t: &Transform, chain: &mut Vec<String>) {
     }
 }
 
+/// Human name for a timeline item kind, for error messages the user reads.
+fn kind_label(kind: &TimelineItemKind) -> &'static str {
+    match kind {
+        TimelineItemKind::Av => "A/V",
+        TimelineItemKind::Text => "Text",
+        TimelineItemKind::Graphic => "Graphic",
+    }
+}
+
+/// Items the compose graph CANNOT render: standalone `Text` / `Graphic`
+/// overlays (`op_add_text_item` creates them with `source_media_id: None`, so
+/// they are neither `is_visual` nor `has_audio` and no node in
+/// `build_filter_complex` consumes them).
+///
+/// This is the single seam both consumers share:
+///   - `is_simple_timeline` must return false for them, or the burn-in
+///     shortcut swallows the overlay with zero signal (baseline import + one
+///     text clip used to stay "simple" and export as if the text never existed);
+///   - `build_filter_complex` must REFUSE them, so a project file can never
+///     lose authored content quietly.
+///
+/// Sharing the predicate is what stops the two sides drifting apart again.
+///
+/// Only items that would actually be seen count: a disabled item, or one on a
+/// hidden track, contributes nothing to the export *and* nothing to the
+/// preview, so there is nothing to lose and nothing to complain about.
+fn unsupported_overlay_items(project: &Project) -> Vec<&TimelineItem> {
+    project
+        .timeline_items
+        .iter()
+        .filter(|it| {
+            it.enabled
+                && track_visible(project, it)
+                && matches!(it.kind, TimelineItemKind::Text | TimelineItemKind::Graphic)
+        })
+        .collect()
+}
+
+/// Refuse to build a compose graph that would silently omit authored content.
+/// Pure. Called at the top of `build_filter_complex` (the pure builder, so no
+/// caller can route around it) and again at the top of `run_compose` /
+/// `run_compose_proxy` so the render fails before any temp sidecar is written.
+pub fn validate_composable(project: &Project) -> AppResult<()> {
+    let unsupported = unsupported_overlay_items(project);
+    let Some(first) = unsupported.first() else {
+        return Ok(());
+    };
+    let mut kinds: Vec<&str> = unsupported.iter().map(|it| kind_label(&it.kind)).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    Err(AppError::Validation(format!(
+        "the export cannot render a {kind} timeline item yet — {n} enabled \
+         {kinds} overlay item(s) on visible tracks would be dropped from the \
+         render (first: id {id:?}{text}). Disable or delete them, or hide \
+         their track, so nothing is lost without you knowing.",
+        kind = kind_label(&first.kind),
+        n = unsupported.len(),
+        kinds = kinds.join("/"),
+        id = first.id,
+        text = first
+            .text
+            .as_ref()
+            .map(|t| format!(", text {:?}", t.text))
+            .unwrap_or_default(),
+    )))
+}
+
 /// A "simple" timeline is one the existing single-track burn-in can render
 /// exactly: no visual/audio timeline items to composite beyond, at most, the
 /// primary video placed as ONE pristine full-length clip — the shape
@@ -217,6 +284,14 @@ fn transform_filters(t: &Transform, chain: &mut Vec<String>) {
 /// project delegates to `burnin::render` (hardware encoding + audio
 /// passthrough, battle-tested).
 pub fn is_simple_timeline(project: &Project) -> bool {
+    // A Text/Graphic overlay is neither visual nor audio, so it used to slip
+    // through the `av_items` filter below and leave a text-bearing project
+    // "simple" — the burn-in shortcut then rendered the video alone and the
+    // overlay vanished. Anything the composite path cannot render must never
+    // be swallowed by the shortcut either.
+    if !unsupported_overlay_items(project).is_empty() {
+        return false;
+    }
     let av_items: Vec<&TimelineItem> = project
         .timeline_items
         .iter()
@@ -265,12 +340,19 @@ fn is_pristine_primary_item(project: &Project, item: &TimelineItem) -> bool {
 /// Build the FULL ffmpeg argument vector for a compose render. Pure — no IO.
 /// `ass_file` is the (already-written) caption sidecar; `None` skips the
 /// caption layer. This is the unit-tested heart of the compose path.
+///
+/// Fallible on purpose: a project holding an item kind the graph cannot render
+/// (a `Text`/`Graphic` overlay) is REFUSED rather than rendered without it. The
+/// builder is the narrowest waist every compose/proxy render passes through, so
+/// putting the check here means no caller can produce a lying argv.
 pub fn build_filter_complex(
     project: &Project,
     settings: &ComposeSettings,
     ass_file: Option<&str>,
     output: &str,
-) -> Vec<String> {
+) -> AppResult<Vec<String>> {
+    validate_composable(project)?;
+
     // H.264/`yuv420p` requires EVEN output dimensions. Odd caller-supplied
     // geometry (projects imported from odd-dimension screen/web captures probe
     // odd, and the frontend derives its default settings from those numbers)
@@ -345,6 +427,12 @@ pub fn build_filter_complex(
     let mut prev = format!("[{canvas_idx}:v]");
     for (n, it) in video_items.iter().enumerate() {
         let out = format!("[cx{n}]");
+        // Placement is the SAME arithmetic in both branches — `Transform.x`/`.y`
+        // are fractions of the output frame (mirrored by
+        // `compositor/scene.ts::describeScene`, which positions the preview
+        // layer at `round(width * t.x)` / `round(height * t.y)`).
+        let x = (settings.width as f32 * it.transform.x).round() as i64;
+        let y = (settings.height as f32 * it.transform.y).round() as i64;
         // A transition only makes sense against a preceding sibling on the SAME
         // track (the boundary it crossfades over).
         let same_track_prev = n > 0 && video_items[n - 1].track_id == it.track_id;
@@ -360,10 +448,36 @@ pub fn build_filter_complex(
                 fps = settings.fps,
             );
             nodes.push(format!("{prev}{norm}[xa{n}]"));
+
+            // Regression (seam-xfade-drops-transform): this branch used to make
+            // the incoming clip full-frame with `scale={w}:{h}`, which BOTH
+            // overwrote the transform's own `scale=iw*s:ih*s` and skipped the
+            // `overlay` that carries x/y — so a clip with a transition exported
+            // stretched full-frame while the preview showed it inset. xfade
+            // does need a full-frame stream, but the honest way to get one is
+            // to composite the (already transformed) clip onto its OWN
+            // full-frame canvas at exactly the offsets the plain branch uses.
+            // The clip's PTS is re-zeroed first: `[pv{n}]` sits at its timeline
+            // position, and overlaying that onto a 0-based canvas would prepend
+            // `timeline_start_ms` of black inside the incoming stream.
+            //
+            // Canvas length: the LONGER of the source span (`[pv{n}]` is a
+            // plain `trim`, so its real length is `out_ms - in_ms`) and the
+            // on-timeline span, never shorter than the clip — `shortest=1`
+            // then ends the composite exactly with the clip.
+            let clip_dur_ms = (it.out_ms - it.in_ms)
+                .max(it.timeline_end_ms() - it.timeline_start_ms)
+                .max(1);
             nodes.push(format!(
-                "[pv{n}]scale={w}:{h},{norm}[xb{n}]",
+                "color=black:s={w}x{h}:r={fps}:d={d}[xc{n}]",
                 w = settings.width,
                 h = settings.height,
+                fps = settings.fps,
+                d = secs(clip_dur_ms),
+            ));
+            nodes.push(format!("[pv{n}]setpts=PTS-STARTPTS[xp{n}]"));
+            nodes.push(format!(
+                "[xc{n}][xp{n}]overlay={x}:{y}:shortest=1,{norm}[xb{n}]"
             ));
             nodes.push(format!(
                 "[xa{n}][xb{n}]xfade=transition={kind}:duration={dur}:offset={off}{out}",
@@ -372,8 +486,6 @@ pub fn build_filter_complex(
                 off = secs(offset),
             ));
         } else {
-            let x = (settings.width as f32 * it.transform.x).round() as i64;
-            let y = (settings.height as f32 * it.transform.y).round() as i64;
             nodes.push(format!(
                 "{prev}[pv{n}]overlay={x}:{y}:enable='between(t,{a},{b})'{out}",
                 a = secs(it.timeline_start_ms),
@@ -500,7 +612,7 @@ pub fn build_filter_complex(
     }
 
     args.push(output.into());
-    args
+    Ok(args)
 }
 
 /// Round `n` up to the nearest even integer (H.264/`yuv420p` requires even
@@ -550,8 +662,8 @@ pub fn build_proxy_args(
     settings: &ComposeSettings,
     ass_file: Option<&str>,
     output: &str,
-) -> Vec<String> {
-    let mut args = build_filter_complex(project, settings, ass_file, output);
+) -> AppResult<Vec<String>> {
+    let mut args = build_filter_complex(project, settings, ass_file, output)?;
     // Insert `-preset ultrafast` just before the trailing output path so the
     // x264 encoder runs at its lowest-latency profile.
     let out = args
@@ -560,7 +672,7 @@ pub fn build_proxy_args(
     args.push("-preset".into());
     args.push("ultrafast".into());
     args.push(out);
-    args
+    Ok(args)
 }
 
 /// Streamed to the UI as the compose render advances. Mirrors the reel/download
@@ -773,6 +885,11 @@ pub fn run_compose(
     settings: &ComposeSettings,
     cancel: Arc<AtomicBool>,
 ) -> AppResult<()> {
+    // Refuse BEFORE any temp sidecar is written: a Text/Graphic overlay the
+    // graph cannot render must abort the export, not vanish from it. (The pure
+    // builder checks again — this is only about failing early and cleanly.)
+    validate_composable(project)?;
+
     // Simple path: only the primary video + caption track(s) — the
     // single-track burn-in ARGUMENT BUILDER renders this exactly, with
     // hardware encoding + audio passthrough. Cheaper and battle-tested. The
@@ -808,7 +925,10 @@ pub fn run_compose(
     } else {
         Some(ass_str.as_str())
     };
-    let args = build_filter_complex(project, settings, ass_ref, &output.to_string_lossy());
+    let args = build_filter_complex(project, settings, ass_ref, &output.to_string_lossy())
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&ass_path);
+        })?;
 
     // Ensure output dir exists (best-effort).
     if let Some(parent) = output.parent() {
@@ -912,6 +1032,7 @@ pub fn run_compose_proxy(
     output: &Path,
     cancel: Arc<AtomicBool>,
 ) -> AppResult<()> {
+    validate_composable(project)?;
     let settings = proxy_settings(project);
     let total_ms = timeline_duration_ms(project);
 
@@ -926,7 +1047,10 @@ pub fn run_compose_proxy(
     } else {
         Some(ass_str.as_str())
     };
-    let args = build_proxy_args(project, &settings, ass_ref, &output.to_string_lossy());
+    let args = build_proxy_args(project, &settings, ass_ref, &output.to_string_lossy())
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&ass_path);
+        })?;
 
     // Ensure output dir exists (best-effort).
     if let Some(parent) = output.parent() {
@@ -1018,6 +1142,30 @@ pub fn run_compose_proxy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test shims. The real builders are FALLIBLE (they refuse a project with
+    /// an item kind the graph cannot render — see `validate_composable`); every
+    /// fixture below is composable, so the tests keep the infallible shape.
+    /// A local item shadows the `use super::*` glob, so no call site changes.
+    fn build_filter_complex(
+        project: &Project,
+        settings: &ComposeSettings,
+        ass_file: Option<&str>,
+        output: &str,
+    ) -> Vec<String> {
+        super::build_filter_complex(project, settings, ass_file, output)
+            .expect("fixture must be composable")
+    }
+
+    fn build_proxy_args(
+        project: &Project,
+        settings: &ComposeSettings,
+        ass_file: Option<&str>,
+        output: &str,
+    ) -> Vec<String> {
+        super::build_proxy_args(project, settings, ass_file, output)
+            .expect("fixture must be composable")
+    }
     use crate::model::{
         Caption, MediaItem, Style, TimelineItemKind, Track, TrackKind, Transition, Word,
     };
@@ -1310,13 +1458,17 @@ mod tests {
         s.width = 641;
         s.height = 481;
         let args = build_filter_complex(&p, &s, None, "out.mp4");
-        // Canvas and the xfade scale branch agree on the sanitized geometry…
+        // Canvas and the xfade branch's own full-frame canvas agree on the
+        // sanitized geometry…
         assert!(
             args.iter().any(|a| a.starts_with("color=black:s=642x482")),
             "canvas must use even dims: {args:?}"
         );
         let g = fc(&args);
-        assert!(g.contains("scale=642:482"), "xfade branch even: {g}");
+        assert!(
+            g.contains("color=black:s=642x482:"),
+            "xfade branch canvas even: {g}"
+        );
         // …and no raw odd geometry leaks anywhere in the argv.
         assert!(
             !args.iter().any(|a| a.contains("641") || a.contains("481")),
@@ -1590,6 +1742,241 @@ mod tests {
         let mut p = project(vec![], vec![], vec![], vec![caption("c0", 0, 3000)]);
         p.backfill_default_timeline(true);
         assert!(is_simple_timeline(&p));
+    }
+
+    // ── Text/Graphic overlays: refused loudly, never dropped ────────────────
+
+    /// A standalone text overlay — the exact shape `op_add_text_item` builds:
+    /// `kind: Text`, `source_media_id: None`.
+    fn text_item(id: &str, track_id: &str, start: i64, dur: i64) -> TimelineItem {
+        TimelineItem {
+            id: id.into(),
+            track_id: track_id.into(),
+            kind: TimelineItemKind::Text,
+            source_media_id: None,
+            in_ms: 0,
+            out_ms: dur,
+            timeline_start_ms: start,
+            speed: 1.0,
+            transform: Transform::default(),
+            effects: vec![],
+            transition_in: None,
+            text: Some(crate::model::TextSpec {
+                text: "Velkommen".into(),
+                style_id: None,
+            }),
+            enabled: true,
+            locked: false,
+        }
+    }
+
+    /// Regression (seam-text-item-swallowed-by-simple-path): a text overlay is
+    /// neither `is_visual` nor `has_audio`, so it used to leave a baseline
+    /// import "simple" — the burn-in shortcut then rendered the video alone and
+    /// the text vanished with ZERO signal. It must disqualify the fast path.
+    #[test]
+    fn text_item_disqualifies_the_simple_path() {
+        let mut p = baseline_project();
+        assert!(is_simple_timeline(&p), "precondition: baseline is simple");
+        p.tracks.push(track("o1", TrackKind::Overlay, 2));
+        p.timeline_items.push(text_item("tx1", "o1", 1000, 2000));
+        assert!(
+            !is_simple_timeline(&p),
+            "a text overlay must never be swallowed by the burn-in shortcut"
+        );
+    }
+
+    /// …and the composite path it now routes to must REFUSE, not omit.
+    #[test]
+    fn composing_a_text_item_errors_and_names_the_kind() {
+        let mut p = baseline_project();
+        p.tracks.push(track("o1", TrackKind::Overlay, 2));
+        p.timeline_items.push(text_item("tx1", "o1", 1000, 2000));
+
+        let err = super::build_filter_complex(&p, &settings(), None, "out.mp4")
+            .expect_err("a text overlay must not compose silently");
+        assert_eq!(err.code(), "validation", "got {err}");
+        let msg = err.to_string();
+        assert!(msg.contains("Text"), "the error must name the kind: {msg}");
+        assert!(msg.contains("tx1"), "the error must name the item: {msg}");
+
+        // The proxy builder and both spawn entry points share the check.
+        assert!(super::build_proxy_args(&p, &settings(), None, "out.mp4").is_err());
+        assert!(validate_composable(&p).is_err());
+    }
+
+    #[test]
+    fn graphic_items_are_refused_and_named_too() {
+        let mut p = baseline_project();
+        p.tracks.push(track("o1", TrackKind::Overlay, 2));
+        let mut g = text_item("gx1", "o1", 0, 1000);
+        g.kind = TimelineItemKind::Graphic;
+        g.text = None;
+        p.timeline_items.push(g);
+
+        assert!(!is_simple_timeline(&p));
+        let msg = validate_composable(&p)
+            .expect_err("a graphic overlay must not compose silently")
+            .to_string();
+        assert!(
+            msg.contains("Graphic"),
+            "the error must name the kind: {msg}"
+        );
+    }
+
+    /// Only content that WOULD be seen counts. A disabled overlay, or one on a
+    /// hidden track, is absent from the preview too — there is nothing to lose,
+    /// so it must neither block the fast path nor fail the render.
+    #[test]
+    fn invisible_text_items_neither_block_nor_break() {
+        let mut disabled = baseline_project();
+        disabled.tracks.push(track("o1", TrackKind::Overlay, 2));
+        let mut off = text_item("tx1", "o1", 1000, 2000);
+        off.enabled = false;
+        disabled.timeline_items.push(off);
+        assert!(
+            is_simple_timeline(&disabled),
+            "disabled overlay stays simple"
+        );
+        assert!(validate_composable(&disabled).is_ok());
+
+        let mut hidden = baseline_project();
+        let mut t = track("o1", TrackKind::Overlay, 2);
+        t.enabled = false;
+        hidden.tracks.push(t);
+        hidden
+            .timeline_items
+            .push(text_item("tx1", "o1", 1000, 2000));
+        assert!(
+            is_simple_timeline(&hidden),
+            "overlay on a hidden track stays simple"
+        );
+        assert!(validate_composable(&hidden).is_ok());
+    }
+
+    /// Cross-layer: whatever the REAL `add_text_item` op produces must hit the
+    /// refusal, not the shortcut. Pins the op ↔ compose seam rather than this
+    /// module's own fixture.
+    #[test]
+    fn real_add_text_item_output_is_refused_not_dropped() {
+        let mut p = baseline_project();
+        p.tracks.push(track("o1", TrackKind::Overlay, 2));
+        let p = crate::services::timeline_ops::add_text_item(
+            &p,
+            "tx-real".into(),
+            "o1",
+            1_000,
+            2_000,
+            "Velkommen".into(),
+        )
+        .expect("adding a text overlay is a legal edit");
+
+        assert!(
+            !is_simple_timeline(&p),
+            "the op's own output must leave the burn-in fast path"
+        );
+        let msg = super::build_filter_complex(&p, &settings(), None, "out.mp4")
+            .expect_err("the op's own output must be refused, not rendered without the text")
+            .to_string();
+        assert!(msg.contains("Text"), "got {msg}");
+    }
+
+    // ── Transitions must not eat the transform ──────────────────────────────
+
+    /// Regression (seam-xfade-drops-transform): the xfade branch used to emit
+    /// `[pv{n}]scale={W}:{H}` — overwriting the transform's own
+    /// `scale=iw*s:ih*s` and skipping the `overlay` that carries x/y, so a
+    /// scaled + offset clip exported full-frame. Pixel proof lives in
+    /// tests/compose_transition_transform.rs; this pins the graph shape.
+    #[test]
+    fn transition_branch_keeps_the_transform_scale_and_offset() {
+        let mut second = item("i1", "v1", "m1", 4000, 0, 4000);
+        second.transform = Transform {
+            x: 0.55,
+            y: 0.10,
+            scale: 0.4,
+            ..Transform::default()
+        };
+        second.transition_in = Some(Transition {
+            kind: "fade".into(),
+            duration_ms: 1000,
+        });
+        let p = project(
+            vec![media("m1", "/a.mp4", false)],
+            vec![track("v1", TrackKind::Video, 0)],
+            vec![item("i0", "v1", "m1", 0, 0, 4000), second],
+            vec![],
+        );
+        let g = fc(&build_filter_complex(&p, &settings(), None, "out.mp4"));
+
+        // The transform's own scale survives…
+        assert!(
+            g.contains("scale=iw*0.4:ih*0.4"),
+            "transform scale lost: {g}"
+        );
+        // …it is NOT overwritten by a fit-to-frame scale…
+        assert!(
+            !g.contains("scale=1920:1080"),
+            "the fit-to-frame scale is back — it eats the transform: {g}"
+        );
+        // …and the placement reaches an overlay: 1920*0.55 = 1056, 1080*0.10 = 108.
+        assert!(
+            g.contains("overlay=1056:108"),
+            "transitioned clip must still be placed at its x/y: {g}"
+        );
+        // The incoming stream is made full-frame by its OWN canvas, so xfade
+        // still sees two same-size inputs.
+        assert!(g.contains("color=black:s=1920x1080:"), "got {g}");
+        assert!(g.contains("xfade=transition=fade:"), "got {g}");
+    }
+
+    /// DRIFT GUARD: the two branches place an identically-transformed clip with
+    /// the SAME overlay offsets. If one branch's geometry is edited alone, the
+    /// strings stop matching.
+    #[test]
+    fn both_branches_emit_the_same_overlay_offsets() {
+        let tf = Transform {
+            x: 0.55,
+            y: 0.10,
+            scale: 0.4,
+            ..Transform::default()
+        };
+        let make = |with_transition: bool| {
+            let mut second = item("i1", "v1", "m1", 4000, 0, 4000);
+            second.transform = tf.clone();
+            if with_transition {
+                second.transition_in = Some(Transition {
+                    kind: "fade".into(),
+                    duration_ms: 1000,
+                });
+            }
+            let p = project(
+                vec![media("m1", "/a.mp4", false)],
+                vec![track("v1", TrackKind::Video, 0)],
+                vec![item("i0", "v1", "m1", 0, 0, 4000), second],
+                vec![],
+            );
+            fc(&build_filter_complex(&p, &settings(), None, "out.mp4"))
+        };
+        let with_tr = make(true);
+        let without_tr = make(false);
+        let offsets = |g: &str| -> Vec<String> {
+            g.split("overlay=")
+                .skip(1)
+                .map(|tail| {
+                    tail.split([',', ':', ';'])
+                        .take(2)
+                        .collect::<Vec<_>>()
+                        .join(":")
+                })
+                .collect()
+        };
+        assert_eq!(
+            offsets(&with_tr).last(),
+            offsets(&without_tr).last(),
+            "the transition branch must place the clip exactly where the plain \
+             branch does\nwith:    {with_tr}\nwithout: {without_tr}"
+        );
     }
 
     #[test]

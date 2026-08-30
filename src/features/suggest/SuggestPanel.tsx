@@ -7,6 +7,10 @@
  * original → proposed diff and the model's reasoning, and the user accepts
  * or rejects it one at a time. Accepting applies that single suggestion and
  * removes it from the queue; the caption's display span is preserved.
+ *
+ * `onProjectChange` is `useProjectStore.commit`, so each ACCEPTED suggestion
+ * is its own undo step — accept four and change your mind about the last one,
+ * and ⌘Z takes back exactly that one.
  */
 
 import { useEffect, useState } from "react";
