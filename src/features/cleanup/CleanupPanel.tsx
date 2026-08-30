@@ -9,8 +9,10 @@
  *     earlier). Replacing with "" via find/replace also works for a quick
  *     non-ripple removal.
  *
- * Edits flow back to the parent through onProjectChange so undo (in the
- * editor) and export see the result.
+ * Edits flow back to the parent through `onProjectChange`, which App wires to
+ * `useProjectStore.commit`: a replace-all or a ripple-cut is one undo step on
+ * the same stack as caption ops and timeline drags, and export sees the
+ * result.
  */
 
 import { useState } from "react";

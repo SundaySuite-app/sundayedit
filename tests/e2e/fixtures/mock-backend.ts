@@ -807,6 +807,40 @@ function backend(): void {
     return { ...project, timeline_items: [...items(project), item] };
   }
 
+  /**
+   * Every `compose_preview_proxy` call the app made, in order. Exposed on
+   * `window.__mockProxyRenders` so a spec can assert that the "render
+   * preview" button reached the backend with a real output path instead of
+   * merely turning green.
+   */
+  const proxyRenders: Array<{ output: string; items: number }> = [];
+
+  /**
+   * Commands the app fires on boot (or on a surface the specs never assert)
+   * whose real answer nothing in the suite depends on. They resolve empty —
+   * everything else that has no case REJECTS, so a spec cannot pass by
+   * exercising a command that does not exist.
+   *
+   * Keep this list short and justified. If a spec starts depending on one of
+   * these, give it a real case instead of leaving it here.
+   */
+  const BOOT_NOOPS = new Set<string>([
+    // Model manager: the models dir is empty in the browser build, so an empty
+    // answer is the honest one. `asr_downloaded_models` has a real case below.
+    "asr_model_dir",
+    // Updater plugin — no release feed in `vite preview`.
+    "plugin:updater|check",
+    "plugin:updater|download_and_install",
+    // Event bus / deep-link bridge: the specs never emit a Tauri event, so
+    // registering a listener is a no-op that must not throw.
+    "plugin:event|listen",
+    "plugin:event|unlisten",
+    "plugin:event|emit",
+    // Window + process plugins the shell touches (close guard, relaunch).
+    "plugin:window|create",
+    "plugin:process|restart",
+  ]);
+
   type Args = Record<string, unknown>;
   function invoke(cmd: string, args: Args): Promise<unknown> {
     const project = args.project as Project;
@@ -1240,15 +1274,105 @@ function backend(): void {
       }
       case "compose_cancel":
         return Promise.resolve(undefined);
+      case "compose_preview_proxy":
+        // The preview-render proxy: real ffmpeg flattens the timeline to a
+        // low-res mp4 at `output`. There is nothing to encode here, but the
+        // command MUST be answered — `renderPreviewProxy` resolving true is
+        // what makes the timeline announce "Preview rendered".
+        //
+        // This case did not exist while `default:` resolved undefined, so the
+        // announcement was made for a file that was never written and no spec
+        // could tell. The call is recorded so a spec can assert the button
+        // actually reached the backend with a real output path.
+        proxyRenders.push({
+          output: args.output as string,
+          items: items(project).length,
+        });
+        return Promise.resolve(undefined);
+
+      // ── path plugin ──
+      // `appCacheDir()` / `appDataDir()` / `join()` / `dirname()`. Real
+      // answers, not empty ones: the preview-proxy button and the model
+      // manager BUILD paths from these, and a path of `undefined` is how the
+      // proxy came to be "rendered" to nowhere.
+      case "plugin:path|resolve_directory":
+        return Promise.resolve("/demo/appdir");
+      case "plugin:path|join":
+        return Promise.resolve((args.paths as string[]).join("/"));
+      case "plugin:path|resolve":
+        return Promise.resolve((args.paths as string[]).join("/"));
+      case "plugin:path|normalize":
+        return Promise.resolve(args.path as string);
+      case "plugin:path|dirname":
+        return Promise.resolve(
+          (args.path as string).split("/").slice(0, -1).join("/") || "/",
+        );
+      case "plugin:path|basename":
+        return Promise.resolve(
+          (args.path as string).split("/").pop() ?? (args.path as string),
+        );
+      case "plugin:path|extname": {
+        const base = (args.path as string).split("/").pop() ?? "";
+        const dot = base.lastIndexOf(".");
+        return Promise.resolve(dot > 0 ? base.slice(dot + 1) : "");
+      }
+
+      // ── ASR model manager ──
+      case "asr_downloaded_models":
+        // The browser build has no models directory; an empty set is the
+        // honest answer, and the model picker renders its "not downloaded"
+        // state from it.
+        return Promise.resolve([]);
+
+      // ── cost estimates (pure, no network) ──
+      // Every AI panel previews its scope + cost before spending. They are
+      // pure functions of the caption count in Rust, so the mock answers the
+      // same way for all of them — a shared shape, not a per-panel fiction.
+      case "glossary_suggest_estimate":
+      case "polish_estimate":
+      case "suggest_estimate":
+      case "translate_estimate":
+      case "clips_estimate":
+        return Promise.resolve({
+          caption_count: project.captions.length,
+          estimated_input_tokens: project.captions.length * 40,
+          estimated_output_tokens: project.captions.length * 40,
+          estimated_cost_usd: 0.0123,
+          model_id: (args.model as string) ?? "haiku45",
+        });
 
       default:
-        // Unhandled commands (downloaded models, deep-link, updater) resolve
-        // empty so app boot doesn't throw — the workflows don't depend on them.
-        return Promise.resolve(undefined);
+        // A command with no case is a BUG in the spec or in the mock, not
+        // something to paper over.
+        //
+        // This used to be `return Promise.resolve(undefined)`. With 46 arms
+        // against 107 registered Tauri commands, that made the E2E layer
+        // structurally unable to fail on the thing it exists to check: a spec
+        // driving a renamed, removed, or mistyped command got `undefined`,
+        // the UI read it as a falsy-but-fine result, and the spec passed
+        // green. `compose_preview_proxy` was the live instance — no case, so
+        // `renderPreviewProxy` resolved true and the UI announced "Preview
+        // rendered" for a file that did not exist.
+        //
+        // Genuine no-ops (app-boot probes the workflows don't depend on) are
+        // listed explicitly instead, so adding one is a deliberate act.
+        if (BOOT_NOOPS.has(cmd)) return Promise.resolve(undefined);
+        console.warn("MOCK-UNHANDLED " + cmd);
+        return Promise.reject(
+          new Error(
+            `mock-backend: unhandled command "${cmd}". Add a case to ` +
+              `tests/e2e/fixtures/mock-backend.ts (or to BOOT_NOOPS if it is ` +
+              `a boot-time probe the specs do not depend on).`,
+          ),
+        );
     }
   }
 
-  const w = window as unknown as { __TAURI_INTERNALS__: unknown };
+  const w = window as unknown as {
+    __TAURI_INTERNALS__: unknown;
+    __mockProxyRenders: Array<{ output: string; items: number }>;
+  };
+  w.__mockProxyRenders = proxyRenders;
   w.__TAURI_INTERNALS__ = {
     invoke,
     transformCallback: (cb: unknown) => cb,

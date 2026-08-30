@@ -4,10 +4,31 @@
  *
  * The NLE timeline can stack several video tracks and lay many clips per track;
  * the preview is a single <video> element, so we must pick one clip per frame:
- * the top-most (highest track `index`) enabled video track that has a clip
- * under the playhead, then map the playhead back into that clip's source media
- * time (accounting for `speed`). Keeping this DOM/React-free — like
- * `mediaSync` — lets us unit-test the selection + arithmetic offline.
+ * the TOP of the export's visual stack under the playhead, then map the
+ * playhead back into that clip's source media time (accounting for `speed`).
+ * Keeping this DOM/React-free — like `mediaSync` — lets us unit-test the
+ * selection + arithmetic offline.
+ *
+ * ── The stack rule is the export's, not the timeline's ──────────────────────
+ * {@link visualItemsAt} is the single mirror of `compose.rs`:
+ *
+ *   | compose.rs (`build_filter_complex`)   | here (`visualItemsAt`)          |
+ *   | ------------------------------------- | ------------------------------- |
+ *   | `it.enabled`                          | `item.enabled`                  |
+ *   | `is_visual` — media kind is Video     | `media.kind === "video"`        |
+ *   | `track_visible` — `is_none_or(enabled)`| track missing OR `track.enabled`|
+ *   | `track_index` — `unwrap_or(i32::MAX)` | `stackIndex`, missing = MAX     |
+ *   | sort `(track_index, timeline_start)`  | same sort; last = top           |
+ *
+ * Note what `is_visual` does NOT check: the TRACK's kind. A video clip dropped
+ * on an Overlay track (the media bin offers "add overlay track", and the lane
+ * drop handler allows it) is composited by the export exactly like one on a
+ * Video track. This mirror used to filter on `track.kind === "video"`, so that
+ * clip was invisible in the preview and present in the render — the preview
+ * hiding something the export WILL draw, which is the half of the parity
+ * invariant that costs the user a re-export. Every consumer (the `<video>`
+ * path, the Pixi compositor, the "preview is approximate" badge) now derives
+ * from this one function, so the two rules cannot drift apart again.
  */
 
 import type { MediaItem } from "@/lib/bindings/MediaItem";
@@ -25,55 +46,84 @@ export function timelineEndMs(item: TimelineItem): number {
 }
 
 /**
- * Among enabled Video tracks, pick the TOP-most (highest `index`) track whose
- * item's [timeline_start_ms, timeline_end_ms) contains `playheadMs`, and
- * resolve that item's `source_media_id` to a MediaItem. Only items backed by
- * video-kind media count — export parity with `compose.rs::is_visual`, so an
- * audio clip parked on a video track can never hijack the preview. Returns
- * null when no such clip is under the playhead.
+ * A clip the export will composite at `playheadMs`, with the stacking index it
+ * will be composited at.
  */
-export function activeVideoItem(
+export interface VisualItem {
+  item: TimelineItem;
+  media: MediaItem;
+  /** The owning track's `index`; a missing track composites on top (i32::MAX). */
+  stackIndex: number;
+}
+
+/** Mirrors Rust's `i32::MAX` fallback for an item whose track cannot be found. */
+const MISSING_TRACK_INDEX = 2147483647;
+
+/**
+ * Every clip the export's visual stack contains at `playheadMs`, ordered
+ * BOTTOM → TOP — the same order `build_filter_complex` chains its `overlay`
+ * nodes in, so the last element is the frame the viewer actually sees.
+ *
+ * Pure; no DOM, no React, no Pixi.
+ */
+export function visualItemsAt(
   project: Project,
   playheadMs: number,
-): { item: TimelineItem; media: MediaItem } | null {
-  if (!project.timeline_items || project.timeline_items.length === 0) {
-    return null;
-  }
+): VisualItem[] {
+  if (!project.timeline_items || project.timeline_items.length === 0) return [];
 
-  // Video tracks that are enabled, indexed for a quick top-most lookup.
-  const videoTrackIndex = new Map<string, number>();
-  for (const track of project.tracks) {
-    if (track.kind === "video" && track.enabled) {
-      videoTrackIndex.set(track.id, track.index);
-    }
-  }
-  if (videoTrackIndex.size === 0) return null;
+  // Track lookup once: `tracks` is small but this runs per frame.
+  const tracks = new Map(project.tracks.map((tr) => [tr.id, tr]));
 
-  let best: TimelineItem | null = null;
-  let bestMedia: MediaItem | null = null;
-  let bestIndex = -Infinity;
+  const found: VisualItem[] = [];
   for (const item of project.timeline_items) {
     if (!item.enabled) continue;
-    const trackIdx = videoTrackIndex.get(item.track_id);
-    if (trackIdx === undefined) continue; // not on an enabled video track
     if (
       playheadMs < item.timeline_start_ms ||
       playheadMs >= timelineEndMs(item)
     ) {
       continue; // playhead not within this clip
     }
-    if (trackIdx <= bestIndex) continue;
-    // Resolve the media as part of selection: a non-video (or unresolvable)
-    // clip is not visual — skip it so a lower video clip can win, exactly
-    // like the export's visual stack.
+    // `track_visible`: an item whose track cannot be resolved is treated as
+    // visible, exactly like Rust's `is_none_or`.
+    const track = tracks.get(item.track_id);
+    if (track && !track.enabled) continue;
+    // `is_visual`: the MEDIA must be video-kind. The track's kind is not
+    // consulted — the export doesn't consult it either.
     const media = project.media.find((m) => m.id === item.source_media_id);
     if (!media || media.kind !== "video") continue;
-    best = item;
-    bestMedia = media;
-    bestIndex = trackIdx;
+    found.push({
+      item,
+      media,
+      stackIndex: track ? track.index : MISSING_TRACK_INDEX,
+    });
   }
-  if (!best || !bestMedia) return null;
-  return { item: best, media: bestMedia };
+
+  // `video_items.sort_by(track_index.then(timeline_start_ms))` — a stable sort
+  // on both sides, so ties keep timeline order in the same way.
+  found.sort(
+    (a, b) =>
+      a.stackIndex - b.stackIndex ||
+      a.item.timeline_start_ms - b.item.timeline_start_ms,
+  );
+  return found;
+}
+
+/**
+ * The clip on TOP of the export's visual stack at `playheadMs`, or null when
+ * the export would draw bare canvas there.
+ *
+ * Thin wrapper over {@link visualItemsAt} so the single <video> preview and
+ * the compositor's layer choice cannot disagree with the export.
+ */
+export function activeVideoItem(
+  project: Project,
+  playheadMs: number,
+): { item: TimelineItem; media: MediaItem } | null {
+  const stack = visualItemsAt(project, playheadMs);
+  if (stack.length === 0) return null;
+  const top = stack[stack.length - 1];
+  return { item: top.item, media: top.media };
 }
 
 /**

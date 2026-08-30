@@ -8,8 +8,13 @@
  *
  * Flow: pick a model → see the scope + estimated cost (pure, no spend) →
  * run → review the per-word changes (original → polished) and any rejected
- * captions. Applied changes flow back through onProjectChange so the
- * editor (dots on polished words), undo, and export all see them.
+ * captions.
+ *
+ * `onProjectChange` is `useProjectStore.commit` (App wires every panel to it):
+ * the polished project enters the SAME undo stack as caption ops and timeline
+ * drags, so ⌘Z reverts the whole pass. That was not true before the R1 trust
+ * round — panels landed via `setProject`, which touched neither stack, and
+ * this comment claimed an undo that did not exist.
  */
 
 import { useEffect, useState } from "react";
