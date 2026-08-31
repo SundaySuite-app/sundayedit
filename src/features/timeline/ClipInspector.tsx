@@ -199,6 +199,25 @@ export function ClipInspector({
     );
   }
 
+  // ── Text overlay (R5-C) ───────────────────────────────────────────────────
+  // A `text` item's content. Buffered like the trim fields so typing survives
+  // re-renders; committed on blur. Position/scale are the SAME Transform
+  // section every other clip uses — the export positions the ASS `\pos()` from
+  // exactly those fractions (`export::text_override_tags`), so there is no
+  // second geometry vocabulary to keep in sync.
+  const isTextClip = item.kind === "text";
+  const [textBuf, setTextBuf] = useState(item.text?.text ?? "");
+  useEffect(
+    () => setTextBuf(item.text?.text ?? ""),
+    [item.id, item.text?.text],
+  );
+  function commitText(raw: string) {
+    if (raw === (item.text?.text ?? "")) return;
+    commit((p) =>
+      ipc.timeline.setItemText(p, item.id, raw, item.text?.style_id ?? null),
+    );
+  }
+
   function commit(op: (p: Project) => Promise<Project>) {
     void run(op).catch(() => {
       // Clamped / rejected by the backend — leave the project untouched.
@@ -286,6 +305,28 @@ export function ClipInspector({
       </div>
 
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
+        {/* Text overlay (R5-C) */}
+        {isTextClip && (
+          <Section title={t("inspectorTextHeader")}>
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] text-[var(--color-fg-subtle)]">
+                {t("inspectorTextLabel")}
+              </span>
+              <textarea
+                data-testid="inspector-text"
+                rows={3}
+                value={textBuf}
+                onChange={(e) => setTextBuf(e.target.value)}
+                onBlur={() => commitText(textBuf)}
+                className="resize-y rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-2 py-1.5 text-[var(--text-ui-sm)]"
+              />
+            </label>
+            <p className="text-[10px] text-[var(--color-fg-subtle)]">
+              {t("inspectorTextAppliesAtExport")}
+            </p>
+          </Section>
+        )}
+
         {/* Trim */}
         <Section title={t("inspectorTrimHeader")}>
           <div className="grid grid-cols-2 gap-2">
@@ -366,41 +407,48 @@ export function ClipInspector({
           </Section>
         )}
 
-        {/* Transition */}
-        <Section title={t("inspectorTransitionHeader")}>
-          <label className="flex flex-col gap-1">
-            <span className="text-[10px] text-[var(--color-fg-subtle)]">
-              {t("inspectorTransitionType")}
-            </span>
-            <select
-              value={transitionKind}
-              onChange={(e) => commitTransitionKind(e.target.value)}
-              className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-2 py-1.5 text-[var(--text-ui-sm)]"
-            >
-              {TRANSITION_KINDS.map((k) => (
-                <option key={k || "none"} value={k}>
-                  {k === ""
-                    ? t("inspectorTransitionNone")
-                    : t(TRANSITION_LABEL_KEYS[k])}
-                </option>
-              ))}
-              {/* A kind we don't offer (hand-edited project file) still shows
+        {/* Transition — never on a text overlay: the leading-edge transition
+            is an `xfade` on the VIDEO fold (`compose::visual_stack`), and a
+            text item is not in that stack. Offering the picker would store a
+            transition the render ignores — the same "the UI promises what the
+            export can't deliver" failure the curated effect registry (ADR-013)
+            exists to prevent, and the one R5-C just removed for text itself. */}
+        {!isTextClip && (
+          <Section title={t("inspectorTransitionHeader")}>
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] text-[var(--color-fg-subtle)]">
+                {t("inspectorTransitionType")}
+              </span>
+              <select
+                value={transitionKind}
+                onChange={(e) => commitTransitionKind(e.target.value)}
+                className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-surface)] px-2 py-1.5 text-[var(--text-ui-sm)]"
+              >
+                {TRANSITION_KINDS.map((k) => (
+                  <option key={k || "none"} value={k}>
+                    {k === ""
+                      ? t("inspectorTransitionNone")
+                      : t(TRANSITION_LABEL_KEYS[k])}
+                  </option>
+                ))}
+                {/* A kind we don't offer (hand-edited project file) still shows
                   as itself instead of silently snapping to the first option. */}
-              {transitionKind !== "" &&
-                !(TRANSITION_KINDS as readonly string[]).includes(
-                  transitionKind,
-                ) && <option value={transitionKind}>{transitionKind}</option>}
-            </select>
-          </label>
-          {transition && (
-            <NumberField
-              label={t("inspectorDurationMs")}
-              value={durBuf}
-              onChange={setDurBuf}
-              onCommit={() => commitTransitionDuration(durBuf)}
-            />
-          )}
-        </Section>
+                {transitionKind !== "" &&
+                  !(TRANSITION_KINDS as readonly string[]).includes(
+                    transitionKind,
+                  ) && <option value={transitionKind}>{transitionKind}</option>}
+              </select>
+            </label>
+            {transition && (
+              <NumberField
+                label={t("inspectorDurationMs")}
+                value={durBuf}
+                onChange={setDurBuf}
+                onCommit={() => commitTransitionDuration(durBuf)}
+              />
+            )}
+          </Section>
+        )}
 
         {/* Transform (overlay / PiP) */}
         <Section title={t("inspectorTransformHeader")}>

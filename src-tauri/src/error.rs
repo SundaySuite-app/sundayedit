@@ -39,6 +39,17 @@ pub enum AppError {
     #[error("video missing at {0}")]
     VideoMissing(String),
 
+    /// A `.sundayedit` file's stored `schema_version` is higher than this
+    /// build's `SCHEMA_VERSION` — it was written by a newer version of the
+    /// app. Refused outright rather than opened: this build doesn't know
+    /// what the newer schema added, so loading it and saving back would
+    /// silently drop whatever that was (see `services::project_file`).
+    #[error(
+        "project file schema {file_version} is newer than this build supports ({supported}) — \
+         it was made by a newer version of SundayEdit"
+    )]
+    SchemaTooNew { file_version: i64, supported: i64 },
+
     #[error("internal: {0}")]
     Internal(String),
 }
@@ -55,6 +66,7 @@ impl AppError {
             AppError::Json(_) => "json",
             AppError::Network(_) => "network",
             AppError::VideoMissing(_) => "video_missing",
+            AppError::SchemaTooNew { .. } => "schema_too_new",
             AppError::Internal(_) => "internal",
         }
     }

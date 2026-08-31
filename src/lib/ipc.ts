@@ -13,6 +13,7 @@ import type {
   AppError,
   AsrOptions,
   BurnInOptions,
+  CachePruneReport,
   Caption,
   ClaudeModel,
   Clip,
@@ -331,6 +332,17 @@ export const timeline = {
    */
   setTrackVolume: (project: Project, trackId: string, volumeDb: number) =>
     call<Project>("op_set_track_volume", { project, trackId, volumeDb }),
+  /**
+   * Replace a text overlay's text (and the style id it renders with — `null`
+   * means the project's default style). Rejects a non-text clip server-side:
+   * only a `text` item is rendered as an ASS `Dialogue` line by the export.
+   */
+  setItemText: (
+    project: Project,
+    itemId: string,
+    text: string,
+    styleId: string | null = null,
+  ) => call<Project>("op_set_item_text", { project, itemId, text, styleId }),
   /** Add a standalone text overlay clip (no source media). */
   addTextItem: (
     project: Project,
@@ -388,6 +400,12 @@ export const media = {
       cols,
       outPath,
     }),
+  /** Sweep the filmstrip + thumbnail JPEG caches under `cacheDir` down to
+   *  their documented budgets (`media_cache.rs`) — neither disk cache is
+   *  pruned by the extraction commands themselves. Fired once per launch;
+   *  safe to call any time, a no-op when already under budget. */
+  pruneCache: (cacheDir: string) =>
+    call<CachePruneReport>("prune_media_cache", { cacheDir }),
 };
 
 // ── Export ──────────────────────────────────────────────────────────────────

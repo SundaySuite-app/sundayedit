@@ -9,6 +9,15 @@
  * the same grab). Everything degrades to `null` — audio-only media, browser/e2e
  * mode (`isTauri()` false), or a failed ffmpeg run — and the callers keep
  * today's text/icon-only look.
+ *
+ * This module also fires the ONE-TIME startup sweep of the filmstrip +
+ * thumbnail disk caches (`prune_media_cache`, `media_cache.rs`) — neither
+ * cache is ever pruned by the extraction commands themselves, so a user
+ * scrubbing a long 4K timeline across every zoom tier would otherwise grow
+ * them without bound across sessions. `thumbnailSrc` is the first thing any
+ * media view calls, so kicking it off here (rather than a dedicated app-boot
+ * effect) covers every entry point for free. Fire-and-forget: a failed sweep
+ * just means the caches grow a little more before the next launch retries it.
  */
 
 import { useEffect, useState } from "react";
@@ -22,6 +31,27 @@ import { ipc } from "@/lib/ipc";
 // null) so broken media doesn't re-spawn ffmpeg on every render.
 const thumbnails = new Map<string, Promise<string | null>>();
 
+// At most one prune per session — subsequent calls are no-ops.
+let cachePruneKicked = false;
+
+/** Fire the startup disk-cache sweep once per session. No-op off-Tauri. */
+export function kickMediaCachePrune(): void {
+  if (cachePruneKicked || !isTauri()) return;
+  cachePruneKicked = true;
+  void (async () => {
+    try {
+      await ipc.media.pruneCache(await appCacheDir());
+    } catch {
+      // Best-effort housekeeping — a failed sweep isn't worth surfacing.
+    }
+  })();
+}
+
+/** Test-only: allow a fresh kick in the next test. */
+export function __resetCachePruneForTests() {
+  cachePruneKicked = false;
+}
+
 /** Frame time for the grab: 10% in (capped at 5 s) dodges black lead-ins. */
 function thumbTimeMs(media: MediaItem): number {
   return Math.min(Math.round(media.duration_ms * 0.1), 5000);
@@ -33,6 +63,7 @@ function thumbTimeMs(media: MediaItem): number {
  */
 export function thumbnailSrc(media: MediaItem): Promise<string | null> {
   if (!isTauri() || media.kind === "audio_only") return Promise.resolve(null);
+  kickMediaCachePrune();
   const cached = thumbnails.get(media.id);
   if (cached) return cached;
   const grab = (async () => {

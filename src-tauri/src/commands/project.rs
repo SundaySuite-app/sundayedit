@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{AppError, AppResult};
 use crate::model::{ExportConfig, Project, ProjectMeta, Style};
+use crate::services::media_cache::CachePruneReport;
 use crate::services::video::VideoMetadata;
 use crate::services::waveform::WaveformData;
-use crate::services::{project_file, video, waveform};
+use crate::services::{media_cache, project_file, video, waveform};
 
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -127,9 +128,11 @@ pub fn waveform_compute(video_path: String, cache_dir: String) -> AppResult<Wave
     if !wav.exists() {
         waveform::extract_audio_wav(input, &wav)?;
     }
-    let (samples, sample_rate) = waveform::read_wav_samples(&wav)?;
-    // 800 base buckets ≈ a typical editor width; ×4 per finer level, 5 levels.
-    Ok(waveform::compute_levels(&samples, sample_rate, 800, 4, 5))
+    // Streams the WAV rather than loading it whole — a 2h 16kHz mono
+    // recording would otherwise sit as a ~461MB `Vec<f32>` in memory just to
+    // compute a few thousand min/max peaks. 800 base buckets ≈ a typical
+    // editor width; ×4 per finer level, 5 levels.
+    waveform::stream_compute_levels(&wav, 800, 4, 5)
 }
 
 /// Extract the project's audio to a 16 kHz mono WAV and return its path.
@@ -147,6 +150,18 @@ pub fn extract_audio(video_path: String, cache_dir: String) -> AppResult<String>
         waveform::extract_audio_wav(input, &wav)?;
     }
     Ok(wav.to_string_lossy().to_string())
+}
+
+/// Sweep the filmstrip + thumbnail JPEG caches under `cache_dir` (the app
+/// cache dir) down to their documented budgets (`media_cache.rs`). Neither
+/// disk cache is ever pruned by the extraction commands themselves — a user
+/// scrubbing a long 4K timeline across every zoom tier would otherwise grow
+/// them without bound across sessions. The frontend fires this once per
+/// launch (`kickCachePrune`, `thumbnails.ts`); safe to call any time, and a
+/// no-op when already under budget.
+#[tauri::command]
+pub fn prune_media_cache(cache_dir: String) -> AppResult<CachePruneReport> {
+    media_cache::prune_media_caches(Path::new(&cache_dir))
 }
 
 /// Which of the project's pooled media files are still on disk.

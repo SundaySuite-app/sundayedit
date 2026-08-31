@@ -56,6 +56,29 @@ async fn ensure_schema(pool: &SqlitePool) -> AppResult<()> {
     .execute(pool)
     .await?;
 
+    // Refuse a file written by a NEWER version of SundayEdit before touching
+    // anything else. This build's migrations below only know how to bring a
+    // file up to `SCHEMA_VERSION` — if the stored value is already higher,
+    // running them (or reading the tables at all) would silently drop
+    // whatever the newer schema added the moment this build next saves the
+    // file. Bailing out here, before any ALTER/CREATE below, is what makes
+    // that impossible rather than merely unlikely.
+    if let Some(row) = sqlx::query("SELECT value FROM meta WHERE key = 'schema_version'")
+        .fetch_optional(pool)
+        .await?
+    {
+        let stored: i64 = row
+            .get::<String, _>("value")
+            .parse()
+            .unwrap_or(SCHEMA_VERSION);
+        if stored > SCHEMA_VERSION {
+            return Err(AppError::SchemaTooNew {
+                file_version: stored,
+                supported: SCHEMA_VERSION,
+            });
+        }
+    }
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS project (
@@ -218,7 +241,13 @@ async fn ensure_schema(pool: &SqlitePool) -> AppResult<()> {
         let _ = sqlx::query(stmt).execute(pool).await;
     }
 
-    sqlx::query("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?1)")
+    // OR REPLACE, not OR IGNORE: a v1 file migrated forward by an earlier
+    // build used to keep `schema_version = "1"` stamped on it FOREVER
+    // (nothing ever wrote the key again after the first `INSERT OR IGNORE`),
+    // which is exactly the stale value the future-version guard above needs
+    // to be trustworthy. Every successful open now re-stamps the file at
+    // whatever `SCHEMA_VERSION` this build actually just migrated it to.
+    sqlx::query("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)")
         .bind(SCHEMA_VERSION.to_string())
         .execute(pool)
         .await?;
@@ -1171,5 +1200,111 @@ mod tests {
                 .map(|it| (&it.id, it.timeline_start_ms, it.out_ms))
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// Read the `schema_version` meta row back out of a `.sundayedit` file —
+    /// for tests that need to check what actually got stamped, not just that
+    /// `load`/`save` returned `Ok`.
+    async fn read_schema_version(path: &Path) -> Option<String> {
+        let url = format!("sqlite:{}", path.to_string_lossy());
+        let opts = SqliteConnectOptions::from_str(&url).unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        let row = sqlx::query("SELECT value FROM meta WHERE key = 'schema_version'")
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        row.map(|r| r.get::<String, _>("value"))
+    }
+
+    /// Overwrite a file's `schema_version` meta row directly via raw SQL —
+    /// bypassing `ensure_schema` entirely — to simulate a file an OLDER (or
+    /// hypothetically newer) build stamped and never touched again.
+    async fn stamp_schema_version(path: &Path, version: i64) {
+        let url = format!("sqlite:{}", path.to_string_lossy());
+        let opts = SqliteConnectOptions::from_str(&url).unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::query("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)")
+            .bind(version.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+    }
+
+    /// A file stamped at an OLD schema_version (the pre-fix `INSERT OR
+    /// IGNORE` left a v1-migrated file stuck at "1" forever, since nothing
+    /// ever wrote the key again) must come out of `load` re-stamped at the
+    /// CURRENT `SCHEMA_VERSION` — proving the fix actually refreshes the
+    /// value on every successful open rather than only setting it once.
+    #[tokio::test]
+    async fn forward_migrated_file_ends_up_stamped_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale_version.sundayedit");
+
+        // A v<=3-shaped file (no tracks/media persisted) is the realistic
+        // case: an old build wrote it, stamped schema_version once, and (pre-
+        // fix) never touched that value again even as later opens migrated
+        // the tables forward.
+        let mut p = sample_project();
+        p.media = vec![];
+        p.tracks = vec![];
+        p.timeline_items = vec![];
+        for c in p.captions.iter_mut() {
+            c.track_id = None;
+        }
+        save(&p, &path).await.unwrap();
+        strip_v4_tracks_marker(&path).await;
+        stamp_schema_version(&path, 1).await;
+
+        load(&path).await.unwrap();
+
+        assert_eq!(
+            read_schema_version(&path).await.as_deref(),
+            Some(SCHEMA_VERSION.to_string().as_str()),
+            "a forward-migrated file must be re-stamped at the CURRENT \
+             schema_version, not left at the stale value it was opened with"
+        );
+    }
+
+    /// A file whose stored `schema_version` is HIGHER than this build's
+    /// `SCHEMA_VERSION` was written by a newer version of SundayEdit. This
+    /// build must refuse to open it outright, rather than reading a partial
+    /// row set and silently dropping whatever the newer schema added the
+    /// next time something saves the file.
+    #[tokio::test]
+    async fn future_schema_version_is_refused_not_silently_downgraded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("from_the_future.sundayedit");
+        save(&sample_project(), &path).await.unwrap();
+        stamp_schema_version(&path, SCHEMA_VERSION + 1).await;
+
+        let err = load(&path).await.unwrap_err();
+        assert_eq!(err.code(), "schema_too_new");
+
+        // And the attempt must not have clobbered the file's own version
+        // number down to what this (older) build understands — a genuinely
+        // newer build re-opening it later must still see its own version.
+        assert_eq!(
+            read_schema_version(&path).await.as_deref(),
+            Some((SCHEMA_VERSION + 1).to_string().as_str()),
+            "a refused open must not rewrite the file's schema_version"
+        );
+
+        // `save` goes through the same `ensure_schema` guard — it must
+        // refuse too, not "successfully" overwrite a newer file with this
+        // build's narrower column set.
+        let mut p = sample_project();
+        p.name = "should never be written".into();
+        let save_err = save(&p, &path).await.unwrap_err();
+        assert_eq!(save_err.code(), "schema_too_new");
     }
 }

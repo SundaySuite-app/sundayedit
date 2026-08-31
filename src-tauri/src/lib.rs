@@ -98,6 +98,7 @@ pub fn run() {
             commands::timeline_ops::op_set_track_volume,
             commands::timeline_ops::op_remove_effect,
             commands::timeline_ops::op_add_text_item,
+            commands::timeline_ops::op_set_item_text,
             // AI glossary suggestions (Phase 3.4 mode 3)
             commands::glossary::glossary_suggest_estimate,
             commands::glossary::glossary_suggest,
@@ -121,6 +122,7 @@ pub fn run() {
             commands::project::project_open,
             commands::project::waveform_compute,
             commands::project::extract_audio,
+            commands::project::prune_media_cache,
             commands::project::project_relink,
             commands::project::check_media_paths,
             commands::project::accepted_media_extensions,

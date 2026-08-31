@@ -911,3 +911,103 @@ describe("ClipInspector — effects section", () => {
     ).toEqual([]);
   });
 });
+
+describe("ClipInspector — text overlay (R5-C)", () => {
+  /** The shape `op_add_text_item` builds: kind `text`, no source media. */
+  const TEXT_ITEM: TimelineItem = {
+    ...ITEM,
+    id: "tx1",
+    kind: "text",
+    source_media_id: null,
+    in_ms: 0,
+    out_ms: 3_000,
+    text: { text: "Velkommen", style_id: null },
+  };
+
+  const textArea = () =>
+    screen.getByTestId("inspector-text") as HTMLTextAreaElement;
+
+  beforeEach(() => {
+    useProjectStore.setState({
+      project: { ...SAMPLE_PROJECT, timeline_items: [TEXT_ITEM] },
+    });
+  });
+
+  it("shows the text section only for a text clip", () => {
+    renderInspector(TEXT_ITEM);
+    expect(textArea().value).toBe("Velkommen");
+    cleanup();
+
+    useProjectStore.setState({ project: SAMPLE_PROJECT });
+    renderInspector(ITEM);
+    expect(screen.queryByTestId("inspector-text")).toBeNull();
+  });
+
+  it("commits an edited text through op_set_item_text on blur, once", async () => {
+    invoke.mockResolvedValueOnce({ ...SAMPLE_PROJECT, updated_at: 1 });
+    renderInspector(TEXT_ITEM);
+
+    fireEvent.change(textArea(), { target: { value: "Guds fred" } });
+    await act(async () => {
+      fireEvent.blur(textArea());
+    });
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith(
+      "op_set_item_text",
+      expect.objectContaining({
+        itemId: "tx1",
+        text: "Guds fred",
+        styleId: null,
+      }),
+    );
+  });
+
+  it("does not commit when the text is unchanged", async () => {
+    renderInspector(TEXT_ITEM);
+    await act(async () => {
+      fireEvent.blur(textArea());
+    });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("keeps the clip's own style id when only the text changes", async () => {
+    const styled: TimelineItem = {
+      ...TEXT_ITEM,
+      text: { text: "Velkommen", style_id: "preset:tiktok_bold" },
+    };
+    useProjectStore.setState({
+      project: { ...SAMPLE_PROJECT, timeline_items: [styled] },
+    });
+    invoke.mockResolvedValueOnce({ ...SAMPLE_PROJECT, updated_at: 1 });
+    renderInspector(styled);
+
+    fireEvent.change(textArea(), { target: { value: "Guds fred" } });
+    await act(async () => {
+      fireEvent.blur(textArea());
+    });
+    expect(invoke).toHaveBeenCalledWith(
+      "op_set_item_text",
+      expect.objectContaining({ styleId: "preset:tiktok_bold" }),
+    );
+  });
+
+  /**
+   * The Transform sliders ARE the overlay's position — `export.rs` derives the
+   * ASS `\pos()` from exactly these fractions. A text clip must therefore keep
+   * the Transform section (it is the only way to move the overlay), while the
+   * audio and effect sections stay hidden: neither reaches a text item in the
+   * render.
+   */
+  it("offers position, and nothing the export cannot apply to text", () => {
+    renderInspector(TEXT_ITEM);
+    // The label's accessible name includes the live readout ("X0.00").
+    expect(screen.getByLabelText(/^X/)).toBeTruthy();
+    expect(screen.getByLabelText(/^Y/)).toBeTruthy();
+    expect(screen.queryByTestId("inspector-gain")).toBeNull();
+    expect(screen.queryByTestId("effect-grayscale")).toBeNull();
+    // A leading-edge transition is an `xfade` on the VIDEO fold; a text item
+    // is not in that stack, so the picker would store something inert.
+    expect(screen.queryByText("Transition (lead-in)")).toBeNull();
+  });
+});

@@ -7,7 +7,9 @@
 //! Format priority:
 //!   - SRT — universal, simple, no styling
 //!   - VTT — web standard, slightly richer
-//!   - ASS — full styling (used by Aegisub, libass; what Phase 6.2 burn-in uses)
+//!   - ASS — full styling (used by Aegisub, libass; what Phase 6.2 burn-in
+//!     uses, and — since R5-C — the one layer that also renders `Text`
+//!     timeline items)
 //!   - TXT — plain transcript, no timestamps
 //!
 //! All formats validated against their respective parsers' real-world
@@ -17,7 +19,9 @@
 use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
-use crate::model::{Caption, Clip, Project, Speaker, Style};
+use crate::model::{
+    Caption, Clip, Project, Speaker, Style, TimelineItem, TimelineItemKind, Transform,
+};
 use crate::services::karaoke::{karaoke_words, uncertain_flags, KaraokeOptions};
 
 // ── SRT ─────────────────────────────────────────────────────────────────────
@@ -176,8 +180,18 @@ fn vtt_escape(s: &str) -> String {
 ///
 /// Full styling preserved. This is the format that `libass` consumes for
 /// burn-in (Phase 6.2). The default `Style` from the project becomes
-/// `Style: Default` in the output; per-caption style overrides become
-/// additional named styles.
+/// `Style: Default` in the output; any style id a caption or a text overlay
+/// REFERENCES becomes an additional named block (see [`named_styles`]).
+///
+/// Two kinds of event, in this order:
+///   - one `Dialogue:` on layer 0 per caption (the flagship path, karaoke and
+///     all);
+///   - one `Dialogue:` on layer 1 per rendered `TimelineItemKind::Text`
+///     overlay (R5-C), positioned from its `Transform` — see
+///     [`ass_text_items`] and [`text_override_tags`]. This is also why the
+///     sidecar EXPORT command now hands the user a file containing their
+///     overlays: the .ass is the project's burn-in truth, not a
+///     captions-only artefact.
 ///
 /// Karaoke (E4a) is read from `project.export_config.karaoke`, so EVERY caller
 /// — the sidecar export command, `burnin::render`, and all three `compose`
@@ -224,7 +238,34 @@ pub fn write_ass_with(project: &Project, karaoke: &KaraokeOptions) -> String {
         &project.default_style,
         karaoke_secondary(karaoke).as_deref(),
     ));
+    // One named block per style id a caption or a text overlay actually
+    // REFERENCES (R5-C; closes the standing "Phase 5.2 wires per-caption style
+    // names" note). Keyed by id in a BTreeMap, so the emitted order is a
+    // function of the project alone — a writer whose output moved with hash
+    // iteration order could never be pinned byte-for-byte.
+    let named = named_styles(project);
+    for (name, style) in named.values() {
+        // The karaoke `SecondaryColour` (the not-yet-sung colour) belongs on
+        // EVERY block a caption can be rendered with, not just `Default` — a
+        // caption that picked a named style would otherwise sweep against the
+        // inert pre-E4a placeholder.
+        out.push_str(&format_ass_style_with(
+            name,
+            style,
+            karaoke_secondary(karaoke).as_deref(),
+        ));
+    }
     out.push('\n');
+
+    // The Style field of one Dialogue line: the referenced block's name, or
+    // `Default` for no reference / an id nothing resolves (a hand-edited file).
+    // Naming a block libass does not carry would make it fall back silently;
+    // resolving here means the writer only ever emits names it also defined.
+    let style_field = |id: Option<&str>| -> &str {
+        id.and_then(|i| named.get(i))
+            .map(|(n, _)| n.as_str())
+            .unwrap_or("Default")
+    };
 
     // ── [Events] ──
     out.push_str("[Events]\n");
@@ -233,7 +274,6 @@ pub fn write_ass_with(project: &Project, karaoke: &KaraokeOptions) -> String {
     );
     let speakers_map = speakers_by_id(&project.speakers);
     for c in &project.captions {
-        let style_name = "Default"; // Phase 5.2 wires per-caption style names
         let name_field = c
             .speaker_id
             .as_deref()
@@ -243,14 +283,187 @@ pub fn write_ass_with(project: &Project, karaoke: &KaraokeOptions) -> String {
             "Dialogue: 0,{},{},{},{},0,0,0,,{}\n",
             fmt_ass_time(c.start_ms),
             fmt_ass_time(c.end_ms),
-            style_name,
+            style_field(c.style_id.as_deref()),
             ass_field(name_field), // Name is comma-delimited — must not contain a raw comma
             // Text is the trailing field — commas stay literal.
             ass_dialogue_text(c, karaoke, &project.default_style),
         ));
     }
 
+    // ── Text timeline items (R5-C) ──────────────────────────────────────────
+    // A `TimelineItemKind::Text` overlay is rendered by the SAME libass layer
+    // the captions ride on — no `drawtext` node, no second font/escaping
+    // regime, and (because `compose.rs` applies `ass=` LAST on both the
+    // composite and the burn-in path) export/preview parity by construction.
+    //
+    // Layer 1, so an overlay sits ABOVE the caption band the way
+    // `write_clip_ass` already stacks its `Title` line. Times come straight
+    // from the timeline (`timeline_end_ms` honours `speed`, so a text item
+    // ends exactly where its lane does).
+    for it in ass_text_items(project) {
+        let Some(spec) = it.text.as_ref() else {
+            continue; // unreachable: `ass_text_items` only yields items with a spec
+        };
+        out.push_str(&format!(
+            "Dialogue: 1,{},{},{},,0,0,0,,{}{}\n",
+            fmt_ass_time(it.timeline_start_ms),
+            fmt_ass_time(it.timeline_end_ms()),
+            style_field(spec.style_id.as_deref()),
+            text_override_tags(&it.transform, project.video_width, project.video_height),
+            ass_escape(&spec.text),
+        ));
+    }
+
     out
+}
+
+// ── Text timeline items → ASS Dialogue (R5-C) ───────────────────────────────
+
+/// The `Text` timeline items [`write_ass`] renders, in project order.
+///
+/// The SINGLE definition of "this overlay reaches the render", shared with
+/// [`ass_has_events`] and (through it) with `compose`'s decision whether to
+/// hang an `ass=` node on the graph at all. Three conditions, each mirroring
+/// something the rest of the pipeline already believes:
+///
+///   - `enabled` + a visible track — the same pair `compose::visual_stack`
+///     applies to picture clips, so an overlay hidden in the preview is absent
+///     from the render too;
+///   - a `TextSpec` with non-empty text — an empty overlay has no ink to lose,
+///     and emitting a Dialogue for it would make `ass_has_events` claim the
+///     sidecar draws something it does not.
+pub fn ass_text_items(project: &Project) -> Vec<&TimelineItem> {
+    project
+        .timeline_items
+        .iter()
+        .filter(|it| {
+            it.kind == TimelineItemKind::Text
+                && it.enabled
+                && crate::services::compose::track_visible(project, it)
+                && it
+                    .text
+                    .as_ref()
+                    .is_some_and(|spec| !spec.text.trim().is_empty())
+        })
+        .collect()
+}
+
+/// Does [`write_ass`] emit ANY `Dialogue:` line for this project?
+///
+/// `run_compose` / `run_compose_proxy` used to ask `project.captions.is_empty()`
+/// before attaching the `ass=` node — a private re-derivation of "the sidecar
+/// is worth applying" that went stale the moment the writer learned to emit
+/// text overlays (the sidecar would have carried the text and the graph would
+/// have thrown it away). Asking the WRITER's own module keeps the two sides
+/// from drifting; `ass_predicate_agrees_with_the_writer` pins that they agree.
+pub fn ass_has_events(project: &Project) -> bool {
+    !project.captions.is_empty() || !ass_text_items(project).is_empty()
+}
+
+/// The inline override block that positions ONE text overlay.
+///
+/// `Transform` is fractions of the OUTPUT FRAME, and the ASS header writes
+/// `PlayResX/Y` from the project dimensions, so `round(PlayRes * fraction)` is
+/// the exact arithmetic `build_filter_complex` uses for a picture clip
+/// (`overlay=<W*x>:<H*y>`) and `compositor/scene.ts` mirrors in the preview.
+/// libass scales PlayRes space to whatever the output resolution turns out to
+/// be, so the placement is resolution-independent for free.
+///
+/// `\an7` is not decoration: it pins the text's TOP-LEFT to `\pos`, which is
+/// what `overlay`'s x/y means. Without it the anchor would be the style's own
+/// Alignment (bottom-centre by default) and the same fractions would land the
+/// text somewhere else entirely.
+///
+/// `Transform::crop` is deliberately not mapped: there is no source frame to
+/// cut out of generated text. Everything else the transform can say IS mapped,
+/// so a value stored by the inspector cannot be silently ignored.
+fn text_override_tags(t: &Transform, play_res_w: i32, play_res_h: i32) -> String {
+    let x = (play_res_w as f32 * t.x).round() as i64;
+    let y = (play_res_h as f32 * t.y).round() as i64;
+    let mut tags = format!("{{\\an7\\pos({x},{y})");
+    // Identity values emit nothing — an untouched overlay gets the shortest
+    // block, and the golden-file tests stay readable.
+    if (t.scale - 1.0).abs() > f32::EPSILON && t.scale > 0.0 {
+        let pct = fmt_ass_num(t.scale * 100.0);
+        tags.push_str(&format!("\\fscx{pct}\\fscy{pct}"));
+    }
+    if t.rotation_deg.abs() > f32::EPSILON {
+        // ASS `\frz` is COUNTER-clockwise-positive; the export's `rotate=` (and
+        // the Pixi preview's `rotationRad`) are clockwise-positive. Negate, or
+        // a text overlay would spin the opposite way from a picture clip
+        // carrying the same number.
+        tags.push_str(&format!("\\frz{}", fmt_ass_num(-t.rotation_deg)));
+    }
+    if t.opacity < 1.0 {
+        // `\alpha` is TRANSPARENCY: 00 = opaque, FF = invisible.
+        let a = ((1.0 - t.opacity.clamp(0.0, 1.0)) * 255.0).round() as u8;
+        tags.push_str(&format!("\\alpha&H{a:02X}&"));
+    }
+    tags.push('}');
+    tags
+}
+
+/// Format a number for an ASS override tag: up to 3 decimals, trailing zeros
+/// trimmed. `40.0` → `40`, `37.5` → `37.5` — f32 arithmetic otherwise leaks
+/// `40.000004` into the file.
+fn fmt_ass_num(v: f32) -> String {
+    let s = format!("{v:.3}");
+    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+    match trimmed {
+        "" | "-" | "-0" => "0".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Every style id a caption or a rendered text overlay references AND that
+/// resolves to a real [`Style`], as `id → (ASS style name, style)`.
+///
+/// Resolution sources, in order: the project's own `default_style` (which is
+/// already emitted as `Default`, so it yields no extra block) and the bundled
+/// `style_presets::catalog()`. An id from neither resolves to nothing and the
+/// Dialogue falls back to `Default` — the file never names a style it lacks.
+fn named_styles(project: &Project) -> std::collections::BTreeMap<String, (String, Style)> {
+    let mut ids: std::collections::BTreeSet<&str> = project
+        .captions
+        .iter()
+        .filter_map(|c| c.style_id.as_deref())
+        .collect();
+    for it in ass_text_items(project) {
+        if let Some(id) = it.text.as_ref().and_then(|s| s.style_id.as_deref()) {
+            ids.insert(id);
+        }
+    }
+    if ids.is_empty() {
+        return Default::default();
+    }
+    let catalog = crate::services::style_presets::catalog();
+    ids.into_iter()
+        .filter(|id| *id != project.default_style.id)
+        .filter_map(|id| {
+            catalog
+                .iter()
+                .find(|p| p.style.id == id)
+                .map(|p| (id.to_string(), (ass_style_name(id), p.style.clone())))
+        })
+        .collect()
+}
+
+/// A style id as an ASS `[V4+ Styles]` name: non-alphanumerics become `_`.
+///
+/// The `Name` field is comma-delimited and read back by libass as a key, so a
+/// raw `preset:tiktok_bold` (or any id a future feature invents) has no
+/// business going in verbatim. Every id the catalog carries starts with
+/// `preset:`, so no generated name can collide with the literal `Default`.
+fn ass_style_name(style_id: &str) -> String {
+    let name: String = style_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if name.is_empty() {
+        "Default".to_string()
+    } else {
+        name
+    }
 }
 
 // ── Karaoke text (E4a) ──────────────────────────────────────────────────────
@@ -1507,6 +1720,339 @@ Dialogue: 0,0:00:04.00,0:00:07.25,Default,Maria,0,0,0,,This is two
         )
         .expect("pre-E4a ExportConfig JSON still deserializes");
         assert!(cfg.karaoke.is_none());
+    }
+
+    // ── Text timeline items → ASS (R5-C) ───────────────────────────────────
+
+    fn text_track(id: &str) -> crate::model::Track {
+        crate::model::Track {
+            id: id.into(),
+            kind: crate::model::TrackKind::Overlay,
+            name: "Overlay".into(),
+            index: 2,
+            enabled: true,
+            locked: false,
+            muted: false,
+            solo: false,
+            volume_db: 0.0,
+        }
+    }
+
+    fn text_item(id: &str, start: i64, dur: i64, text: &str) -> TimelineItem {
+        TimelineItem {
+            id: id.into(),
+            track_id: "o1".into(),
+            kind: TimelineItemKind::Text,
+            source_media_id: None,
+            in_ms: 0,
+            out_ms: dur,
+            timeline_start_ms: start,
+            speed: 1.0,
+            gain_db: 0.0,
+            fade_in_ms: 0,
+            fade_out_ms: 0,
+            transform: Transform::default(),
+            effects: vec![],
+            transition_in: None,
+            text: Some(crate::model::TextSpec {
+                text: text.into(),
+                style_id: None,
+            }),
+            enabled: true,
+            locked: false,
+        }
+    }
+
+    /// The project shape the R5-C feature exists for: one text overlay on a
+    /// visible Overlay track, no captions in the way.
+    fn text_project(transform: Transform) -> Project {
+        let mut proj = p();
+        proj.captions.clear();
+        proj.tracks = vec![text_track("o1")];
+        let mut it = text_item("tx1", 1_500, 2_500, "Velkommen");
+        it.transform = transform;
+        proj.timeline_items = vec![it];
+        proj
+    }
+
+    fn dialogue_lines(ass: &str) -> Vec<&str> {
+        ass.lines().filter(|l| l.starts_with("Dialogue:")).collect()
+    }
+
+    #[test]
+    fn text_item_round_trips_as_a_positioned_dialogue_line() {
+        // 1920×1080 project; x .25 → 480 px, y .75 → 810 px.
+        let proj = text_project(Transform {
+            x: 0.25,
+            y: 0.75,
+            ..Transform::default()
+        });
+        let ass = write_ass(&proj);
+        assert_eq!(
+            dialogue_lines(&ass),
+            vec![
+                // Layer 1 (above the caption band), timeline times, Default
+                // style, top-left anchored at the transform's fractions.
+                "Dialogue: 1,0:00:01.50,0:00:04.00,Default,,0,0,0,,{\\an7\\pos(480,810)}Velkommen"
+            ],
+            "{ass}"
+        );
+    }
+
+    /// Resolution independence, and the parity claim behind it: the SAME
+    /// fractions land on the same relative spot in a portrait project, because
+    /// `PlayResX/Y` follow the project dimensions and libass scales that space
+    /// to the output. This is the mutation-check target for the position math —
+    /// swapping the width/height factors, or dropping the `round`, moves these
+    /// numbers.
+    #[test]
+    fn text_position_follows_the_projects_play_res() {
+        let mut proj = text_project(Transform {
+            x: 0.25,
+            y: 0.75,
+            ..Transform::default()
+        });
+        proj.video_width = 1080;
+        proj.video_height = 1920;
+        let ass = write_ass(&proj);
+        assert!(ass.contains("PlayResX: 1080"), "{ass}");
+        assert!(dialogue_lines(&ass)[0].contains("\\pos(270,1440)"), "{ass}");
+    }
+
+    /// A fraction that does not land on a whole pixel rounds — it does not
+    /// truncate, and it does not leak an f32 tail into the file.
+    #[test]
+    fn text_position_rounds_to_whole_play_res_pixels() {
+        let proj = text_project(Transform {
+            x: 0.3333,
+            y: 0.1,
+            ..Transform::default()
+        });
+        // 1920 * 0.3333 = 639.936 → 640;  1080 * 0.1 = 108.
+        assert!(
+            dialogue_lines(&write_ass(&proj))[0].contains("\\pos(640,108)"),
+            "{}",
+            write_ass(&proj)
+        );
+    }
+
+    /// An untouched transform emits ONLY the anchor + position: no `\fsc`, no
+    /// `\frz`, no `\alpha`. (Keeps the file readable and the golden tests
+    /// meaningful.)
+    #[test]
+    fn identity_transform_emits_only_the_anchor_and_position() {
+        let ass = write_ass(&text_project(Transform::default()));
+        let line = dialogue_lines(&ass)[0];
+        assert!(line.contains("{\\an7\\pos(0,0)}"), "{line}");
+        assert!(!line.contains("fsc"), "{line}");
+        assert!(!line.contains("frz"), "{line}");
+        assert!(!line.contains("alpha"), "{line}");
+    }
+
+    /// Everything the inspector can store on a text item's transform reaches
+    /// the file. A value the writer ignored would be authored content the
+    /// export silently drops — the exact failure R5-C removed for text itself.
+    #[test]
+    fn scale_rotation_and_opacity_reach_the_override_block() {
+        let ass = write_ass(&text_project(Transform {
+            x: 0.5,
+            y: 0.5,
+            scale: 0.4,
+            rotation_deg: 15.0,
+            opacity: 0.5,
+            crop: None,
+        }));
+        let line = dialogue_lines(&ass)[0];
+        // scale → percent; rotation NEGATED (ASS `\frz` is CCW-positive while
+        // the export's `rotate=` and the Pixi preview are CW-positive);
+        // opacity → transparency byte (0.5 → 128 → 80 hex).
+        assert!(line.contains("\\fscx40\\fscy40"), "{line}");
+        assert!(line.contains("\\frz-15"), "{line}");
+        assert!(line.contains("\\alpha&H80&"), "{line}");
+    }
+
+    #[test]
+    fn text_is_escaped_like_any_other_dialogue_text() {
+        let mut proj = text_project(Transform::default());
+        proj.timeline_items[0].text = Some(crate::model::TextSpec {
+            text: "line1\nline2 {not a tag}".into(),
+            style_id: None,
+        });
+        let line = dialogue_lines(&write_ass(&proj))[0].to_string();
+        assert!(line.ends_with("line1\\Nline2 \\{not a tag\\}"), "{line}");
+    }
+
+    /// `timeline_end_ms` honours speed, and so does the Dialogue End field —
+    /// the overlay ends exactly where its lane does.
+    #[test]
+    fn dialogue_end_follows_timeline_end_ms() {
+        let mut proj = text_project(Transform::default());
+        proj.timeline_items[0].speed = 2.0; // 2500 ms of item → 1250 ms of lane
+        let it = &proj.timeline_items[0];
+        assert_eq!(it.timeline_end_ms(), 2_750);
+        assert!(
+            dialogue_lines(&write_ass(&proj))[0].starts_with("Dialogue: 1,0:00:01.50,0:00:02.75,"),
+            "{}",
+            write_ass(&proj)
+        );
+    }
+
+    // ── Named styles (closes the Phase 5.2 note) ───────────────────────────
+
+    #[test]
+    fn a_referenced_preset_gets_its_own_style_block_for_text_and_captions() {
+        let mut proj = text_project(Transform::default());
+        proj.timeline_items[0].text = Some(crate::model::TextSpec {
+            text: "Velkommen".into(),
+            style_id: Some("preset:tiktok_bold".into()),
+        });
+        // …and a caption referencing a DIFFERENT preset: one writer, one rule.
+        proj.captions = vec![Caption {
+            id: "c1".into(),
+            start_ms: 0,
+            end_ms: 1_000,
+            words: vec![Word::new("Hei", 0, 1_000, 90.0)],
+            speaker_id: None,
+            style_id: Some("preset:cinema".into()),
+            notes: None,
+            ai_generated: false,
+            last_edited_at: 0,
+            track_id: None,
+        }];
+        let ass = write_ass(&proj);
+
+        // One block per referenced id, named from the id (`:` is not a legal
+        // ASS Name character to leave raw in a comma-delimited field).
+        assert!(
+            ass.contains("\nStyle: preset_tiktok_bold,Montserrat,"),
+            "{ass}"
+        );
+        assert!(ass.contains("\nStyle: preset_cinema,"), "{ass}");
+        assert!(ass.contains("\nStyle: Default,Helvetica Neue"), "{ass}");
+
+        // Karaoke's pending colour lands on EVERY block, not just Default —
+        // a caption that picked a named style still sweeps against it.
+        let mut kara = proj.clone();
+        kara.export_config.karaoke = Some(KaraokeOptions {
+            enabled: true,
+            pending_color: "#00FF00".into(),
+            ..KaraokeOptions::disabled()
+        });
+        let ass_k = write_ass(&kara);
+        let pending = hex_to_ass_bgr("#00FF00");
+        for block in ["Default", "preset_cinema", "preset_tiktok_bold"] {
+            let line = ass_k
+                .lines()
+                .find(|l| l.starts_with(&format!("Style: {block},")))
+                .unwrap_or_else(|| panic!("no block for {block} in {ass_k}"));
+            assert!(
+                line.contains(&pending),
+                "{block} must carry the karaoke pending colour: {line}"
+            );
+        }
+
+        // …and each Dialogue names its own block.
+        let lines = dialogue_lines(&ass);
+        assert!(lines[0].contains(",preset_cinema,"), "{ass}");
+        assert!(lines[1].contains(",preset_tiktok_bold,"), "{ass}");
+    }
+
+    /// A style id nothing resolves (hand-edited file, a preset we dropped) must
+    /// fall back to `Default` — and must NOT name a block the file lacks, which
+    /// libass would swallow silently.
+    #[test]
+    fn an_unresolvable_style_id_falls_back_to_default() {
+        let mut proj = text_project(Transform::default());
+        proj.timeline_items[0].text = Some(crate::model::TextSpec {
+            text: "Velkommen".into(),
+            style_id: Some("preset:does_not_exist".into()),
+        });
+        let ass = write_ass(&proj);
+        assert!(!ass.contains("preset_does_not_exist"), "{ass}");
+        assert!(dialogue_lines(&ass)[0].contains(",Default,"), "{ass}");
+    }
+
+    /// Referencing the project's OWN default style is not an extra block — it
+    /// is already emitted as `Default`.
+    #[test]
+    fn referencing_the_default_style_emits_no_second_block() {
+        let mut proj = text_project(Transform::default());
+        let own = proj.default_style.id.clone();
+        proj.timeline_items[0].text = Some(crate::model::TextSpec {
+            text: "Velkommen".into(),
+            style_id: Some(own),
+        });
+        let ass = write_ass(&proj);
+        assert_eq!(
+            ass.matches("\nStyle: ").count(),
+            1,
+            "exactly one style block: {ass}"
+        );
+        assert!(dialogue_lines(&ass)[0].contains(",Default,"), "{ass}");
+    }
+
+    // ── the ass= predicate must agree with the writer ───────────────────────
+
+    /// `compose` asks `ass_has_events` whether to hang an `ass=` node on the
+    /// graph. If that predicate ever said "nothing to draw" while the writer
+    /// emitted a Dialogue, the sidecar would be written and thrown away — the
+    /// silent-loss failure this feature exists to remove.
+    #[test]
+    fn ass_predicate_agrees_with_the_writer() {
+        let mut empty = p();
+        empty.captions.clear();
+
+        let mut disabled = text_project(Transform::default());
+        disabled.timeline_items[0].enabled = false;
+
+        let mut hidden = text_project(Transform::default());
+        hidden.tracks[0].enabled = false;
+
+        let mut blank = text_project(Transform::default());
+        blank.timeline_items[0].text = Some(crate::model::TextSpec {
+            text: "   ".into(),
+            style_id: None,
+        });
+
+        let mut captions_only = p();
+        captions_only.timeline_items.clear();
+
+        // Captions AND an overlay — the writer emits both kinds of Dialogue.
+        let mut both = p();
+        both.tracks = vec![text_track("o1")];
+        both.timeline_items = vec![text_item("tx1", 0, 1_000, "Velkommen")];
+
+        for (name, proj) in [
+            ("nothing at all", empty),
+            ("disabled overlay", disabled),
+            ("overlay on a hidden track", hidden),
+            ("blank text", blank),
+            ("captions only", captions_only),
+            ("text only", text_project(Transform::default())),
+            ("captions + overlay", both),
+        ] {
+            let writer_draws = !dialogue_lines(&write_ass(&proj)).is_empty();
+            assert_eq!(
+                ass_has_events(&proj),
+                writer_draws,
+                "predicate disagrees with the writer for: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn ass_style_name_sanitizes_and_cannot_collide_with_default() {
+        assert_eq!(ass_style_name("preset:tiktok_bold"), "preset_tiktok_bold");
+        assert_eq!(ass_style_name("a,b"), "a_b");
+        assert_eq!(ass_style_name(""), "Default");
+    }
+
+    #[test]
+    fn ass_numbers_are_trimmed() {
+        assert_eq!(fmt_ass_num(40.0), "40");
+        assert_eq!(fmt_ass_num(37.5), "37.5");
+        assert_eq!(fmt_ass_num(-0.0), "0");
+        assert_eq!(fmt_ass_num(0.4 * 100.0), "40");
     }
 
     #[test]

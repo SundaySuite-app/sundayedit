@@ -259,6 +259,9 @@ describe("MediaBin — thumbnails", () => {
     const media = freshMedia();
     invoke.mockImplementation(async (cmd: unknown, args: unknown) => {
       if (cmd === "check_media_paths") return [];
+      // Thumbnail access also fires the once-per-session cache-prune sweep
+      // (`kickMediaCachePrune`) — a no-op here, and irrelevant to this test.
+      if (cmd === "prune_media_cache") return undefined;
       expect(cmd).toBe("extract_thumbnail");
       const a = args as { mediaPath: string; atMs: number; outPath: string };
       expect(a.mediaPath).toBe(media.path);

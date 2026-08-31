@@ -272,6 +272,18 @@ pub fn op_remove_effect(project: Project, item_id: String, kind: String) -> AppR
     timeline_ops::remove_effect(&project, &item_id, &kind)
 }
 
+/// Replace a text overlay's text (and optional style id). Rejects a non-Text
+/// clip — see `timeline_ops::set_item_text`.
+#[tauri::command]
+pub fn op_set_item_text(
+    project: Project,
+    item_id: String,
+    text: String,
+    style_id: Option<String>,
+) -> AppResult<Project> {
+    timeline_ops::set_item_text(&project, &item_id, text, style_id)
+}
+
 #[tauri::command]
 pub fn op_add_text_item(
     project: Project,

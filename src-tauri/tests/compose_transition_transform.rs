@@ -428,15 +428,15 @@ fn transition_and_plain_branch_place_the_clip_identically() {
 /// `filter_complex` still composes (a graph error here would abort the whole
 /// render).
 ///
-/// NOTE — deliberately not asserted here: the rendered timeline is TRUNCATED
-/// for chained transitions. `offset` is computed in timeline coordinates
-/// (`prev.timeline_end_ms - transition.duration_ms`) while the stream it is
-/// applied to is the PREVIOUS xfade's output, which is already shorter by the
-/// earlier transition — with equal transition durations the second offset lands
-/// exactly at its input's end and the tail is lost. That is a PRE-EXISTING
-/// defect of the offset arithmetic (verified: the same 3-clip project truncates
-/// identically on the pre-fix `scale={W}:{H}` branch, 3.467 s vs 3.434 s), and
-/// is out of scope for the transform fix.
+/// FIXED (R5-A) — this file's earlier note said the rendered timeline was
+/// TRUNCATED for chained transitions, because `offset` was computed in
+/// timeline coordinates while the stream it is applied to is the PREVIOUS
+/// xfade's output, already shorter by the earlier transition. It is now
+/// converted onto the composite's own clock (`compose.rs::composite_shift_at`)
+/// and the duration is pinned by measurement in
+/// `tests/compose_transition_chain.rs`. This test stays what it always was:
+/// the guard that a second `color` source node in one `filter_complex` still
+/// composes, and that the second clip is still an inset.
 #[test]
 #[ignore = "needs ffmpeg on PATH (generates its own samples)"]
 fn two_transitions_in_one_graph_still_compose() {

@@ -154,11 +154,39 @@ const evenUp = (n: number): number => {
   return m % 2 ? m + 1 : m;
 };
 
+/**
+ * The frame-rate window an export may target — mirrors Rust
+ * `video::MIN_FPS` / `MAX_FPS` / `DEFAULT_FPS`, pinned by the
+ * `fps_sanity_parity` Rust test which reads these very constants out of this
+ * file.
+ */
+export const MIN_FPS = 1;
+export const MAX_FPS = 240;
+export const DEFAULT_FPS = 30;
+
+/**
+ * Clamp a frame rate into `MIN_FPS..=MAX_FPS`, falling back to `DEFAULT_FPS`
+ * for anything non-finite or non-positive — mirrors Rust
+ * `video::sane_fps`, which `build_filter_complex` applies again on the Rust
+ * side of the same seam.
+ *
+ * Not decoration: a VFR screen recording's nominal `r_frame_rate` is the
+ * container's tick base (`1000/1`), and it used to travel from the probe
+ * through `video_fps` into the export as `-r 1000`.
+ */
+export const saneFps = (fps: number): number => {
+  if (!Number.isFinite(fps) || fps <= 0) return DEFAULT_FPS;
+  return Math.min(MAX_FPS, Math.max(MIN_FPS, fps));
+};
+
 /** H264 / CPU output settings derived from the project's own frame geometry. */
 export function defaultComposeSettings(project: Project): ComposeSettings {
   const width = project.video_width > 0 ? project.video_width : 1920;
   const height = project.video_height > 0 ? project.video_height : 1080;
-  const fps = project.video_fps > 0 ? Math.round(project.video_fps) : 30;
+  // `Math.round` alone turned a 1000 fps VFR tick base into a 1000 fps
+  // export. Clamp through the same window Rust's `sane_fps` uses, THEN round
+  // (so 29.97 still becomes 30 and 240.4 still lands on 240, not 241).
+  const fps = Math.round(saneFps(project.video_fps));
   return {
     width: evenUp(width),
     height: evenUp(height),
