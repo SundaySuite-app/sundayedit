@@ -74,6 +74,17 @@ export const notePath = (tag) => join(NOTES_DIR, `${tag}.md`);
 /** Taggen for én versjon. Taggene i dette repoet er `v` + versjonen. */
 export const tagFor = (version) => `v${version}`;
 
+/**
+ * Samme notat, uansett hvilken plattform som leser det.
+ *
+ * Ingen av suitens repoer normaliserer linjeskift i git, så en Windows-runner
+ * sjekker ut `.md` med CRLF mens macOS får LF. Release-jobben kjører på BEGGE,
+ * og begge sender teksten inn i den samme utgivelsen — uten dette hadde
+ * innholdet i `latest.json` avhengt av hvilken av dem som rakk fram først, og
+ * byte-taket under hadde talt ett tegn ekstra per linje på den ene.
+ */
+export const normalize = (text) => text.replace(/\r\n/g, "\n");
+
 /** Bytes, ikke `String.length` — se `MAX_NOTE_BYTES`. */
 export const byteLength = (text) => Buffer.byteLength(text, "utf8");
 
@@ -146,7 +157,7 @@ export function checkNote(tag) {
     };
   }
 
-  const text = readFileSync(path, "utf8").trim();
+  const text = normalize(readFileSync(path, "utf8")).trim();
   const problems = [];
   const bytes = byteLength(text);
 

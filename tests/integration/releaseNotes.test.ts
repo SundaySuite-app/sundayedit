@@ -23,6 +23,7 @@ import {
   checkAll,
   checkNote,
   knownTags,
+  normalize,
   packageVersion,
   tauriVersion,
 } from "../../scripts/release-notes.mjs";
@@ -63,5 +64,13 @@ describe("releasenotat", () => {
     );
     // Ingen `text` å falle tilbake på. Det er hele forskjellen fra før.
     expect(result.text).toBeUndefined();
+  });
+  it("leser notatet likt enten det er sjekket ut med LF eller CRLF", () => {
+    // Release-jobben kjører på macOS OG Windows, og ingen av repoene
+    // normaliserer linjeskift i git. Uten dette avgjorde kappløpet mellom de to
+    // runnerne hva som havnet i `latest.json`.
+    expect(
+      normalize("Blackout er \u21e7B.\r\n\r\nEscape lukker biblioteket.\r\n"),
+    ).toBe("Blackout er \u21e7B.\n\nEscape lukker biblioteket.\n");
   });
 });
