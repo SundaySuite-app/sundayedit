@@ -19,7 +19,12 @@
 //!     can actually clip (see `BUS_LIMITER`).
 //!   - The caption layer is applied LAST: `ass=<escaped sidecar path>`
 //!     (produced by `export::write_ass`, written to a unique temp path like
-//!     `run_burnin` does), reusing `escape_filter_path`.
+//!     `run_burnin` does), reusing `escape_filter_path`. That one node also
+//!     carries `TimelineItemKind::Text` overlays (R5-C) — the writer emits a
+//!     `Dialogue` line per text item, positioned from its `Transform` — so
+//!     text needs no filter node, no font handling and no second escaping
+//!     regime of its own, and the burn-in fast path (which applies the SAME
+//!     sidecar) renders it identically.
 //!   - Encoder selection reuses `burnin::encoder_name` / `default_encoder`.
 //!
 //! The actual spawn (`run_compose`) streams `-progress pipe:1` and honours an
@@ -238,7 +243,7 @@ fn any_track_solo(project: &Project) -> bool {
 /// Preview parity: an item is VISIBLE only when its owning track is enabled
 /// (`previewMap.activeVideoItem` skips `enabled === false` tracks). Items with
 /// an unresolvable track keep current behaviour (treated as visible).
-fn track_visible(project: &Project, item: &TimelineItem) -> bool {
+pub(crate) fn track_visible(project: &Project, item: &TimelineItem) -> bool {
     track_of(project, item).is_none_or(|t| t.enabled)
 }
 
@@ -270,9 +275,148 @@ pub fn timeline_duration_ms(project: &Project) -> i64 {
         .unwrap_or(project.video_duration_ms.max(0))
 }
 
+/// The visual items in COMPOSITE order — low track index → high (top), then
+/// by timeline position. The one list `build_filter_complex` folds and the one
+/// list the transition arithmetic below reasons about; sharing it is what
+/// keeps `rendered_duration_ms` from disagreeing with the graph it describes.
+fn visual_stack(project: &Project) -> Vec<&TimelineItem> {
+    let mut items: Vec<&TimelineItem> = project
+        .timeline_items
+        .iter()
+        .filter(|it| it.enabled && track_visible(project, it) && is_visual(project, it))
+        .collect();
+    items.sort_by(|a, b| {
+        track_index(project, a)
+            .cmp(&track_index(project, b))
+            .then(a.timeline_start_ms.cmp(&b.timeline_start_ms))
+    });
+    items
+}
+
+/// Does this item enter through an `xfade`? A transition only makes sense
+/// against a preceding sibling on the SAME track (the boundary it crossfades
+/// over) — the single predicate the graph builder and the duration arithmetic
+/// both read, so they cannot drift.
+fn transition_applies(video_items: &[&TimelineItem], n: usize) -> Option<i64> {
+    let it = video_items[n];
+    let same_track_prev = n > 0 && video_items[n - 1].track_id == it.track_id;
+    match (&it.transition_in, same_track_prev) {
+        (Some(tr), true) => Some(tr.duration_ms.max(0)),
+        _ => None,
+    }
+}
+
+/// Every `xfade` this project's video chain will perform, as
+/// `(timeline instant it lands on, duration it consumes)`.
+///
+/// `xfade` CONCATENATES: its output is `first input up to offset`, then the
+/// blend, then the REST of the second input — total `offset + len2`. The blend
+/// is played once instead of twice, so from its boundary onward the composite
+/// runs exactly `duration` ms ahead of the butt-joined timeline. That is a
+/// property of the filter, not a bug; the bug was that nothing downstream knew
+/// about it, so the SECOND transition in a chain aimed its `offset` at a
+/// timeline instant its (already shortened) input had left behind — the offset
+/// landed on its input's very last frame and the whole tail was dropped.
+fn transition_points(project: &Project) -> Vec<(i64, i64)> {
+    let items = visual_stack(project);
+    (0..items.len())
+        .filter_map(|n| transition_applies(&items, n).map(|d| (items[n].timeline_start_ms, d)))
+        .collect()
+}
+
+/// How many ms EARLIER than the project timeline the running composite plays
+/// the timeline instant `timeline_ms`.
+///
+/// A function of TIME, not of position in the fold: the composite's clock is
+/// unshifted before the first transition's boundary and shifted after it, so a
+/// clip on another track that sits before the boundary must not be moved while
+/// one after it must. (An accumulator over the fold order got this wrong for
+/// exactly that case.) An incoming clip's own transition counts at its own
+/// start — its first frame IS the one the blend pulled forward.
+fn composite_shift_at(points: &[(i64, i64)], timeline_ms: i64) -> i64 {
+    points
+        .iter()
+        .filter(|(at, _)| *at <= timeline_ms)
+        .map(|(_, d)| *d)
+        .sum()
+}
+
+/// Total ms the transitions in this project shave off the timeline duration.
+pub fn transition_shortening_ms(project: &Project) -> i64 {
+    transition_points(project).iter().map(|(_, d)| *d).sum()
+}
+
+/// The duration the compose graph actually RENDERS — the timeline duration
+/// less what the transitions consume (see `transition_shifts`). This is what
+/// the black base canvas is cut to and what progress is measured against; both
+/// used to use the raw timeline duration, so a project with transitions ran
+/// its progress bar to a total the output could never reach.
+pub fn rendered_duration_ms(project: &Project) -> i64 {
+    (timeline_duration_ms(project) - transition_shortening_ms(project)).max(0)
+}
+
+/// Fit a source stream to the output canvas — CONTAIN: never crop, never
+/// stretch, centred, with the leftover padded out to the full canvas.
+///
+/// Why this exists at all: `transform_filters` only scales when the user moved
+/// the scale slider, and nothing else resized the stream, so a clip composited
+/// at NATIVE source size at the transform offset. A 4K clip in a 1080p project
+/// showed its top-left quadrant; a 1080x1920 phone clip in a 1920x1080 project
+/// showed a centre strip. The DEFAULT preview is `<video class="max-h-full
+/// max-w-full">`, which fits — so the preview fit and the export cropped, the
+/// exact divergence this codebase forbids.
+///
+/// Emitted BEFORE `transform_filters`, so the stream the user's own
+/// `scale`/`x`/`y` act on is already canvas-sized: `scale: 0.4` means "40 % of
+/// the frame", not "40 % of whatever the camera happened to shoot".
+///
+/// `pad_alpha` decides what the letterbox bars are made of. Bars are opaque
+/// black by default (cheap: the source stays in its native yuv), but a clip
+/// whose aspect ratio does not match the canvas gets a TRANSPARENT pad so its
+/// bars do not paint over the layers underneath it — an inset PiP with a
+/// different aspect must not arrive as a black box with a picture in it. When
+/// the aspect ratios match there are no bar pixels at all, so the colour is
+/// unobservable and the cheap branch is exact.
+fn fit_filters(width: i32, height: i32, pad_alpha: bool, chain: &mut Vec<String>) {
+    if pad_alpha {
+        chain.push("format=rgba".to_string());
+    }
+    chain.push(format!(
+        "scale={width}:{height}:force_original_aspect_ratio=decrease"
+    ));
+    chain.push(format!(
+        "pad={width}:{height}:(ow-iw)/2:(oh-ih)/2{colour}",
+        colour = if pad_alpha { ":color=#00000000" } else { "" },
+    ));
+    // `scale` does not touch the sample aspect ratio, so an anamorphic source
+    // would keep a non-1 SAR and every downstream geometry (overlay offsets,
+    // xfade's "both inputs must agree" check) would be reasoning in the wrong
+    // units. Pin it here, once, where the frame is already canvas-shaped.
+    chain.push("setsar=1".to_string());
+}
+
+/// Will fitting `media` to a `canvas_w`x`canvas_h` frame leave letterbox bars?
+///
+/// Exact integer cross-multiply — equal aspect ratios fit edge to edge and
+/// produce no bar pixels at all. Unknown source dimensions answer "yes", so an
+/// unprobed clip gets the safe (transparent) pad rather than the cheap one.
+fn fit_leaves_bars(media_w: i32, media_h: i32, canvas_w: i32, canvas_h: i32) -> bool {
+    if media_w <= 0 || media_h <= 0 || canvas_w <= 0 || canvas_h <= 0 {
+        return true;
+    }
+    media_w as i64 * canvas_h as i64 != media_h as i64 * canvas_w as i64
+}
+
 /// The per-item geometric filter chain from its `Transform` (fractions of the
 /// output frame). Appends to `chain` in the order scale → crop → rotate →
 /// opacity, so the output stays resolution-independent.
+///
+/// Runs AFTER `fit_filters`, so `iw`/`ih` here are the canvas dimensions and
+/// `scale: 0.4` is 40 % of the output frame. Note there is no rotation of the
+/// SOURCE here and there must not be: ffmpeg auto-rotates a display-matrix
+/// stream on decode (measured — see `video::parse_rotation`), and `probe`
+/// already reports the post-rotation display size. `rotation_deg` below is the
+/// user's own knob only.
 fn transform_filters(t: &Transform, chain: &mut Vec<String>) {
     if (t.scale - 1.0).abs() > f32::EPSILON && t.scale > 0.0 {
         chain.push(format!("scale=iw*{s}:ih*{s}", s = t.scale));
@@ -306,15 +450,19 @@ fn kind_label(kind: &TimelineItemKind) -> &'static str {
     }
 }
 
-/// Items the compose graph CANNOT render: standalone `Text` / `Graphic`
-/// overlays (`op_add_text_item` creates them with `source_media_id: None`, so
-/// they are neither `is_visual` nor `has_audio` and no node in
-/// `build_filter_complex` consumes them).
+/// Items the compose graph CANNOT render: standalone `Graphic` overlays.
+///
+/// `Text` used to be here too. It no longer is: R5-C renders text overlays
+/// through the ASS layer both render paths already apply as their final node
+/// (`export::write_ass` → `ass=`), so nothing about a text item is lost any
+/// more. A `Graphic` genuinely still cannot be rendered — an image overlay
+/// needs an extra `-i` input and its own `overlay` node, neither of which this
+/// graph builds — so it keeps the loud refusal.
 ///
 /// This is the single seam both consumers share:
 ///   - `is_simple_timeline` must return false for them, or the burn-in
 ///     shortcut swallows the overlay with zero signal (baseline import + one
-///     text clip used to stay "simple" and export as if the text never existed);
+///     graphic clip would stay "simple" and export as if it never existed);
 ///   - `build_filter_complex` must REFUSE them, so a project file can never
 ///     lose authored content quietly.
 ///
@@ -328,11 +476,25 @@ fn unsupported_overlay_items(project: &Project) -> Vec<&TimelineItem> {
         .timeline_items
         .iter()
         .filter(|it| {
-            it.enabled
-                && track_visible(project, it)
-                && matches!(it.kind, TimelineItemKind::Text | TimelineItemKind::Graphic)
+            it.enabled && track_visible(project, it) && it.kind == TimelineItemKind::Graphic
         })
         .collect()
+}
+
+/// Do this project's text overlays fit inside what the BURN-IN path renders?
+///
+/// The fast path hands `burnin::build_ffmpeg_args` the primary video and lets
+/// ffmpeg decide the output length — which is the length of that video. The
+/// composite path instead cuts a `color=black` canvas to `rendered_duration_ms`
+/// and is as long as the timeline. So a text overlay that runs PAST the video's
+/// end renders in full on the composite path and gets cut off on the fast one:
+/// exactly the kind of "the shortcut quietly renders something else" divergence
+/// `is_simple_timeline` exists to prevent. Such a project takes the composite
+/// path instead, where the canvas covers the overlay.
+fn text_items_fit_the_burnin_output(project: &Project) -> bool {
+    crate::services::export::ass_text_items(project)
+        .iter()
+        .all(|it| it.timeline_end_ms() <= project.video_duration_ms)
 }
 
 /// Refuse to build a compose graph that would silently omit authored content.
@@ -371,12 +533,17 @@ pub fn validate_composable(project: &Project) -> AppResult<()> {
 /// project delegates to `burnin::render` (hardware encoding + audio
 /// passthrough, battle-tested).
 pub fn is_simple_timeline(project: &Project) -> bool {
-    // A Text/Graphic overlay is neither visual nor audio, so it used to slip
-    // through the `av_items` filter below and leave a text-bearing project
-    // "simple" — the burn-in shortcut then rendered the video alone and the
-    // overlay vanished. Anything the composite path cannot render must never
-    // be swallowed by the shortcut either.
+    // A Text/Graphic overlay is neither visual nor audio, so it slips through
+    // the `av_items` filter below and would leave an overlay-bearing project
+    // "simple". Anything the composite path cannot render must never be
+    // swallowed by the shortcut either.
     if !unsupported_overlay_items(project).is_empty() {
+        return false;
+    }
+    // Text overlays DO survive the shortcut — `burnin::build_ffmpeg_args`
+    // applies the same `ass=` sidecar, and `write_ass` now carries them — but
+    // only while the video the shortcut renders is long enough to hold them.
+    if !text_items_fit_the_burnin_output(project) {
         return false;
     }
     let av_items: Vec<&TimelineItem> = project
@@ -440,7 +607,7 @@ fn is_pristine_primary_item(project: &Project, item: &TimelineItem) -> bool {
 /// caption layer. This is the unit-tested heart of the compose path.
 ///
 /// Fallible on purpose: a project holding an item kind the graph cannot render
-/// (a `Text`/`Graphic` overlay) is REFUSED rather than rendered without it. The
+/// (a `Graphic` overlay) is REFUSED rather than rendered without it. The
 /// builder is the narrowest waist every compose/proxy render passes through, so
 /// putting the check here means no caller can produce a lying argv.
 pub fn build_filter_complex(
@@ -460,9 +627,16 @@ pub fn build_filter_complex(
     // path emits one pixel short of the requested frame. Sanitize at the seam
     // (same `even_up` the proxy path already applies) so every caller composes
     // at a valid geometry.
+    // FPS likewise. `-r 1000` is not a hypothetical: `parse_fps` used to hand
+    // back a VFR screen recording's nominal `r_frame_rate` (1000/1) untouched,
+    // the frontend derives its settings from that number, and the export then
+    // encoded a thousand frames a second. `video::sane_fps` is the one window
+    // (1..=240) both the probe and this builder agree on, and it is the same
+    // clamp `composeEngine.ts::saneFps` applies on the way in.
     let settings = &ComposeSettings {
         width: even_up(settings.width),
         height: even_up(settings.height),
+        fps: crate::services::video::sane_fps(settings.fps),
         ..settings.clone()
     };
 
@@ -470,25 +644,28 @@ pub fn build_filter_complex(
     let input_index = |mid: &str| media_ids.iter().position(|m| m == mid).unwrap();
     let canvas_idx = media_ids.len();
 
-    let total_ms = timeline_duration_ms(project);
+    // The canvas is cut to what the graph RENDERS, not to the timeline: an
+    // `xfade` plays its blend once instead of twice, so a project with
+    // transitions is exactly that much shorter than its butt-joined lanes.
+    let total_ms = rendered_duration_ms(project);
     let any_solo = any_track_solo(project);
 
     // ── Video items, composited LOW track → HIGH ────────────────────────────
     // Track parity with the live preview: a clip renders only when BOTH its
     // own `enabled` flag and its owning track's `enabled` flag are set
     // (previewMap skips disabled tracks; export must agree).
-    let mut video_items: Vec<&TimelineItem> = project
-        .timeline_items
-        .iter()
-        .filter(|it| it.enabled && track_visible(project, it) && is_visual(project, it))
-        .collect();
-    video_items.sort_by(|a, b| {
-        track_index(project, a)
-            .cmp(&track_index(project, b))
-            .then(a.timeline_start_ms.cmp(&b.timeline_start_ms))
-    });
+    let video_items = visual_stack(project);
 
     let mut nodes: Vec<String> = Vec::new();
+
+    // Every time this graph writes downstream of here — a clip's PTS shift, an
+    // `enable=` window, an `xfade` offset, an `adelay` — is a time on the
+    // running COMPOSITE, not on the project timeline, and the two diverge by
+    // whatever the transitions have already consumed. One conversion, used
+    // everywhere: see `composite_shift_at`.
+    let points = transition_points(project);
+    let composite_ms =
+        |timeline_ms: i64| (timeline_ms - composite_shift_at(&points, timeline_ms)).max(0);
 
     // Process each visual item into a `[pv{n}]` stream.
     for (n, it) in video_items.iter().enumerate() {
@@ -515,8 +692,9 @@ pub fn build_filter_complex(
         } else {
             format!("(PTS-STARTPTS)/{}", rate(speed))
         };
-        let setpts = if it.timeline_start_ms > 0 {
-            format!("setpts={base}+{}/TB", secs(it.timeline_start_ms))
+        let at_ms = composite_ms(it.timeline_start_ms);
+        let setpts = if at_ms > 0 {
+            format!("setpts={base}+{}/TB", secs(at_ms))
         } else {
             format!("setpts={base}")
         };
@@ -532,6 +710,23 @@ pub fn build_filter_complex(
         // order when the transform scales down. The Pixi preview applies the
         // same order (texture → colour matrix → sprite transform).
         crate::services::effects::effect_filters(&it.effects, &mut chain);
+        // FIT before TRANSFORM — the clip is made canvas-shaped first, so the
+        // user's scale/offset are fractions of the output frame (and so the
+        // export agrees with the fitting `<video>` preview). See `fit_filters`.
+        let (mw, mh) = it
+            .source_media_id
+            .as_ref()
+            .and_then(|mid| project.media.iter().find(|m| &m.id == mid))
+            .map(|m| (m.width, m.height))
+            .unwrap_or((0, 0));
+        // Transparent bars cost an RGBA conversion of every frame, and they
+        // only buy anything when there is a layer UNDERNEATH to show through
+        // them. `n == 0` composites straight onto the black base canvas, where
+        // a transparent bar and a black bar are the same pixels — so the
+        // commonest case of all (one portrait clip in a landscape project)
+        // keeps the cheap yuv path.
+        let needs_alpha = n > 0 && fit_leaves_bars(mw, mh, settings.width, settings.height);
+        fit_filters(settings.width, settings.height, needs_alpha, &mut chain);
         transform_filters(&it.transform, &mut chain);
         nodes.push(format!("[{src}:v]{}[pv{n}]", chain.join(",")));
     }
@@ -546,20 +741,43 @@ pub fn build_filter_complex(
         // layer at `round(width * t.x)` / `round(height * t.y)`).
         let x = (settings.width as f32 * it.transform.x).round() as i64;
         let y = (settings.height as f32 * it.transform.y).round() as i64;
+        // Where this clip starts on the COMPOSITE's clock — the same number
+        // its `[pv{n}]` PTS was shifted to above.
+        let at_ms = composite_ms(it.timeline_start_ms);
         // A transition only makes sense against a preceding sibling on the SAME
         // track (the boundary it crossfades over).
         let same_track_prev = n > 0 && video_items[n - 1].track_id == it.track_id;
         if let (Some(tr), true) = (&it.transition_in, same_track_prev) {
             let prev_end = video_items[n - 1].timeline_end_ms();
-            let offset = (prev_end - tr.duration_ms).max(0);
+            // TIMELINE → COMPOSITE time. `offset` is a timestamp on the stream
+            // `xfade` is handed, which is the running composite — and every
+            // xfade already folded into it consumed its own duration, so that
+            // composite runs `composite_shift_at` ms AHEAD of the timeline.
+            // Subtracting the timeline number straight in (what this used to
+            // do) put the second transition of a chain exactly at its input's
+            // end: xfade had nothing left to blend and the tail was lost —
+            // 3 clips / 2 transitions rendered 3.43 s of a 6 s timeline.
+            let at = (prev_end - tr.duration_ms).max(0);
+            let offset = composite_ms(at);
             // `xfade` rejects the blend unless BOTH branches share size, pixel
             // format, SAR, frame rate and timebase — otherwise ffmpeg aborts with
             // "Failed to inject frame into filter network: Invalid argument".
             // Normalise the running composite and the incoming clip before it.
-            let norm = format!(
-                "fps={fps},format=yuv420p,setsar=1,settb=AVTB,setpts=PTS-STARTPTS",
-                fps = settings.fps,
-            );
+            //
+            // `fps=` is deliberately the FIRST thing in `norm` and `norm` is
+            // deliberately applied to each stream BEFORE it reaches the
+            // incoming clip's `overlay`, never after. On ffmpeg 8 an
+            // `overlay=…:shortest=1` followed by `fps=` renders 1024 SECONDS
+            // instead of the two the `color` source was cut to — the shortest
+            // framesync leaves the output's last timestamp somewhere far in
+            // the future and `fps` dutifully duplicates frames all the way to
+            // it. (Measured on 8.1.2; ffmpeg 6.0, the currently bundled
+            // sidecar, gets it right, which is why nothing noticed: the
+            // existing 3-clip transition test rendered a ~1027 s file on
+            // ffmpeg 8 and only asserted that the graph composed at all.)
+            // Normalising upstream of the overlay is correct on both.
+            let post = "format=yuv420p,setsar=1,settb=AVTB,setpts=PTS-STARTPTS";
+            let norm = format!("fps={fps},{post}", fps = settings.fps);
             nodes.push(format!("{prev}{norm}[xa{n}]"));
 
             // Regression (seam-xfade-drops-transform): this branch used to make
@@ -588,9 +806,9 @@ pub fn build_filter_complex(
                 fps = settings.fps,
                 d = secs(clip_dur_ms),
             ));
-            nodes.push(format!("[pv{n}]setpts=PTS-STARTPTS[xp{n}]"));
+            nodes.push(format!("[pv{n}]{norm}[xp{n}]"));
             nodes.push(format!(
-                "[xc{n}][xp{n}]overlay={x}:{y}:shortest=1,{norm}[xb{n}]"
+                "[xc{n}][xp{n}]overlay={x}:{y}:shortest=1,{post}[xb{n}]"
             ));
             nodes.push(format!(
                 "[xa{n}][xb{n}]xfade=transition={kind}:duration={dur}:offset={off}{out}",
@@ -599,10 +817,13 @@ pub fn build_filter_complex(
                 off = secs(offset),
             ));
         } else {
+            // Same TIMELINE → COMPOSITE conversion as the xfade branch: the
+            // window is a time on the running composite, and `[pv{n}]`'s PTS
+            // was shifted by the same amount above, so the two agree.
             nodes.push(format!(
                 "{prev}[pv{n}]overlay={x}:{y}:enable='between(t,{a},{b})'{out}",
-                a = secs(it.timeline_start_ms),
-                b = secs(it.timeline_end_ms()),
+                a = secs(at_ms),
+                b = secs(at_ms + (it.timeline_end_ms() - it.timeline_start_ms).max(0)),
             ));
         }
         prev = out;
@@ -629,7 +850,14 @@ pub fn build_filter_complex(
             continue;
         }
         let src = input_index(it.source_media_id.as_ref().unwrap());
-        let delay = it.timeline_start_ms.max(0);
+        // Same TIMELINE → COMPOSITE conversion the video chain uses. An
+        // `xfade` pulls everything after its boundary earlier; the audio bus
+        // knew nothing about that, so after one transition a clip's sound
+        // played half a second late against its own picture, and the muxed
+        // file ran to the (longer) timeline duration while the video ended
+        // early. Without transitions `composite_ms` is the identity, so an
+        // ordinary project's `adelay` is unchanged.
+        let delay = composite_ms(it.timeline_start_ms.max(0));
 
         let mut chain: Vec<String> = vec![
             format!("atrim=start={}:end={}", secs(it.in_ms), secs(it.out_ms)),
@@ -812,11 +1040,10 @@ pub fn proxy_settings(project: &Project) -> ComposeSettings {
     let height = src_h.min(480);
     let width = (src_w as f64 * height as f64 / src_h as f64).round() as i32;
 
-    let fps = if project.video_fps > 0.0 {
-        project.video_fps.min(30.0)
-    } else {
-        30.0
-    };
+    // Sanity FIRST, proxy cap second: `min(30)` alone happens to swallow a
+    // 1000 fps VFR tick base, but only by accident — an implausible rate must
+    // be rejected as implausible, not merely be larger than the cap.
+    let fps = crate::services::video::sane_fps(project.video_fps).min(30.0);
 
     ComposeSettings {
         width: even_up(width),
@@ -1059,7 +1286,7 @@ pub fn run_compose(
     settings: &ComposeSettings,
     cancel: Arc<AtomicBool>,
 ) -> AppResult<()> {
-    // Refuse BEFORE any temp sidecar is written: a Text/Graphic overlay the
+    // Refuse BEFORE any temp sidecar is written: a Graphic overlay the
     // graph cannot render must abort the export, not vanish from it. (The pure
     // builder checks again — this is only about failing early and cleanly.)
     validate_composable(project)?;
@@ -1086,7 +1313,9 @@ pub fn run_compose(
         return run_simple_compose(window, project, output, &opts, cancel);
     }
 
-    let total_ms = timeline_duration_ms(project);
+    // Progress is measured against what the graph RENDERS — see
+    // `rendered_duration_ms`; transitions make that shorter than the timeline.
+    let total_ms = rendered_duration_ms(project);
 
     // Write the caption sidecar (reused verbatim from export::write_ass).
     let ass = crate::services::export::write_ass(project);
@@ -1094,10 +1323,13 @@ pub fn run_compose(
     std::fs::write(&ass_path, ass)?;
 
     let ass_str = ass_path.to_string_lossy().into_owned();
-    let ass_ref = if project.captions.is_empty() {
-        None
-    } else {
+    // Ask the WRITER whether the sidecar draws anything — a project with no
+    // captions but a text overlay still needs the `ass=` node. See
+    // `export::ass_has_events`.
+    let ass_ref = if crate::services::export::ass_has_events(project) {
         Some(ass_str.as_str())
+    } else {
+        None
     };
     let args = build_filter_complex(project, settings, ass_ref, &output.to_string_lossy())
         .inspect_err(|_| {
@@ -1208,7 +1440,9 @@ pub fn run_compose_proxy(
 ) -> AppResult<()> {
     validate_composable(project)?;
     let settings = proxy_settings(project);
-    let total_ms = timeline_duration_ms(project);
+    // Progress is measured against what the graph RENDERS — see
+    // `rendered_duration_ms`; transitions make that shorter than the timeline.
+    let total_ms = rendered_duration_ms(project);
 
     // Write the caption sidecar (reused verbatim from export::write_ass).
     let ass = crate::services::export::write_ass(project);
@@ -1216,10 +1450,13 @@ pub fn run_compose_proxy(
     std::fs::write(&ass_path, ass)?;
 
     let ass_str = ass_path.to_string_lossy().into_owned();
-    let ass_ref = if project.captions.is_empty() {
-        None
-    } else {
+    // Ask the WRITER whether the sidecar draws anything — a project with no
+    // captions but a text overlay still needs the `ass=` node. See
+    // `export::ass_has_events`.
+    let ass_ref = if crate::services::export::ass_has_events(project) {
         Some(ass_str.as_str())
+    } else {
+        None
     };
     let args = build_proxy_args(project, &settings, ass_ref, &output.to_string_lossy())
         .inspect_err(|_| {
@@ -2254,7 +2491,7 @@ mod tests {
         assert!(is_simple_timeline(&p));
     }
 
-    // ── Text/Graphic overlays: refused loudly, never dropped ────────────────
+    // ── Text overlays render; Graphic is still refused loudly ───────────────
 
     /// A standalone text overlay — the exact shape `op_add_text_item` builds:
     /// `kind: Text`, `source_media_id: None`.
@@ -2283,39 +2520,102 @@ mod tests {
         }
     }
 
-    /// Regression (seam-text-item-swallowed-by-simple-path): a text overlay is
-    /// neither `is_visual` nor `has_audio`, so it used to leave a baseline
-    /// import "simple" — the burn-in shortcut then rendered the video alone and
-    /// the text vanished with ZERO signal. It must disqualify the fast path.
+    /// THE FAST-PATH DECISION (R5-C), pinned.
+    ///
+    /// `burnin::build_ffmpeg_args` applies the very same `ass=` sidecar the
+    /// composite path does, and `write_ass` now carries text overlays — so a
+    /// baseline import plus a text item renders CORRECTLY through the burn-in
+    /// shortcut and there is no reason to pay for the composite graph. This is
+    /// the deliberate opposite of the pre-R5-C behaviour, where a text item
+    /// disqualified the fast path so the composite path could refuse it.
     #[test]
-    fn text_item_disqualifies_the_simple_path() {
+    fn text_item_keeps_the_simple_path_because_burn_in_applies_the_same_ass() {
         let mut p = baseline_project();
         assert!(is_simple_timeline(&p), "precondition: baseline is simple");
         p.tracks.push(track("o1", TrackKind::Overlay, 2));
         p.timeline_items.push(text_item("tx1", "o1", 1000, 2000));
         assert!(
+            is_simple_timeline(&p),
+            "the burn-in path burns the same sidecar — a text overlay must not \
+             force the composite graph"
+        );
+        // …and the sidecar the fast path writes actually carries the text.
+        let ass = crate::services::export::write_ass(&p);
+        assert!(ass.contains("Velkommen"), "{ass}");
+    }
+
+    /// The one case the shortcut CANNOT serve: the burn-in output is exactly as
+    /// long as the primary video, so an overlay that outlives the video would
+    /// be cut off. Such a project must take the composite path, whose canvas is
+    /// cut to the timeline.
+    #[test]
+    fn text_running_past_the_video_leaves_the_simple_path() {
+        let mut p = baseline_project();
+        p.tracks.push(track("o1", TrackKind::Overlay, 2));
+        // video_duration_ms is 60 s; this overlay ends at 61 s.
+        p.timeline_items.push(text_item("tx1", "o1", 59_000, 2_000));
+        assert!(
             !is_simple_timeline(&p),
-            "a text overlay must never be swallowed by the burn-in shortcut"
+            "an overlay outliving the video must not be silently truncated by \
+             the burn-in shortcut"
+        );
+        // The composite path renders it: a canvas cut to the TIMELINE.
+        let args = super::build_filter_complex(&p, &settings(), Some("subs.ass"), "out.mp4")
+            .expect("the composite path renders text overlays");
+        let canvas = args
+            .iter()
+            .find(|a| a.starts_with("color=black:"))
+            .expect("base canvas present");
+        assert!(
+            canvas.contains("d=61"),
+            "canvas must cover the overlay, got {canvas}"
         );
     }
 
-    /// …and the composite path it now routes to must REFUSE, not omit.
+    /// The composite path renders text through the final `ass=` node — no new
+    /// filter, no refusal.
     #[test]
-    fn composing_a_text_item_errors_and_names_the_kind() {
+    fn composing_a_text_item_succeeds_and_rides_the_ass_node() {
         let mut p = baseline_project();
         p.tracks.push(track("o1", TrackKind::Overlay, 2));
         p.timeline_items.push(text_item("tx1", "o1", 1000, 2000));
+        // Two AV clips so the project cannot take the fast path for an
+        // unrelated reason — this is about the graph, not the routing.
+        p.timeline_items
+            .push(item("i1", "v1", "m1", 60_000, 0, 5_000));
 
-        let err = super::build_filter_complex(&p, &settings(), None, "out.mp4")
-            .expect_err("a text overlay must not compose silently");
-        assert_eq!(err.code(), "validation", "got {err}");
-        let msg = err.to_string();
-        assert!(msg.contains("Text"), "the error must name the kind: {msg}");
-        assert!(msg.contains("tx1"), "the error must name the item: {msg}");
+        let args = super::build_filter_complex(&p, &settings(), Some("subs.ass"), "out.mp4")
+            .expect("a text overlay must compose, not be refused");
+        let g = fc(&args);
+        assert!(g.contains("ass=subs.ass[vout]"), "{g}");
+        assert!(
+            !g.contains("drawtext"),
+            "text must ride the existing ASS layer, not a new drawtext node: {g}"
+        );
+        assert!(super::build_proxy_args(&p, &settings(), Some("subs.ass"), "out.mp4").is_ok());
+        assert!(validate_composable(&p).is_ok());
+    }
 
-        // The proxy builder and both spawn entry points share the check.
-        assert!(super::build_proxy_args(&p, &settings(), None, "out.mp4").is_err());
-        assert!(validate_composable(&p).is_err());
+    /// A project with NO captions but a text overlay still needs the `ass=`
+    /// node — the seam `run_compose`'s old `captions.is_empty()` check got
+    /// wrong the moment the writer learned about text.
+    #[test]
+    fn text_only_project_still_wants_an_ass_node() {
+        let mut p = baseline_project();
+        p.captions.clear();
+        p.tracks.push(track("o1", TrackKind::Overlay, 2));
+        p.timeline_items.push(text_item("tx1", "o1", 1000, 2000));
+        assert!(
+            crate::services::export::ass_has_events(&p),
+            "the sidecar draws the overlay, so the graph must apply it"
+        );
+
+        let mut without = baseline_project();
+        without.captions.clear();
+        assert!(
+            !crate::services::export::ass_has_events(&without),
+            "nothing to draw → no ass= node"
+        );
     }
 
     #[test]
@@ -2328,50 +2628,52 @@ mod tests {
         p.timeline_items.push(g);
 
         assert!(!is_simple_timeline(&p));
-        let msg = validate_composable(&p)
-            .expect_err("a graphic overlay must not compose silently")
-            .to_string();
+        let err = validate_composable(&p).expect_err("a graphic overlay must not compose silently");
+        assert_eq!(err.code(), "validation", "got {err}");
+        let msg = err.to_string();
         assert!(
             msg.contains("Graphic"),
             "the error must name the kind: {msg}"
         );
+        assert!(msg.contains("gx1"), "the error must name the item: {msg}");
+        // Both builders and both spawn entry points share the check.
+        assert!(super::build_filter_complex(&p, &settings(), None, "out.mp4").is_err());
+        assert!(super::build_proxy_args(&p, &settings(), None, "out.mp4").is_err());
     }
 
     /// Only content that WOULD be seen counts. A disabled overlay, or one on a
-    /// hidden track, is absent from the preview too — there is nothing to lose,
-    /// so it must neither block the fast path nor fail the render.
+    /// hidden track, is absent from the preview too — so it must not reach the
+    /// sidecar either.
     #[test]
-    fn invisible_text_items_neither_block_nor_break() {
+    fn invisible_text_items_draw_nothing() {
         let mut disabled = baseline_project();
+        disabled.captions.clear();
         disabled.tracks.push(track("o1", TrackKind::Overlay, 2));
         let mut off = text_item("tx1", "o1", 1000, 2000);
         off.enabled = false;
         disabled.timeline_items.push(off);
-        assert!(
-            is_simple_timeline(&disabled),
-            "disabled overlay stays simple"
-        );
-        assert!(validate_composable(&disabled).is_ok());
+        assert!(is_simple_timeline(&disabled));
+        assert!(!crate::services::export::ass_has_events(&disabled));
+        assert!(!crate::services::export::write_ass(&disabled).contains("Velkommen"));
 
         let mut hidden = baseline_project();
+        hidden.captions.clear();
         let mut t = track("o1", TrackKind::Overlay, 2);
         t.enabled = false;
         hidden.tracks.push(t);
         hidden
             .timeline_items
             .push(text_item("tx1", "o1", 1000, 2000));
-        assert!(
-            is_simple_timeline(&hidden),
-            "overlay on a hidden track stays simple"
-        );
-        assert!(validate_composable(&hidden).is_ok());
+        assert!(is_simple_timeline(&hidden));
+        assert!(!crate::services::export::ass_has_events(&hidden));
+        assert!(!crate::services::export::write_ass(&hidden).contains("Velkommen"));
     }
 
-    /// Cross-layer: whatever the REAL `add_text_item` op produces must hit the
-    /// refusal, not the shortcut. Pins the op ↔ compose seam rather than this
+    /// Cross-layer: whatever the REAL `add_text_item` op produces must reach
+    /// the sidecar. Pins the op ↔ compose ↔ writer seam rather than this
     /// module's own fixture.
     #[test]
-    fn real_add_text_item_output_is_refused_not_dropped() {
+    fn real_add_text_item_output_is_rendered_not_refused() {
         let mut p = baseline_project();
         p.tracks.push(track("o1", TrackKind::Overlay, 2));
         let p = crate::services::timeline_ops::add_text_item(
@@ -2384,14 +2686,13 @@ mod tests {
         )
         .expect("adding a text overlay is a legal edit");
 
+        assert!(validate_composable(&p).is_ok());
+        assert!(super::build_filter_complex(&p, &settings(), Some("s.ass"), "out.mp4").is_ok());
+        let ass = crate::services::export::write_ass(&p);
         assert!(
-            !is_simple_timeline(&p),
-            "the op's own output must leave the burn-in fast path"
+            ass.contains("Dialogue: 1,0:00:01.00,0:00:03.00,Default,,0,0,0,,"),
+            "the op's own output must reach the sidecar with its timeline times: {ass}"
         );
-        let msg = super::build_filter_complex(&p, &settings(), None, "out.mp4")
-            .expect_err("the op's own output must be refused, not rendered without the text")
-            .to_string();
-        assert!(msg.contains("Text"), "got {msg}");
     }
 
     // ── Transitions must not eat the transform ──────────────────────────────
@@ -2427,10 +2728,18 @@ mod tests {
             g.contains("scale=iw*0.4:ih*0.4"),
             "transform scale lost: {g}"
         );
-        // …it is NOT overwritten by a fit-to-frame scale…
+        // …and the fit-to-canvas scale that PRECEDES it does not eat it: the
+        // fit is a contain (`force_original_aspect_ratio=decrease`) applied
+        // before the transform, so `iw`/`ih` are the canvas and `iw*0.4` is
+        // 40 % of the FRAME. The old bug emitted a bare `scale=1920:1080`
+        // INSTEAD of the transform, in a branch that never reached an overlay.
         assert!(
-            !g.contains("scale=1920:1080"),
-            "the fit-to-frame scale is back — it eats the transform: {g}"
+            g.contains("scale=1920:1080:force_original_aspect_ratio=decrease"),
+            "the fit must be a contain, never a stretch: {g}"
+        );
+        assert!(
+            !g.contains("scale=1920:1080[") && !g.contains("scale=1920:1080,"),
+            "a bare fit-to-frame stretch is back — it eats the transform: {g}"
         );
         // …and the placement reaches an overlay: 1920*0.55 = 1056, 1080*0.10 = 108.
         assert!(
@@ -2616,7 +2925,8 @@ mod tests {
             vec![],
         );
         let g0 = fc(&build_filter_complex(&p0, &settings(), None, "out.mp4"));
-        assert!(g0.contains("setpts=PTS-STARTPTS[pv0]"), "got {g0}");
+        assert!(g0.contains("setpts=PTS-STARTPTS,"), "got {g0}");
+        assert!(!g0.contains("setpts=PTS-STARTPTS+"), "got {g0}");
     }
 
     #[test]

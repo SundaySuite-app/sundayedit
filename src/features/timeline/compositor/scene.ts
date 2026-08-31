@@ -19,8 +19,10 @@
  * | `overlay=<W*x>:<H*y>`                   | `x`, `y` (top-left, unscaled) |
  * | per-item effect chain (`eq=`/`hue=`)    | `colorMatrix`                 |
  *
- * Note what that table means: the clip is overlaid at its SOURCE size times
- * `scale` — the export does not fit media to the canvas, and neither do we.
+ * Since R5 the export FITS each clip to the canvas (contain, centred) before
+ * applying the transform, so `scale` is a fraction of the FRAME, not of the
+ * source pixels. We mirror that here by folding the fit factor into the scale
+ * and offsetting x/y by the resulting letterbox — see `fitLayerGeometry`.
  *
  * ── Deliberately not modelled ───────────────────────────────────────────────
  * `Transform.crop` (the export's `crop=` filter) is not described here. The
@@ -45,7 +47,11 @@ export interface CompositorLayer {
   /** Top-left position on the project canvas, in canvas pixels. */
   x: number;
   y: number;
-  /** Uniform scale applied to the SOURCE pixels (not a fit-to-canvas). */
+  /**
+   * Uniform scale applied to the source pixels, with the canvas fit already
+   * folded in — so this is `fitFactor * transform.scale`, and a clip with
+   * `transform.scale = 1` fills the canvas exactly as the export renders it.
+   */
   scale: number;
   rotationRad: number;
   alpha: number;
@@ -83,6 +89,44 @@ const FALLBACK_HEIGHT = 1080;
  * neither drawn NOR counted — so the "preview is approximate" badge stayed
  * silent about the very stack it exists to warn about.
  */
+/**
+ * Mirror of the export's fit-then-transform geometry (`compose.rs::fit_filters`
+ * followed by `transform_filters`).
+ *
+ * The export scales each clip to `contain` the canvas, centres it, and only
+ * then applies `Transform`. So the drawn picture is:
+ *
+ *   k      = min(W / sw, H / sh)
+ *   drawnW = sw * k * scale        drawnX = W * x + ((W - sw * k) / 2) * scale
+ *   drawnH = sh * k * scale        drawnY = H * y + ((H - sh * k) / 2) * scale
+ *
+ * A source that already matches the canvas aspect gives `k = W / sw` and a zero
+ * centring term, so this collapses to the pre-R5 behaviour for the common case.
+ *
+ * `sw`/`sh` come from the media pool, which since R5 stores DISPLAY dimensions
+ * (rotation-aware). A project saved before that fix still holds the pre-rotation
+ * numbers for a rotated clip until its media is re-probed; we fall back to the
+ * canvas size when they are missing or nonsensical, which yields `k = 1` and the
+ * old geometry rather than a wildly wrong frame.
+ */
+export function fitLayerGeometry(
+  canvasW: number,
+  canvasH: number,
+  sourceW: number,
+  sourceH: number,
+  transform: { x: number; y: number; scale: number },
+): { scale: number; x: number; y: number } {
+  const sw = sourceW > 0 ? sourceW : canvasW;
+  const sh = sourceH > 0 ? sourceH : canvasH;
+  const scale = transform.scale > 0 ? transform.scale : 0;
+  const k = Math.min(canvasW / sw, canvasH / sh);
+  return {
+    scale: k * scale,
+    x: Math.round(canvasW * transform.x + ((canvasW - sw * k) / 2) * scale),
+    y: Math.round(canvasH * transform.y + ((canvasH - sh * k) / 2) * scale),
+  };
+}
+
 export function describeScene(
   project: Project | undefined,
   playheadMs: number,
@@ -112,6 +156,8 @@ export function describeScene(
     unsupported.push("stacked-layers");
   }
 
+  const fitted = fitLayerGeometry(width, height, media.width, media.height, t);
+
   return {
     width,
     height,
@@ -119,9 +165,9 @@ export function describeScene(
       {
         itemId: item.id,
         mediaPath: media.path,
-        x: Math.round(width * t.x),
-        y: Math.round(height * t.y),
-        scale: t.scale > 0 ? t.scale : 0,
+        x: fitted.x,
+        y: fitted.y,
+        scale: fitted.scale,
         rotationRad: (t.rotation_deg * Math.PI) / 180,
         alpha: Math.min(1, Math.max(0, t.opacity)),
         colorMatrix: stackColorMatrix(item.effects),

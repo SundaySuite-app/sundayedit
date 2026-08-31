@@ -600,6 +600,14 @@ const en = {
   inspectorX: "X",
   inspectorY: "Y",
 
+  // ── Text overlay (R5-C) ──────────────────────────────────────────────────
+  inspectorTextHeader: "Text overlay",
+  inspectorTextLabel: "Text",
+  inspectorTextAppliesAtExport:
+    "The overlay is burned in at export — the live preview does not draw it yet.",
+  timelineAddText: "Add text overlay",
+  timelineAddTextPlaceholder: "Text",
+
   // ── Audio (R2) ───────────────────────────────────────────────────────────
   inspectorAudioHeader: "Audio",
   inspectorGain: "Gain",
@@ -1183,6 +1191,14 @@ const no: Catalog = {
   inspectorX: "X",
   inspectorY: "Y",
 
+  // ── Text overlay (R5-C) ──────────────────────────────────────────────────
+  inspectorTextHeader: "Tekstoverlegg",
+  inspectorTextLabel: "Tekst",
+  inspectorTextAppliesAtExport:
+    "Overlegget brennes inn ved eksport — direktevisningen tegner det ikke ennå.",
+  timelineAddText: "Legg til tekstoverlegg",
+  timelineAddTextPlaceholder: "Tekst",
+
   // ── Lyd (R2) ─────────────────────────────────────────────────────────────
   inspectorAudioHeader: "Lyd",
   inspectorGain: "Nivå",
@@ -1765,6 +1781,14 @@ const sv: Catalog = {
   inspectorX: "X",
   inspectorY: "Y",
 
+  // ── Text overlay (R5-C) ──────────────────────────────────────────────────
+  inspectorTextHeader: "Textöverlägg",
+  inspectorTextLabel: "Text",
+  inspectorTextAppliesAtExport:
+    "Överlägget bränns in vid export — direktvisningen ritar det inte ännu.",
+  timelineAddText: "Lägg till textöverlägg",
+  timelineAddTextPlaceholder: "Text",
+
   // ── Ljud (R2) ────────────────────────────────────────────────────────────
   inspectorAudioHeader: "Ljud",
   inspectorGain: "Nivå",
@@ -2338,6 +2362,14 @@ const da: Catalog = {
   inspectorScale: "Skala",
   inspectorX: "X",
   inspectorY: "Y",
+
+  // ── Text overlay (R5-C) ──────────────────────────────────────────────────
+  inspectorTextHeader: "Tekstoverlay",
+  inspectorTextLabel: "Tekst",
+  inspectorTextAppliesAtExport:
+    "Overlayet brændes ind ved eksport — livevisningen tegner det ikke endnu.",
+  timelineAddText: "Tilføj tekstoverlay",
+  timelineAddTextPlaceholder: "Tekst",
 
   // ── Lyd (R2) ─────────────────────────────────────────────────────────────
   inspectorAudioHeader: "Lyd",
@@ -2923,6 +2955,14 @@ const de: Catalog = {
   inspectorX: "X",
   inspectorY: "Y",
 
+  // ── Text overlay (R5-C) ──────────────────────────────────────────────────
+  inspectorTextHeader: "Text-Overlay",
+  inspectorTextLabel: "Text",
+  inspectorTextAppliesAtExport:
+    "Das Overlay wird beim Export eingebrannt — die Live-Vorschau zeichnet es noch nicht.",
+  timelineAddText: "Text-Overlay hinzufügen",
+  timelineAddTextPlaceholder: "Text",
+
   // ── Audio (R2) ───────────────────────────────────────────────────────────
   inspectorAudioHeader: "Audio",
   inspectorGain: "Pegel",
@@ -3505,6 +3545,14 @@ const fr: Catalog = {
   inspectorX: "X",
   inspectorY: "Y",
 
+  // ── Text overlay (R5-C) ──────────────────────────────────────────────────
+  inspectorTextHeader: "Incrustation de texte",
+  inspectorTextLabel: "Texte",
+  inspectorTextAppliesAtExport:
+    "L'incrustation est gravée à l'export — l'aperçu en direct ne la dessine pas encore.",
+  timelineAddText: "Ajouter une incrustation de texte",
+  timelineAddTextPlaceholder: "Texte",
+
   // ── Audio (R2) ───────────────────────────────────────────────────────────
   inspectorAudioHeader: "Audio",
   inspectorGain: "Gain",
@@ -4078,6 +4126,14 @@ const pl: Catalog = {
   inspectorScale: "Skala",
   inspectorX: "X",
   inspectorY: "Y",
+
+  // ── Text overlay (R5-C) ──────────────────────────────────────────────────
+  inspectorTextHeader: "Nakładka tekstowa",
+  inspectorTextLabel: "Tekst",
+  inspectorTextAppliesAtExport:
+    "Nakładka jest wypalana przy eksporcie — podgląd na żywo jeszcze jej nie rysuje.",
+  timelineAddText: "Dodaj nakładkę tekstową",
+  timelineAddTextPlaceholder: "Tekst",
 
   // ── Dźwięk (R2) ──────────────────────────────────────────────────────────
   inspectorAudioHeader: "Dźwięk",

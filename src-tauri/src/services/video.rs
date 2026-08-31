@@ -64,12 +64,46 @@ pub fn accepted_extensions() -> Vec<&'static str> {
 
 // ── Metadata ──────────────────────────────────────────────────────────────────
 
+/// The frame-rate window this app is willing to probe, canvas and render at.
+///
+/// `MIN_FPS` is where a "frame rate" stops describing motion; `MAX_FPS` is
+/// comfortably above every real capture device (240 fps slow-motion phones)
+/// and far below the four-digit tick bases VFR containers report.
+pub const MIN_FPS: f32 = 1.0;
+pub const MAX_FPS: f32 = 240.0;
+/// What we canvas at when nothing plausible could be read at all.
+pub const DEFAULT_FPS: f32 = 30.0;
+
+/// Is `fps` a rate a real camera or screen recorder could have produced?
+pub fn plausible_fps(fps: f32) -> bool {
+    fps.is_finite() && (MIN_FPS..=MAX_FPS).contains(&fps)
+}
+
+/// Force any frame rate into `MIN_FPS..=MAX_FPS`, falling back to
+/// `DEFAULT_FPS` for anything non-finite or non-positive.
+///
+/// This is the last line of defence, mirrored in TypeScript by
+/// `composeEngine.ts::saneFps` and pinned by `fps_sanity_parity.rs`: an
+/// unclamped rate flows straight into the export as `-r 1000`, which produces
+/// a file no player will scrub and an encode that takes ~33× as long as the
+/// footage deserves.
+pub fn sane_fps(fps: f32) -> f32 {
+    if !fps.is_finite() || fps <= 0.0 {
+        DEFAULT_FPS
+    } else {
+        fps.clamp(MIN_FPS, MAX_FPS)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../src/lib/bindings/VideoMetadata.ts")]
 pub struct VideoMetadata {
     #[ts(type = "number")]
     pub duration_ms: i64,
+    /// DISPLAY width — the coded width, with width/height swapped when the
+    /// container asks for a quarter turn. See `parse_rotation`.
     pub width: i32,
+    /// DISPLAY height. See `width`.
     pub height: i32,
     pub fps: f32,
     pub video_codec: Option<String>,
@@ -157,14 +191,27 @@ pub fn parse_ffprobe_json(json: &str) -> AppResult<VideoMetadata> {
         .map(|s| s.to_string());
 
     let (width, height, fps, video_codec) = match video_stream {
-        Some(s) => (
-            s.get("width").and_then(|w| w.as_i64()).unwrap_or(0) as i32,
-            s.get("height").and_then(|h| h.as_i64()).unwrap_or(0) as i32,
-            parse_fps(s.get("r_frame_rate").and_then(|r| r.as_str())),
-            s.get("codec_name")
-                .and_then(|c| c.as_str())
-                .map(String::from),
-        ),
+        Some(s) => {
+            let coded_w = s.get("width").and_then(|w| w.as_i64()).unwrap_or(0) as i32;
+            let coded_h = s.get("height").and_then(|h| h.as_i64()).unwrap_or(0) as i32;
+            // Quarter turn → the frame everyone downstream sees is transposed.
+            let (w, h) = if parse_rotation(s) % 180 == 90 {
+                (coded_h, coded_w)
+            } else {
+                (coded_w, coded_h)
+            };
+            (
+                w,
+                h,
+                choose_fps(
+                    s.get("r_frame_rate").and_then(|r| r.as_str()),
+                    s.get("avg_frame_rate").and_then(|r| r.as_str()),
+                ),
+                s.get("codec_name")
+                    .and_then(|c| c.as_str())
+                    .map(String::from),
+            )
+        }
         None => (0, 0, 0.0, None),
     };
 
@@ -199,6 +246,74 @@ pub fn parse_ffprobe_json(json: &str) -> AppResult<VideoMetadata> {
         container,
         kind,
     })
+}
+
+/// The display rotation the container asks for, normalised to 0/90/180/270.
+///
+/// MEASURED, not assumed (ffmpeg 6.0 and 8.1, `-metadata:s:v rotate=90` and
+/// `-display_rotation`): ffmpeg AUTO-ROTATES on decode, and it does so inside
+/// `-filter_complex` too — a stream ffprobe reports as `320x120` arrives in
+/// the graph as `120x320`. So the honest number to report is the DISPLAY size,
+/// and the filtergraph must NOT rotate again (`transform_filters` only ever
+/// applies the user's own `Transform.rotation_deg`).
+///
+/// Two spellings, because both are in the wild:
+///   - `side_data_list[].rotation` — the display matrix, what every ffprobe
+///     since 4.x emits and the only spelling ffprobe 8 still emits.
+///   - `tags.rotate` — the legacy mov/mp4 tag, still written by ffprobe 6 and
+///     by plenty of phone/camera firmware. Its sign is the INVERSE of the
+///     display matrix's (`rotate=90` writes a matrix reading `rotation: 90`
+///     and a tag reading `270`), which is irrelevant here: the only question
+///     we ask of the answer is "is this a quarter turn?", and `90` and `270`
+///     answer it identically.
+fn parse_rotation(stream: &serde_json::Value) -> i32 {
+    let from_side_data = stream
+        .get("side_data_list")
+        .and_then(|l| l.as_array())
+        .and_then(|list| list.iter().find_map(|sd| sd.get("rotation")))
+        .and_then(|r| r.as_f64());
+
+    let from_tag = || {
+        stream
+            .get("tags")
+            .and_then(|t| t.get("rotate"))
+            .and_then(|r| {
+                r.as_f64()
+                    .or_else(|| r.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+            })
+    };
+
+    let deg = from_side_data.or_else(from_tag).unwrap_or(0.0);
+    if !deg.is_finite() {
+        return 0;
+    }
+    // Snap to the nearest quarter turn, then wrap into 0..360 (`%` in Rust
+    // keeps the sign of the dividend, and `-90` is the common spelling).
+    let quarters = (deg / 90.0).round() as i64;
+    (((quarters % 4) + 4) % 4) as i32 * 90
+}
+
+/// Which of ffprobe's two frame-rate fields to believe.
+///
+/// `r_frame_rate` is the NOMINAL rate — for a VFR screen recording it is the
+/// container's tick base (`1000/1`, `600/1`), not a rate anything was shot at.
+/// Left unchecked it flowed all the way into the export as `-r 1000`.
+/// `avg_frame_rate` is the measured average over the file, which is exactly
+/// the right answer for VFR sources. So: believe `r_frame_rate` while it is
+/// plausible, otherwise `avg_frame_rate`, otherwise clamp whatever we got.
+fn choose_fps(r_frame_rate: Option<&str>, avg_frame_rate: Option<&str>) -> f32 {
+    let r = parse_fps(r_frame_rate);
+    if plausible_fps(r) {
+        return r;
+    }
+    let avg = parse_fps(avg_frame_rate);
+    if plausible_fps(avg) {
+        return avg;
+    }
+    // Neither field is renderable. Clamp the larger of the two into the
+    // window (a `1000/1` tick base becomes `MAX_FPS`, a `1/5` timelapse
+    // `MIN_FPS`); `sane_fps` turns "nothing at all" into `DEFAULT_FPS`.
+    sane_fps(r.max(avg))
 }
 
 /// ffprobe reports frame rate as a rational string like "30000/1001".
@@ -584,6 +699,123 @@ mod tests {
         assert!((parse_fps(Some("25/1")) - 25.0).abs() < 0.001);
         assert_eq!(parse_fps(Some("0/0")), 0.0); // div by zero guard
         assert_eq!(parse_fps(None), 0.0);
+    }
+
+    // ── fps sanity ──────────────────────────────────────────────────────────
+    #[test]
+    fn an_implausible_nominal_rate_falls_back_to_the_measured_average() {
+        // The VFR screen-recording shape: 1 ms tick base, ~30 fps in practice.
+        assert!((choose_fps(Some("1000/1"), Some("30000/1001")) - 29.97).abs() < 0.01);
+        // A plausible nominal rate is believed even when avg disagrees (a
+        // trimmed clip's avg is routinely a hair off; `r` is the real rate).
+        assert!((choose_fps(Some("25/1"), Some("24/1")) - 25.0).abs() < 0.001);
+        // Nothing usable anywhere → the window's default, not 0 and not 1000.
+        assert_eq!(choose_fps(Some("0/0"), Some("0/0")), DEFAULT_FPS);
+        assert_eq!(choose_fps(None, None), DEFAULT_FPS);
+        // Both absurd → clamped, never passed through.
+        assert_eq!(choose_fps(Some("1000/1"), Some("600/1")), MAX_FPS);
+        // A real slow timelapse: below the window, clamped up rather than
+        // dropped to the default.
+        assert_eq!(choose_fps(Some("1/5"), Some("1/5")), MIN_FPS);
+    }
+
+    #[test]
+    fn sane_fps_covers_every_way_a_rate_can_be_useless() {
+        assert_eq!(sane_fps(0.0), DEFAULT_FPS);
+        assert_eq!(sane_fps(-30.0), DEFAULT_FPS);
+        assert_eq!(sane_fps(f32::NAN), DEFAULT_FPS);
+        assert_eq!(sane_fps(f32::INFINITY), DEFAULT_FPS);
+        assert_eq!(sane_fps(1000.0), MAX_FPS);
+        assert_eq!(sane_fps(0.25), MIN_FPS);
+        assert!(
+            (sane_fps(29.97) - 29.97).abs() < 1e-6,
+            "a real rate is left alone"
+        );
+    }
+
+    // ── rotation ────────────────────────────────────────────────────────────
+    fn stream_with(extra: &str) -> serde_json::Value {
+        serde_json::from_str(&format!(
+            r#"{{ "codec_type": "video", "width": 1920, "height": 1080,
+                  "r_frame_rate": "30/1" {extra} }}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn reads_rotation_from_the_display_matrix() {
+        let s = stream_with(
+            r#", "side_data_list": [{ "side_data_type": "Display Matrix", "rotation": -90 }]"#,
+        );
+        assert_eq!(parse_rotation(&s), 270);
+        let s = stream_with(r#", "side_data_list": [{ "rotation": 90 }]"#);
+        assert_eq!(parse_rotation(&s), 90);
+        let s = stream_with(r#", "side_data_list": [{ "rotation": 180 }]"#);
+        assert_eq!(parse_rotation(&s), 180);
+    }
+
+    #[test]
+    fn falls_back_to_the_legacy_rotate_tag() {
+        // ffprobe 6 writes both; ffprobe 8 writes only the matrix; camera
+        // firmware and older muxers write only the tag.
+        let s = stream_with(r#", "tags": { "rotate": "270" }"#);
+        assert_eq!(parse_rotation(&s), 270);
+        // Some tools emit it as a number rather than a string.
+        let s = stream_with(r#", "tags": { "rotate": 90 }"#);
+        assert_eq!(parse_rotation(&s), 90);
+        // The display matrix WINS when both are present — it is the field
+        // every modern ffprobe agrees on, and the two disagree in sign.
+        let s =
+            stream_with(r#", "tags": { "rotate": "270" }, "side_data_list": [{ "rotation": 90 }]"#);
+        assert_eq!(parse_rotation(&s), 90);
+    }
+
+    #[test]
+    fn a_missing_or_junk_rotation_is_no_rotation() {
+        assert_eq!(parse_rotation(&stream_with("")), 0);
+        assert_eq!(
+            parse_rotation(&stream_with(r#", "tags": { "rotate": "" }"#)),
+            0
+        );
+        assert_eq!(parse_rotation(&stream_with(r#", "side_data_list": []"#)), 0);
+        // Non-quarter turns snap to the nearest quarter (a 5° tilt is not a
+        // transpose, and ffmpeg's autorotate would not transpose for it).
+        assert_eq!(
+            parse_rotation(&stream_with(r#", "tags": { "rotate": "5" }"#)),
+            0
+        );
+        assert_eq!(
+            parse_rotation(&stream_with(r#", "tags": { "rotate": "-450" }"#)),
+            270
+        );
+    }
+
+    #[test]
+    fn a_quarter_turn_swaps_the_reported_frame() {
+        let json = |extra: &str| {
+            format!(
+                r#"{{ "streams": [ {{ "codec_type": "video", "codec_name": "h264",
+                       "width": 1920, "height": 1080, "r_frame_rate": "30/1" {extra} }} ],
+                     "format": {{ "duration": "10.0" }} }}"#
+            )
+        };
+        let upright = parse_ffprobe_json(&json("")).unwrap();
+        assert_eq!((upright.width, upright.height), (1920, 1080));
+
+        // The portrait-iPhone shape: stored landscape, displayed portrait.
+        let portrait =
+            parse_ffprobe_json(&json(r#", "side_data_list": [{ "rotation": -90 }]"#)).unwrap();
+        assert_eq!(
+            (portrait.width, portrait.height),
+            (1080, 1920),
+            "a quarter turn must be reported as the DISPLAY frame — ffmpeg \
+             auto-rotates on decode, so this is the size the graph will see"
+        );
+
+        // A half turn is not a transpose.
+        let upside_down =
+            parse_ffprobe_json(&json(r#", "side_data_list": [{ "rotation": 180 }]"#)).unwrap();
+        assert_eq!((upside_down.width, upside_down.height), (1920, 1080));
     }
 
     // ── ffprobe JSON parsing ─────────────────────────────────────────────────

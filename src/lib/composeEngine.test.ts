@@ -6,6 +6,10 @@ import {
   renderPreviewProxy,
   defaultComposeSettings,
   detectDefaultEncoder,
+  saneFps,
+  MIN_FPS,
+  MAX_FPS,
+  DEFAULT_FPS,
 } from "./composeEngine";
 import { SAMPLE_PROJECT } from "./sampleProject";
 import type { ComposeProgress, Project } from "./bindings";
@@ -266,6 +270,43 @@ describe("defaultComposeSettings", () => {
   it("rounds fractional frame rates", () => {
     const ntsc: Project = { ...SAMPLE_PROJECT, video_fps: 29.97 };
     expect(defaultComposeSettings(ntsc).fps).toBe(30);
+  });
+
+  // Regression (R5-A): a VFR screen recording's nominal `r_frame_rate` is the
+  // container's tick base — `1000/1` is routine — and it used to travel from
+  // the probe through `video_fps` into the export as `-r 1000`. The clamp is
+  // mirrored in Rust `video::sane_fps`; `fps_sanity_parity.rs` reads the
+  // constants out of composeEngine.ts and checks the two windows are one
+  // window.
+  it("clamps an absurd project frame rate instead of exporting it", () => {
+    const vfr: Project = { ...SAMPLE_PROJECT, video_fps: 1000 };
+    expect(defaultComposeSettings(vfr).fps).toBe(MAX_FPS);
+  });
+
+  it("clamps rather than rounds at the top of the window", () => {
+    // Rounding first would give 241 — outside the window the backend accepts.
+    const fast: Project = { ...SAMPLE_PROJECT, video_fps: 240.6 };
+    expect(defaultComposeSettings(fast).fps).toBe(MAX_FPS);
+  });
+
+  describe("saneFps", () => {
+    it("leaves a real rate alone", () => {
+      expect(saneFps(29.97)).toBeCloseTo(29.97, 5);
+      expect(saneFps(60)).toBe(60);
+      expect(saneFps(MAX_FPS)).toBe(MAX_FPS);
+      expect(saneFps(MIN_FPS)).toBe(MIN_FPS);
+    });
+
+    it("falls back for anything non-finite or non-positive", () => {
+      for (const bad of [0, -30, NaN, Infinity, -Infinity]) {
+        expect(saneFps(bad)).toBe(DEFAULT_FPS);
+      }
+    });
+
+    it("clamps both ends of the window", () => {
+      expect(saneFps(1000)).toBe(MAX_FPS);
+      expect(saneFps(0.2)).toBe(MIN_FPS);
+    });
   });
 
   // Regression (seam-compose-settings-missing-even-up / diff-compose-settings-

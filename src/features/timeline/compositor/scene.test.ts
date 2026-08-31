@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import type { Effect, Project, TimelineItem } from "@/lib/bindings";
 import { SAMPLE_PROJECT } from "@/lib/sampleProject";
 import { stackColorMatrix } from "../effects/registry";
-import { approximationNotice, describeScene } from "./scene";
+import { approximationNotice, describeScene, fitLayerGeometry } from "./scene";
 
 const BASE = SAMPLE_PROJECT;
 const ITEM = BASE.timeline_items[0];
@@ -235,5 +235,67 @@ describe("approximationNotice", () => {
       t,
     );
     expect(notice).toContain("<previewApproxCrop>");
+  });
+});
+
+// ── Fit-to-canvas parity with the export (R5) ────────────────────────────────
+// compose.rs fits every clip to the canvas (contain, centred) BEFORE applying
+// the transform. These pin the four numbers from that geometry, so the GPU
+// preview cannot silently drift back to the pre-R5 "draw at source size" rule.
+describe("fitLayerGeometry mirrors the export's fit-then-transform", () => {
+  it("a source matching the canvas aspect keeps the pre-R5 geometry", () => {
+    // k = W/sw exactly, centring term is zero → x/y are the plain fractions.
+    const g = fitLayerGeometry(1920, 1080, 3840, 2160, {
+      x: 0.25,
+      y: 0.5,
+      scale: 1,
+    });
+    expect(g.scale).toBeCloseTo(0.5, 6); // 1920/3840
+    expect(g.x).toBe(480);
+    expect(g.y).toBe(540);
+  });
+
+  it("an oversized clip is contained, not cropped", () => {
+    // 4K into 1080p: k = 0.5, so the whole picture lands inside the frame.
+    const g = fitLayerGeometry(1920, 1080, 3840, 2160, {
+      x: 0,
+      y: 0,
+      scale: 1,
+    });
+    expect(3840 * g.scale).toBeCloseTo(1920, 3);
+    expect(2160 * g.scale).toBeCloseTo(1080, 3);
+  });
+
+  it("a portrait clip is letterboxed and centred in a landscape canvas", () => {
+    // 1080x1920 into 1920x1080: k = min(1.777…, 0.5625) = 0.5625 → 607.5 wide,
+    // so the centring offset is (1920 - 607.5)/2 = 656.25 → 656 rounded.
+    const g = fitLayerGeometry(1920, 1080, 1080, 1920, {
+      x: 0,
+      y: 0,
+      scale: 1,
+    });
+    expect(1080 * g.scale).toBeCloseTo(607.5, 3);
+    expect(1920 * g.scale).toBeCloseTo(1080, 3);
+    expect(g.x).toBe(656);
+    expect(g.y).toBe(0);
+  });
+
+  it("transform.scale is a fraction of the FRAME, not of the source", () => {
+    // The whole point of the R5 change: 0.4 must draw 40% of the canvas width
+    // regardless of how large the source happens to be.
+    const g = fitLayerGeometry(1920, 1080, 3840, 2160, {
+      x: 0,
+      y: 0,
+      scale: 0.4,
+    });
+    expect(3840 * g.scale).toBeCloseTo(1920 * 0.4, 3);
+  });
+
+  it("falls back to the canvas size when pool dimensions are missing", () => {
+    // A pre-R5 project can carry 0/absent dimensions; k = 1 keeps the old
+    // geometry rather than producing a wildly wrong frame.
+    const g = fitLayerGeometry(1920, 1080, 0, 0, { x: 0.1, y: 0, scale: 1 });
+    expect(g.scale).toBe(1);
+    expect(g.x).toBe(192);
   });
 });

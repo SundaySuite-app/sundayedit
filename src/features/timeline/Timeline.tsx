@@ -54,6 +54,7 @@ import {
   RotateCcw,
   FoldHorizontal,
   AlertTriangle,
+  Type,
   X,
 } from "lucide-react";
 
@@ -119,6 +120,9 @@ const LANE_H = 52;
 // truncated-to-nothing for real users. Widened again from 184 (R2 audio): the
 // compact track-fader slider is an 8th control on that same row.
 const GUTTER_W = 276;
+
+/** Default on-timeline length of a text overlay added from the toolbar. */
+const DEFAULT_TEXT_MS = 3000;
 
 /** Caption move/resize drag (flagship captions on a caption track). */
 type CaptionDrag = {
@@ -1049,6 +1053,57 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
     }).catch(() => {});
   }
 
+  /**
+   * Add a TEXT OVERLAY at the playhead (R5-C).
+   *
+   * Everything happens inside ONE `run` callback, so creating the Overlay
+   * track, placing the item and nudging it off the frame corner land as a
+   * SINGLE undo entry — three separate `run` calls would make the user press
+   * ⌘Z three times to undo one button press.
+   *
+   * The nudge is not cosmetic: `Transform::default()` is `x: 0, y: 0`, and the
+   * export anchors a text overlay's TOP-LEFT at `(width*x, height*y)` — the
+   * same fractions `overlay=` uses for a picture clip — so an untouched item
+   * would render hard against the frame's corner. `0.08 / 0.78` is where a
+   * lower third goes; the inspector's X/Y sliders move it from there.
+   */
+  function addTextOverlay() {
+    setOpError(null);
+    const at = playheadMs;
+    void run(async (p) => {
+      let base = p;
+      let trackId = p.tracks.find(
+        (tr) => tr.kind === "overlay" && !tr.locked,
+      )?.id;
+      if (!trackId) {
+        base = await ipc.timeline.addTrack(
+          p,
+          "overlay",
+          t("mediaBinAddOverlayTrack"),
+        );
+        trackId = base.tracks.find(
+          (tr) => !p.tracks.some((old) => old.id === tr.id),
+        )?.id;
+        if (!trackId) return p;
+      }
+      const added = await ipc.timeline.addTextItem(
+        base,
+        trackId,
+        at,
+        DEFAULT_TEXT_MS,
+        t("timelineAddTextPlaceholder"),
+      );
+      const newId = newestTimelineItemId(base, added);
+      const placed = added.timeline_items.find((i) => i.id === newId);
+      if (!newId || !placed) return added;
+      return ipc.timeline.setTransform(added, newId, {
+        ...placed.transform,
+        x: 0.08,
+        y: 0.78,
+      });
+    }).catch((e) => setOpError((e as Error).message));
+  }
+
   // Remove an (empty) track. The backend rejects a non-empty one — surface
   // that message instead of failing silently (there is no ghost to snap back).
   const removeTrack = useCallback(
@@ -1292,6 +1347,16 @@ export function Timeline({ project, videoSrc, onSelectClip }: Props) {
           title={t("timelineSnap")}
         >
           <Magnet size={15} />
+        </button>
+        <button
+          type="button"
+          data-testid="timeline-add-text"
+          onClick={addTextOverlay}
+          className="grid h-7 w-7 place-items-center rounded-md text-[var(--color-fg-subtle)] hover:bg-[var(--color-bg-surface)] hover:text-[var(--color-fg)]"
+          aria-label={t("timelineAddText")}
+          title={t("timelineAddText")}
+        >
+          <Type size={15} />
         </button>
         <span className="text-[var(--text-ui-xs)] text-[var(--color-fg-subtle)]">
           {(view.pxPerMs * 1000).toFixed(1)} px/s

@@ -635,6 +635,33 @@ test("add-text-item op places a standalone text clip (no source media)", async (
   expect(added.track_id).toBe("to");
 });
 
+test("set-item-text op replaces a text overlay's spec in place", async ({
+  page,
+}) => {
+  const added = await invoke<DemoProject>(page, "op_add_text_item", {
+    project: demoProject(),
+    trackId: "to",
+    timelineStartMs: 2000,
+    durationMs: 3000,
+    text: "Lower third",
+  });
+  const id = added.timeline_items[added.timeline_items.length - 1].id;
+  const next = await invoke<DemoProject>(page, "op_set_item_text", {
+    project: added,
+    itemId: id,
+    text: "Velkommen",
+    styleId: "preset:tiktok_bold",
+  });
+  const edited = next.timeline_items.find((i) => i.id === id);
+  expect(edited?.text).toEqual({
+    text: "Velkommen",
+    style_id: "preset:tiktok_bold",
+  });
+  // Nothing else about the clip moved.
+  expect(edited?.timeline_start_ms).toBe(2000);
+  expect(next.timeline_items).toHaveLength(added.timeline_items.length);
+});
+
 // ── media + track lifecycle ───────────────────────────────────────────────────
 
 test("remove-media op is rejected while a clip still references it", async ({

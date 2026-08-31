@@ -1195,6 +1195,36 @@ pub fn add_text_item(
     finalize(next)
 }
 
+/// Replace a text overlay's `TextSpec` — the text itself and the style id it
+/// renders with (`None` = the project's default style).
+///
+/// Only a `TimelineItemKind::Text` item may carry one. Storing text on an A/V
+/// clip would be authored content the render has no node for — the same
+/// "the UI promises what the export cannot deliver" failure the curated effect
+/// registry exists to prevent — so the kind mismatch is REJECTED rather than
+/// clamped away. (Clamping is for values; this is a category error.)
+pub fn set_item_text(
+    project: &Project,
+    item_id: &str,
+    text: String,
+    style_id: Option<String>,
+) -> AppResult<Project> {
+    let mut next = project.clone();
+    let it = find_item_mut(&mut next, item_id)?;
+    if it.kind != TimelineItemKind::Text {
+        return Err(AppError::Validation(format!(
+            "timeline item {item_id:?} is a {:?} clip, not a text overlay — only a text \
+             overlay renders a TextSpec",
+            it.kind
+        )));
+    }
+    it.text = Some(TextSpec {
+        text,
+        style_id: style_id.filter(|s| !s.is_empty()),
+    });
+    finalize(next)
+}
+
 // ── helpers ─────────────────────────────────────────────────────────────────────
 
 fn find_item<'a>(project: &'a Project, id: &str) -> AppResult<(usize, &'a TimelineItem)> {
@@ -2598,6 +2628,62 @@ mod tests {
     fn add_text_item_unknown_track_rejected() {
         let p = base();
         let err = add_text_item(&p, "t1".into(), "nope", 0, 1000, "Hi".into()).unwrap_err();
+        assert_eq!(err.code(), "not_found");
+    }
+
+    // ── set_item_text ───────────────────────────────────────────────────────
+
+    fn with_text_item() -> Project {
+        let mut p = base();
+        p.tracks.push(track("ov", TrackKind::Overlay, 1));
+        add_text_item(&p, "t1".into(), "ov", 500, 3000, "Hello".into()).unwrap()
+    }
+
+    #[test]
+    fn set_item_text_replaces_the_spec() {
+        let p = with_text_item();
+        let r = set_item_text(&p, "t1", "Velkommen".into(), None).unwrap();
+        let it = r.timeline_items.iter().find(|i| i.id == "t1").unwrap();
+        assert_eq!(it.text.as_ref().unwrap().text, "Velkommen");
+        assert!(it.text.as_ref().unwrap().style_id.is_none());
+        // Only the spec moved.
+        assert_eq!(it.timeline_start_ms, 500);
+        assert_eq!((it.in_ms, it.out_ms), (0, 3000));
+    }
+
+    #[test]
+    fn set_item_text_stores_a_style_id_and_treats_empty_as_none() {
+        let p = with_text_item();
+        let r = set_item_text(&p, "t1", "Hei".into(), Some("preset:cinema".into())).unwrap();
+        let styled = r.timeline_items.iter().find(|i| i.id == "t1").unwrap();
+        assert_eq!(
+            styled.text.as_ref().unwrap().style_id.as_deref(),
+            Some("preset:cinema")
+        );
+        // An empty string is "no style", not a style named "" — the ASS writer
+        // would otherwise look up a block nothing can define.
+        let cleared = set_item_text(&r, "t1", "Hei".into(), Some(String::new())).unwrap();
+        let it = cleared
+            .timeline_items
+            .iter()
+            .find(|i| i.id == "t1")
+            .unwrap();
+        assert!(it.text.as_ref().unwrap().style_id.is_none());
+    }
+
+    /// Text on an A/V clip would be authored content no node renders. REJECT —
+    /// this is a category error, not a value to clamp.
+    #[test]
+    fn set_item_text_rejects_a_non_text_clip() {
+        let mut p = base();
+        p.timeline_items = vec![item("i1", "v1", Some("m1"), 0, 0, 1000)];
+        let err = set_item_text(&p, "i1", "Hei".into(), None).unwrap_err();
+        assert_eq!(err.code(), "validation", "got {err}");
+    }
+
+    #[test]
+    fn set_item_text_unknown_item_is_not_found() {
+        let err = set_item_text(&base(), "nope", "Hei".into(), None).unwrap_err();
         assert_eq!(err.code(), "not_found");
     }
 

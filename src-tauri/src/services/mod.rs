@@ -17,6 +17,7 @@
 //!   - `llm`           — Claude API client + AI polish/suggest/translate (Phase 4.1/4.3/7.1)
 //!   - `diarize`       — speaker diarization + roster management (Phase 4.2)
 //!   - `tiles`         — fixed-grid tile addressing for filmstrip/waveform caches (E3)
+//!   - `media_cache`   — bounded disk-cache sweep for filmstrip/thumbnail JPEGs
 //!   - `karaoke`       — SHARED per-word karaoke timing for ASS `\k` + the canvas overlay (E4a)
 //!   - `effects`       — curated clip effects: the shared preview↔ffmpeg registry (E6)
 
@@ -35,6 +36,7 @@ pub mod glossary;
 pub mod highlight_reel;
 pub mod karaoke;
 pub mod llm;
+pub mod media_cache;
 pub mod operations;
 pub mod project_file;
 pub mod reflow;

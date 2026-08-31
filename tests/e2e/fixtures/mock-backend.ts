@@ -850,6 +850,19 @@ function backend(): void {
     );
     return { ...project, timeline_items: next };
   }
+  function setItemText(
+    project: Project,
+    itemId: string,
+    text: string,
+    styleId: string | null,
+  ): Project {
+    const next = items(project).map((it) =>
+      it.id === itemId
+        ? { ...it, text: { text, style_id: styleId || null } }
+        : it,
+    );
+    return { ...project, timeline_items: next };
+  }
   function addTextItem(
     project: Project,
     trackId: string,
@@ -947,6 +960,11 @@ function backend(): void {
     // Window + process plugins the shell touches (close guard, relaunch).
     "plugin:window|create",
     "plugin:process|restart",
+    // Startup disk-cache sweep (media_cache.rs, fired from
+    // `thumbnails.ts`/`filmstrip.ts` on first use) — a one-time housekeeping
+    // side effect no spec asserts on; an empty answer is honest since the
+    // browser build has no real cache dir to sweep.
+    "prune_media_cache",
   ]);
 
   type Args = Record<string, unknown>;
@@ -1168,6 +1186,15 @@ function backend(): void {
       case "op_remove_effect":
         return Promise.resolve(
           removeEffect(project, args.itemId as string, args.kind as string),
+        );
+      case "op_set_item_text":
+        return Promise.resolve(
+          setItemText(
+            project,
+            args.itemId as string,
+            args.text as string,
+            (args.styleId as string | null) ?? null,
+          ),
         );
       case "op_add_text_item":
         return Promise.resolve(

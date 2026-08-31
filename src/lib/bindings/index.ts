@@ -11,6 +11,8 @@ export type { BurnInOptions }    from "./BurnInOptions";
 export type { ComposeSettings }  from "./ComposeSettings";
 export type { ComposeProgress }  from "./ComposeProgress";
 export type { Caption }          from "./Caption";
+export type { CacheDirPruneReport } from "./CacheDirPruneReport";
+export type { CachePruneReport } from "./CachePruneReport";
 export type { ExportConfig }     from "./ExportConfig";
 export type { ProjectMeta }      from "./ProjectMeta";
 export type { Clip }             from "./Clip";

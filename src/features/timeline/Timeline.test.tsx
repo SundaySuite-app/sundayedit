@@ -894,3 +894,151 @@ describe("Timeline — missing media indicator", () => {
     expect(screen.getByTitle("sermon.mp4")).toBeTruthy();
   });
 });
+
+// ── text overlay (R5-C) ──────────────────────────────────────────────────────
+// The toolbar's "Add text overlay" button is the only way into the feature.
+// Everything it does lives inside ONE `run` callback, so the whole gesture is
+// a SINGLE undo entry — and the new item is nudged off the frame corner,
+// because `Transform::default()` is (0, 0) and the export anchors a text
+// overlay's TOP-LEFT there.
+
+describe("Timeline — add text overlay", () => {
+  /** A minimal stand-in backend for the three ops the gesture chains. */
+  function stubOps() {
+    invoke.mockImplementation((cmd: unknown, rawArgs: unknown) => {
+      const args = rawArgs as { project: Project; [k: string]: unknown };
+      const p = args.project;
+      switch (cmd) {
+        case "op_add_track":
+          return Promise.resolve({
+            ...p,
+            tracks: [
+              ...p.tracks,
+              {
+                id: "to1",
+                kind: "overlay",
+                name: "Overlay",
+                index: 2,
+                enabled: true,
+                locked: false,
+                muted: false,
+                solo: false,
+                volume_db: 0,
+              },
+            ],
+          });
+        case "op_add_text_item":
+          return Promise.resolve({
+            ...p,
+            timeline_items: [
+              ...p.timeline_items,
+              {
+                ...p.timeline_items[0],
+                id: "tx-new",
+                track_id: args.trackId as string,
+                kind: "text",
+                source_media_id: null,
+                in_ms: 0,
+                out_ms: args.durationMs as number,
+                timeline_start_ms: args.timelineStartMs as number,
+                text: { text: args.text as string, style_id: null },
+              },
+            ],
+          });
+        case "op_set_transform":
+          return Promise.resolve(p);
+        default:
+          return Promise.reject(new Error("no tauri runtime under vitest"));
+      }
+    });
+  }
+
+  it("creates an overlay track, places the item and nudges it off the corner — as ONE undo entry", async () => {
+    stubOps();
+    render(<Timeline project={SAMPLE_PROJECT} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("timeline-add-text"));
+    });
+
+    // The waveform fetch fires on its own schedule — only the ops matter.
+    const ops = invoke.mock.calls
+      .map((c) => c[0] as string)
+      .filter((c) => c.startsWith("op_"));
+    expect(ops).toEqual([
+      "op_add_track",
+      "op_add_text_item",
+      "op_set_transform",
+    ]);
+    // The overlay lands on the freshly created track, at the playhead.
+    const opCalls = invoke.mock.calls.filter((c) =>
+      (c[0] as string).startsWith("op_"),
+    );
+    expect(opCalls[1][1]).toMatchObject({
+      trackId: "to1",
+      timelineStartMs: 0,
+    });
+    // …and NOT at the frame's top-left corner, which is what the identity
+    // transform would mean once the export anchors `\pos` there.
+    const placed = (opCalls[2][1] as { transform: { x: number; y: number } })
+      .transform;
+    expect(placed.x).toBeGreaterThan(0);
+    expect(placed.y).toBeGreaterThan(0);
+
+    // One gesture, one undo step.
+    expect(useProjectStore.getState().past).toHaveLength(1);
+  });
+
+  it("reuses an existing overlay track instead of creating another", async () => {
+    stubOps();
+    const withOverlay: Project = {
+      ...SAMPLE_PROJECT,
+      tracks: [
+        ...SAMPLE_PROJECT.tracks,
+        {
+          id: "to-existing",
+          kind: "overlay",
+          name: "Overlay",
+          index: 2,
+          enabled: true,
+          locked: false,
+          muted: false,
+          solo: false,
+          volume_db: 0,
+        },
+      ],
+    };
+    useProjectStore.setState({ project: withOverlay, past: [], future: [] });
+    render(<Timeline project={withOverlay} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("timeline-add-text"));
+    });
+
+    const ops = invoke.mock.calls.filter((c) =>
+      (c[0] as string).startsWith("op_"),
+    );
+    expect(ops.map((c) => c[0])).toEqual([
+      "op_add_text_item",
+      "op_set_transform",
+    ]);
+    expect(ops[0][1]).toMatchObject({ trackId: "to-existing" });
+  });
+
+  it("surfaces a backend rejection instead of failing silently", async () => {
+    invoke.mockImplementation((cmd: unknown) =>
+      cmd === "op_add_track"
+        ? Promise.reject(new Error("too many tracks"))
+        : Promise.reject(new Error("no tauri runtime under vitest")),
+    );
+    render(<Timeline project={SAMPLE_PROJECT} />);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("timeline-add-text"));
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toContain(
+        "too many tracks",
+      ),
+    );
+  });
+});

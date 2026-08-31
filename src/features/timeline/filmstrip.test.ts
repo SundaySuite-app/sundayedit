@@ -351,11 +351,14 @@ describe("requestFilmstripTile", () => {
     );
     const url = await requestFilmstripTile(MEDIA, 4, 1);
     expect(url).toContain("asset://");
-    const [cmd, args] = invoke.mock.calls[0] as [
-      string,
-      Record<string, unknown>,
-    ];
-    expect(cmd).toBe("extract_filmstrip_tile");
+    // Find by command name, not position: `requestFilmstripTile` also fires
+    // the once-per-session cache-prune sweep (`kickMediaCachePrune`), so the
+    // tile call isn't necessarily first in `invoke.mock.calls`.
+    const call = invoke.mock.calls.find(
+      ([cmd]) => cmd === "extract_filmstrip_tile",
+    );
+    expect(call).toBeDefined();
+    const [, args] = call as [string, Record<string, unknown>];
     const [expectStart, expectEnd] = tileRangeMs(4, 1);
     expect(args.startMs).toBe(expectStart);
     expect(args.endMs).toBe(expectEnd);

@@ -35,6 +35,7 @@ import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 
 import type { MediaItem, TimelineItem } from "@/lib/bindings";
 import { ipc } from "@/lib/ipc";
+import { kickMediaCachePrune } from "@/features/media/thumbnails";
 
 // ── 1. Grid math — mirrors services::tiles (Rust) exactly ───────────────────
 
@@ -277,6 +278,10 @@ export function requestFilmstripTile(
   index: number,
 ): Promise<string | null> {
   if (!isTauri() || media.kind === "audio_only") return Promise.resolve(null);
+  // Same one-time-per-session sweep `thumbnailSrc` kicks off — belt and
+  // braces in case a caller reaches filmstrip tiles without ever going
+  // through the plain thumbnail path first (see `media_cache.rs`).
+  kickMediaCachePrune();
   const key = cacheKey(media.id, tier, index);
   const existing = cache.get(key);
   if (existing) {
