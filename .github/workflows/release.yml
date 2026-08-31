@@ -105,6 +105,28 @@ jobs:
             echo "APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}"
           } >> "$GITHUB_ENV"
 
+      # ── Releasenotatet, HENTET FRA REPOET ──────────────────────────────
+      # `releaseBody` blir `notes`-feltet i `latest.json`, og det feltet er
+      # teksten brukeren leser i oppdateringsdialogen. tauri-action skriver det
+      # ved BYGGETID, så en tekst noen skriver på GitHub etterpå når aldri
+      # manifestet — og dermed aldri brukeren. Da dette var en fast tekst her i
+      # fila, fikk hver eneste utgivelse nøyaktig samme notat.
+      #
+      # Notatet bor derfor i `docs/release-notes/<tagg>.md` og blir reviewet i
+      # samme PR som versjonsbumpen. Skriptet AVBRYTER jobben hvis fila mangler,
+      # er tom eller står med en plassholder: en stille tilbakefall-tekst er
+      # nøyaktig feilen vi fikser, bare vanskeligere å oppdage.
+      #
+      # Den egentlige vakten ligger i CI, på PR, og stopper slippet før noen har
+      # begynt å bygge. Dette steget er den andre låsen på samme dør — den som
+      # fortsatt holder når en tagg dyttes fra en gammel commit.
+      - name: Hent releasenotatet for taggen
+        id: notat
+        shell: bash
+        run: node scripts/release-notes.mjs --emit "$TAG" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+
       - name: Build, sign, and publish
         uses: tauri-apps/tauri-action@v1
         env:
@@ -144,7 +166,12 @@ jobs:
         with:
           tagName: ${{ inputs.tag || github.ref_name }}
           releaseName: "SundayEdit ${{ inputs.tag || github.ref_name }}"
-          releaseBody: "See the assets below to download and install. Auto-update is enabled for existing installs."
+          # Fra `docs/release-notes/<tagg>.md`, ikke fra denne fila. Se steget
+          # over for hvorfor. Vil du ha den lange versjonen med bilder og
+          # tabeller på selve utgivelsessiden, rediger utgivelsesteksten på
+          # GitHub etterpå — `latest.json` er da allerede lastet opp med
+          # notatet herfra.
+          releaseBody: ${{ steps.notat.outputs.notes }}
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true

@@ -14,6 +14,7 @@
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "notes:check": "node scripts/release-notes.mjs --check",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",

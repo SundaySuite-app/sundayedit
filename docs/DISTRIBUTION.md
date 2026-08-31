@@ -7,7 +7,10 @@ only you can provide.
 
 ## How it works
 
-1. You push a version tag (`vX.Y.Z`).
+1. You write `docs/release-notes/vX.Y.Z.md` — the text the user reads in the
+   update banner — and push a version tag (`vX.Y.Z`). CI refuses the PR without
+   the note, and `release.yml` refuses the tag. See
+   [release-notes/README.md](release-notes/README.md).
 2. `.github/workflows/release.yml` builds on macOS (universal) and Windows,
    signs + notarizes (macOS), signs the updater bundle, and creates a
    **draft** GitHub Release with the installers and `latest.json`.

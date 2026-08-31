@@ -959,34 +959,54 @@ function UpdateBanner({
     }
   }
 
+  // WHAT is new — the manifest's `notes`, which since
+  // `docs/release-notes/<tag>.md` is a sentence a human wrote for the person at
+  // the screen rather than a fixed line from the build file. The plugin has
+  // carried it in `update.body` all along; this banner simply never showed it,
+  // so every update looked identical to the last one.
+  //
+  // Plain text with line breaks kept, not markdown — the guard in
+  // `scripts/release-notes.mjs` rejects markdown in the note precisely because
+  // this strip has no renderer for it.
+  const notes = update.body?.trim();
+
   return (
-    <div className="fixed inset-x-0 top-0 z-50 flex items-center justify-center gap-3 bg-[var(--color-accent-600)] px-4 py-1.5 text-[var(--text-ui-sm)] text-[var(--color-neutral-950)] shadow-md">
-      <RefreshCw size={14} className={cn(busy && "animate-spin")} />
-      <span className="font-medium">
-        {error
-          ? t("updateFailed", { error })
-          : busy
-            ? t("updateInstalling")
-            : t("updateAvailable", { version: update.version })}
-      </span>
-      {!busy && !error && (
-        <>
-          <button
-            type="button"
-            onClick={install}
-            className="rounded bg-[var(--color-neutral-950)]/15 px-2.5 py-0.5 font-semibold hover:bg-[var(--color-neutral-950)]/25"
-          >
-            {t("updateNow")}
-          </button>
-          <button
-            type="button"
-            onClick={onDismiss}
-            className="px-1 opacity-70 hover:opacity-100"
-            aria-label={t("actionClose")}
-          >
-            {t("updateLater")}
-          </button>
-        </>
+    <div className="fixed inset-x-0 top-0 z-50 flex flex-col items-center gap-1 bg-[var(--color-accent-600)] px-4 py-1.5 text-[var(--text-ui-sm)] text-[var(--color-neutral-950)] shadow-md">
+      <div className="flex items-center justify-center gap-3">
+        <RefreshCw size={14} className={cn(busy && "animate-spin")} />
+        <span className="font-medium">
+          {error
+            ? t("updateFailed", { error })
+            : busy
+              ? t("updateInstalling")
+              : t("updateAvailable", { version: update.version })}
+        </span>
+        {!busy && !error && (
+          <>
+            <button
+              type="button"
+              onClick={install}
+              className="rounded bg-[var(--color-neutral-950)]/15 px-2.5 py-0.5 font-semibold hover:bg-[var(--color-neutral-950)]/25"
+            >
+              {t("updateNow")}
+            </button>
+            <button
+              type="button"
+              onClick={onDismiss}
+              className="px-1 opacity-70 hover:opacity-100"
+              aria-label={t("actionClose")}
+            >
+              {t("updateLater")}
+            </button>
+          </>
+        )}
+      </div>
+      {/* Only while the offer stands: mid-install and after a failure the strip
+          has something more urgent to say, and the note would be noise. */}
+      {notes && !busy && !error && (
+        <p className="max-h-24 max-w-2xl overflow-y-auto text-center text-[var(--text-ui-xs)] whitespace-pre-line opacity-90">
+          {notes}
+        </p>
       )}
     </div>
   );
