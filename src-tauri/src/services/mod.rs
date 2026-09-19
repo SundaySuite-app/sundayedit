@@ -20,6 +20,7 @@
 //!   - `media_cache`   — bounded disk-cache sweep for filmstrip/thumbnail JPEGs
 //!   - `karaoke`       — SHARED per-word karaoke timing for ASS `\k` + the canvas overlay (E4a)
 //!   - `effects`       — curated clip effects: the shared preview↔ffmpeg registry (E6)
+//!   - `http`          — the one `reqwest::Client` constructor (installs the rustls provider)
 
 pub mod asr;
 pub mod burnin;
@@ -34,6 +35,7 @@ pub mod filler;
 pub mod find_replace;
 pub mod glossary;
 pub mod highlight_reel;
+pub mod http;
 pub mod karaoke;
 pub mod llm;
 pub mod media_cache;

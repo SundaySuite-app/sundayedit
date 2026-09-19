@@ -370,7 +370,14 @@ pub fn content_hash(path: &Path) -> AppResult<String> {
         hasher.update(&tail);
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    // Lowercase hex, byte by byte: sha2 0.11's digest type does not implement
+    // `LowerHex`, and this exact string is what stored projects relink by
+    // (pinned in `content_hash_is_stable_and_distinct`).
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// Search common locations for a file matching `target_hash`. Used when a
@@ -896,6 +903,14 @@ mod tests {
         assert_eq!(ha1, ha2, "same file hashes identically");
         assert_ne!(ha1, hb, "different files hash differently");
         assert_eq!(ha1.len(), 64, "sha-256 hex is 64 chars");
+        // Pinned: stored projects relink media by this exact string, so the
+        // value must survive dependency bumps byte-for-byte (sha2 0.10 → 0.11
+        // changed the digest's output type). Computed independently as
+        // sha256(u64-LE length ‖ bytes).
+        assert_eq!(
+            ha1,
+            "9b30b5b5ef0f8b0c4a2e19fd46b62e2f79c2a298ff503f6b961d95116c60f4ff"
+        );
     }
 
     #[test]
@@ -910,6 +925,11 @@ mod tests {
             .unwrap();
         let h = content_hash(&big).unwrap();
         assert_eq!(h.len(), 64);
+        // Pinned head+tail value: sha256(u64-LE length ‖ first 64 KiB ‖ last 64 KiB).
+        assert_eq!(
+            h,
+            "195bca499f176890d9e997dfd60a1b16cf813329a12f3a8feed36d1b6511bf5f"
+        );
     }
 
     // ── relink ──────────────────────────────────────────────────────────────

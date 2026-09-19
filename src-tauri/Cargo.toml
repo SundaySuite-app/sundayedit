@@ -38,7 +38,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Phase 1 — video import + waveform
-sha2 = "0.10"      # content hashing for path-stability relink
+sha2 = "0.11"      # content hashing for path-stability relink
 hound = "3.5"      # WAV reader for waveform peak computation
 
 # Phase 7 — find & replace (regex search in captions)
@@ -65,7 +65,16 @@ tauri-plugin-dialog = "2.7.1"
 # HTTP client. Used by the Whisper model downloader (Phase 2.1/9.2) — which
 # must ship in the default build, since a fresh install has to fetch a model
 # before it can transcribe — and by the Claude API client (gated on `llm`).
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+# reqwest 0.13 med `rustls-no-provider`, IKKE `rustls`. 0.13 sin `rustls`-feature
+# drar inn aws-lc (en C-avhengighet) som ANDRE kryptoleverandør ved siden av
+# `ring`, som tauri-plugin-updater allerede har kompilert inn. Med
+# `rustls-no-provider` må leverandøren installeres i prosessen før første
+# klient, ellers får reqwest panikk — `services::http::client()` gjør det, med
+# samme grep som updateren selv bruker. Røttene kommer fra OS-et
+# (rustls-platform-verifier). `query` er egen feature fra 0.13.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "multipart", "query"] }
+# Kun for å installere ring som prosessens rustls-leverandør (se reqwest over).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 # Desktop-only plugins (SundayEdit is a desktop app). Auto-update via GitHub
 # Releases + relaunch after install (Phase 9.2); Sunday-link deep-link import
