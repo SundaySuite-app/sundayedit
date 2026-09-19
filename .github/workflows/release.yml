@@ -73,12 +73,12 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       # Pinned: a floating stable + `-D warnings` turns any newly-added clippy lint into a red main. Bump deliberately.
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@1.98.0
+        uses: dtolnay/rust-toolchain@1.98.1
         with:
           targets: ${{ matrix.rust-targets }}
 
