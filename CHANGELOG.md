@@ -9,6 +9,35 @@ history lives in the git log and `docs/ARCHITECTURE.md`'s phase table.)
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-09-19
+
+Carries the unreleased work of 2026-08-29…31 (R3) plus the framework round of
+2026-09-19.
+
+### Added
+
+- Per-clip gain and fade in/out, per-track faders and mix headroom; overlapping
+  audio no longer sums into clipping (#60).
+- Missing-media detection on project open, with relink that keeps every clip
+  attached (#57).
+- Highlight Reel panel, selectable export codec/encoder, clip duplicate
+  (Cmd+D) and copy/paste (#61).
+- The update banner shows the release note shipped with the version (#62).
+
+### Fixed
+
+- Undo covers the AI/dock panels and autosave; two export messages that
+  misreported the result (#58).
+- Portrait (rotated) sources get a portrait canvas; absurd VFR frame rates are
+  clamped; fit-to-canvas, chained transitions and text rendering (#63).
+
+### Changed
+
+- ffmpeg 6.1.1 (`ffmpeg-static`) → 9.0.1 via SundayRec's pinned fetcher,
+  universal macOS sidecars included (#81).
+- reqwest 0.13 on the `ring` provider with OS root certificates, sha2 0.11,
+  TypeScript 7, vitest 5, Node 22 in CI, Rust 1.98.1 (#76–#80).
+
 ## [0.8.0] — 2026-08-10
 
 Everything under "Unreleased" below this heading in the previous revision is
