@@ -477,3 +477,35 @@ Worked example — GHSA-wrw7-89jp-8q8g (`glib` 0.18.5, unsoundness in
 
 **If we ever add a Linux target, this ADR is void** and the whole GTK stack
 must be re-triaged as shipped code.
+
+## ADR-015 — TypeScript 7 via `@typescript/native`; the `typescript` name stays on the 6.0 API
+
+- **Date:** 2026-09-19
+- **Status:** accepted
+- **Context:** TypeScript 7 is the native (Go) compiler. It no longer exposes the
+  old JavaScript compiler API in the shape tools depend on, and
+  `typescript-eslint` (8.70.0, all channels) still declares
+  `typescript: ">=4.8.4 <6.1.0"` and hard-throws on TS >= 7
+  (typescript-eslint#10940). So one package named `typescript` cannot serve
+  both `tsc` and eslint.
+- **Decision:** The side-by-side layout from the TS 7.0 announcement — two npm
+  aliases instead of one dependency (same as SundayPaper ADR-004):
+  ```json
+  "@typescript/native": "npm:typescript@~7.0.2",
+  "typescript":         "npm:@typescript/typescript6@^6.0.2"
+  ```
+  `node_modules/.bin/tsc` is TS 7 (`typecheck`, `build`); `require("typescript")`
+  is the TS 6.0 API that `typescript-eslint` parses with. The compat package
+  names its binary `tsc6`, so the two never collide.
+- **Consequences:**
+  - **The `"typescript": "npm:@typescript/typescript6@…"` line is not a
+    downgrade.** It is the parser API for eslint; the compiler is
+    `@typescript/native`. Do not "fix" it back to `"typescript": "^7"` — that
+    re-breaks `lint`.
+  - Type _checking_ is TS 7, eslint _parsing_ is TS 6. We lint with
+    `tseslint.configs.recommended` (no type-aware rules), so no rule reads TS 6
+    semantics while `tsc` reads TS 7.
+  - TS 7 removed `baseUrl`; `paths` targets are relative to the tsconfig and
+    need a leading `./`.
+  - Revisit when typescript-eslint supports TS >= 7.1: both aliases then
+    collapse into a single `"typescript": "^7"`.
