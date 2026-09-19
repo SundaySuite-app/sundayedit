@@ -492,7 +492,7 @@ pub async fn transcribe_openai(
         form = form.text("language", language.to_string());
     }
 
-    let resp = reqwest::Client::new()
+    let resp = crate::services::http::client()
         .post("https://api.openai.com/v1/audio/transcriptions")
         .bearer_auth(api_key)
         .multipart(form)
@@ -537,7 +537,7 @@ pub async fn transcribe_assemblyai(
     }
 
     let bytes = tokio::fs::read(audio_path).await?;
-    let client = reqwest::Client::new();
+    let client = crate::services::http::client();
     let net = |e: reqwest::Error| AppError::Network(e.to_string());
 
     // 1. Upload the raw audio → an upload_url AssemblyAI can read back.
@@ -661,7 +661,7 @@ pub async fn transcribe_deepgram(
         params.push(("language", language));
     }
 
-    let resp = reqwest::Client::new()
+    let resp = crate::services::http::client()
         .post("https://api.deepgram.com/v1/listen")
         .query(&params)
         .header("authorization", format!("Token {api_key}"))

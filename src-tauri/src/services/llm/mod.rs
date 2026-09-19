@@ -186,7 +186,7 @@ pub async fn complete(
     max_tokens: u32,
 ) -> AppResult<String> {
     let body = build_messages_body(config.model, system, user, max_tokens);
-    let client = reqwest::Client::new();
+    let client = crate::services::http::client();
     let resp = client
         .post(ANTHROPIC_API_URL)
         .header("x-api-key", &config.api_key)

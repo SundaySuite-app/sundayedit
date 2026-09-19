@@ -93,7 +93,7 @@ pub async fn download_model(
     std::fs::create_dir_all(models_dir)?;
 
     let url = model.info().url;
-    let mut resp = reqwest::Client::new()
+    let mut resp = crate::services::http::client()
         .get(&url)
         .send()
         .await
