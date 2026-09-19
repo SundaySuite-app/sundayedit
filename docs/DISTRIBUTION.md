@@ -91,21 +91,30 @@ waveform, and burn-in work without a system ffmpeg:
   executable first (the bundled sidecar), then falls back to PATH, with a
   `SUNDAYEDIT_FFMPEG` / `SUNDAYEDIT_FFPROBE` env override for dev/tests.
 - The binaries are **not committed** (too large). Fetch them before every
-  build: `node scripts/fetch-ffmpeg.mjs` — it copies the `ffmpeg-static` +
-  `@ffprobe-installer/ffprobe` binaries into `src-tauri/binaries/` with the
-  Rust target-triple suffix. CI runs this automatically (see
-  `release.yml`); each runner fetches its own platform's binaries.
+  build: `node scripts/fetch-ffmpeg.mjs` — it downloads **ffmpeg 9.0.1** (the
+  same pinned release SundayRec and SundaySync ship) from
+  ffmpeg.martin-riedl.de (macOS/Linux) and gyan.dev (Windows), checks every
+  archive against the publisher's SHA-256 and every unpacked binary against
+  `scripts/ffmpeg-checksums.json`, and writes them into `src-tauri/binaries/`
+  with the Rust target-triple suffix. CI runs this automatically (see
+  `release.yml`); each runner fetches its own platform's binaries. (Until
+  2026-09 this copied the `ffmpeg-static` 6.1.1 + `@ffprobe-installer`
+  binaries, whose postinstall download had no integrity check.)
 
-> **Licensing:** these are GPL/LGPL ffmpeg builds. Before any _public_
-> release, confirm GPL compliance (offer the corresponding source) or swap to
-> an LGPL/own build. Fine for private test builds.
+> **Licensing:** these are GPL ffmpeg builds (martin-riedl and gyan's
+> "essentials" are GPL, as the ffmpeg-static builds were). Before any
+> _public_ release, confirm GPL compliance (offer the corresponding source)
+> or swap to an LGPL/own build. Fine for private test builds.
 
 > macOS release builds are **universal** (arm64 + `x86_64` in one app/DMG,
 > `tauri build --target universal-apple-darwin`). The fetch script's
-> `--universal` flag fetches the non-host arch's ffmpeg/ffprobe from the
-> same upstreams and `lipo`s the pair into `ffmpeg-universal-apple-darwin`
-> etc. — a universal build needs both the per-arch sidecars (tauri-build
-> validates each cargo slice) and the `-universal` ones (the bundler).
+> `--universal` flag fetches BOTH macOS architectures from martin-riedl and
+> `lipo`s each pair into `ffmpeg-universal-apple-darwin` etc. — a universal
+> build needs both the per-arch sidecars (tauri-build validates each cargo
+> slice) and the `-universal` ones (the bundler). The Intel slice cannot be
+> run on an Apple Silicon runner, so the script refuses to bundle it unless
+> its hash is pinned, and checks its Mach-O arch instead of running it. Both
+> slices together are ~160 MB per binary (ffmpeg-static was smaller).
 > Local Whisper on Intel Macs runs on the CPU backend (Metal is
 > Apple-Silicon-only upstream) with an instruction baseline every
 > 10.15-capable Intel Mac has — see
