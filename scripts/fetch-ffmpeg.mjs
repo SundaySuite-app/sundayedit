@@ -100,10 +100,16 @@ function martinRiedl(label, build, sha) {
 // same publisher's same files, kept per tag forever. Nothing else changes: the
 // archive SHA-256 below is untouched and GitHub's own digest for the asset
 // matches it, so both pin layers still describe the exact same bytes.
+// The package directory stays on as a FALLBACK: it still answers for whatever
+// is current, which covers a GitHub outage in the window right after a bump.
+// Keeping it costs nothing — `archive()` checks every source against the same
+// hash, so a fallback can only ever deliver the bytes we already named.
 function gyan(stem, sha256) {
   const url = `https://github.com/GyanD/codexffmpeg/releases/download/${FFMPEG_VERSION}/${stem}.zip`;
+  const fallbacks = [`https://www.gyan.dev/ffmpeg/builds/packages/${stem}.zip`];
   const entry = (name) => ({
     url,
+    fallbacks,
     sha256,
     member: `${stem}/bin/${name}.exe`,
   });
@@ -192,7 +198,7 @@ const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
 
 // ── Archive download (cached, integrity-checked) ───────────────────────────
 
-async function archive(url, expected) {
+async function archive(url, expected, fallbacks = []) {
   const cached = join(
     cacheDir,
     `${expected.slice(0, 16)}-${basename(new URL(url).pathname)}`,
@@ -208,34 +214,60 @@ async function archive(url, expected) {
     rmSync(cached, { force: true });
   }
 
-  let last;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const res = await fetch(url, {
-        redirect: "follow",
-        // Generous: these are 30–110 MB archives on a church's connection.
-        signal: AbortSignal.timeout(15 * 60 * 1000),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-      const buf = Buffer.from(await res.arrayBuffer());
-      const actual = sha256(buf);
-      if (actual !== expected) {
-        throw new Error(
-          `SHA-256 mismatch\n    expected ${expected}\n    actual   ${actual}\n` +
-            `    (${buf.length} bytes — a truncated download retries, a stable ` +
-            `mismatch means the published archive changed)`,
+  // ── Several sources, ONE pin ─────────────────────────────────────
+  // Integrity pinning is not AVAILABILITY pinning: the SHA-256 above says what
+  // the bytes must be, never that the host still serves them. gyan.dev's
+  // package directory keeps only the CURRENT release, so the day after 9.0.1
+  // was pinned it turned into a 404 and every Windows build died (2026-09-19).
+  // A fallback cannot weaken anything — every source is checked against the
+  // same hash, so the worst case is that all of them fail.
+  const sources = [url, ...fallbacks];
+  const failures = [];
+  for (const src of sources) {
+    const host = new URL(src).host;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const res = await fetch(src, {
+          redirect: "follow",
+          // Generous: these are 30–110 MB archives on a church's connection.
+          signal: AbortSignal.timeout(15 * 60 * 1000),
+        });
+        if (!res.ok) {
+          const err = new Error(`HTTP ${res.status} ${res.statusText}`);
+          // 404/410 is an answer, not a hiccup: the file is not on this host.
+          // Go to the next source at once instead of asking twice more.
+          err.gone = res.status === 404 || res.status === 410;
+          throw err;
+        }
+        const buf = Buffer.from(await res.arrayBuffer());
+        const actual = sha256(buf);
+        if (actual !== expected) {
+          throw new Error(
+            `SHA-256 mismatch\n    expected ${expected}\n    actual   ${actual}\n` +
+              `    (${buf.length} bytes — a truncated download retries, a stable ` +
+              `mismatch means the published archive changed)`,
+          );
+        }
+        mkdirSync(cacheDir, { recursive: true });
+        writeFileSync(cached, buf);
+        console.log(
+          `  · downloaded ${(buf.length / 1e6).toFixed(1)} MB from ${host}`,
         );
+        return buf;
+      } catch (err) {
+        failures.push(`${host}: ${err.message}`);
+        console.warn(`  ⚠ ${host} attempt ${attempt}/3 failed: ${err.message}`);
+        if (err.gone) break;
       }
-      mkdirSync(cacheDir, { recursive: true });
-      writeFileSync(cached, buf);
-      console.log(`  · downloaded ${(buf.length / 1e6).toFixed(1)} MB`);
-      return buf;
-    } catch (err) {
-      last = err;
-      console.warn(`  ⚠ attempt ${attempt}/3 failed: ${err.message}`);
     }
   }
-  fail(`could not fetch ${url}\n  ${last?.message ?? "unknown error"}`);
+  fail(
+    `could not fetch ${basename(new URL(url).pathname)} from any source:\n` +
+      sources.map((s) => `    ${s}`).join("\n") +
+      `\n  ${failures.join("\n  ")}\n` +
+      `  HTTP 404 everywhere means the publisher pruned this version — bump ` +
+      `FFMPEG_VERSION and BOTH pin layers rather than weakening the check.`,
+  );
 }
 
 // ── Minimal zip reader ─────────────────────────────────────────────────────
@@ -444,7 +476,7 @@ async function fetchFor(target) {
     }
 
     console.log(`→ ${name}`);
-    const zip = await archive(spec.url, spec.sha256);
+    const zip = await archive(spec.url, spec.sha256, spec.fallbacks);
     const bin = extract(zip, spec.member);
     checkPin(name, target, bin);
     if (!runnable && !pin) {

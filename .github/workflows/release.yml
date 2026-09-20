@@ -127,6 +127,12 @@ jobs:
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
 
+      # ⚠️ A Windows step that COMPILES (cargo/tauri) must not use `shell: bash`.
+      # Git-bash puts C:\Program Files\Git\usr\bin first on PATH, where MSYS's
+      # own link.exe shadows the MSVC linker and every build script dies with
+      # "linking with `link.exe` failed" — nothing about the error names bash.
+      # tauri-action runs outside bash, so this applies to hand-written run
+      # steps (proven the hard way in a throwaway probe, 2026-09-20).
       - name: Build, sign, and publish
         uses: tauri-apps/tauri-action@v1
         env:
