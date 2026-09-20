@@ -25,8 +25,9 @@
 // macOS + Linux  ffmpeg.martin-riedl.de — release channel, per-binary .zip,
 //                signed + notarized on macOS, publishes a .sha256 per archive.
 // Windows        gyan.dev release "essentials" build — the long-standing
-//                Windows ffmpeg distribution, versioned archives kept in
-//                /builds/packages/, .sha256 published alongside.
+//                Windows ffmpeg distribution, fetched from its GitHub
+//                releases (GyanD/codexffmpeg), which keep every tag; the
+//                .sha256 on gyan.dev is where the archive pin comes from.
 // Both are GPL builds, same as what we shipped before. `essentials` carries
 // everything this app asks ffmpeg for (native aac/flac/pcm/mjpeg, libmp3lame,
 // libx264, dshow, lavfi, and every filter we use is built-in).
@@ -91,8 +92,16 @@ function martinRiedl(label, build, sha) {
 }
 
 // gyan ships both binaries in one archive under `<stem>/bin/<name>.exe`.
+//
+// The URL is gyan's GITHUB RELEASE, not `gyan.dev/ffmpeg/builds/packages/`.
+// That directory holds only the CURRENT release: the day after this pin was
+// set, 9.0.2 shipped and the 9.0.1 archive turned into a 404, which broke every
+// Windows fetch — CI smoke and release build alike. The GitHub assets are the
+// same publisher's same files, kept per tag forever. Nothing else changes: the
+// archive SHA-256 below is untouched and GitHub's own digest for the asset
+// matches it, so both pin layers still describe the exact same bytes.
 function gyan(stem, sha256) {
-  const url = `https://www.gyan.dev/ffmpeg/builds/packages/${stem}.zip`;
+  const url = `https://github.com/GyanD/codexffmpeg/releases/download/${FFMPEG_VERSION}/${stem}.zip`;
   const entry = (name) => ({
     url,
     sha256,
