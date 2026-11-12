@@ -270,7 +270,10 @@ fn apply_random_op(rng: &mut Rng, p: &Project, now: i64, fresh_id: &str) -> Proj
                 next.validate().is_ok(),
                 "op {choice} returned Ok but produced an INVALID project: {:?}\ninput captions: {:?}",
                 next.validate(),
-                p.captions.iter().map(|c| (c.id.clone(), c.start_ms, c.end_ms)).collect::<Vec<_>>(),
+                p.captions
+                    .iter()
+                    .map(|c| (c.id.clone(), c.start_ms, c.end_ms))
+                    .collect::<Vec<_>>(),
             );
             next
         }

@@ -6,7 +6,7 @@
 //! import + context/glossary seeding flow itself.
 
 use crate::error::AppResult;
-use crate::services::deeplink::{captions_callback_url, parse_import_url, ImportRequest};
+use crate::services::deeplink::{ImportRequest, captions_callback_url, parse_import_url};
 
 /// Parse a `sundayedit://import?…` URL into a validated [`ImportRequest`].
 #[tauri::command]

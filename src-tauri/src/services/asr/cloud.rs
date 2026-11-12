@@ -620,7 +620,7 @@ pub async fn transcribe_assemblyai(
                 return Err(AppError::Network(format!(
                     "AssemblyAI transcription error: {}",
                     v.get("error").and_then(|e| e.as_str()).unwrap_or("unknown")
-                )))
+                )));
             }
             _ => continue, // queued | processing
         }
@@ -801,9 +801,11 @@ mod tests {
 
     #[test]
     fn consent_text_names_provider() {
-        assert!(CloudProvider::AssemblyAi
-            .consent_text()
-            .contains("AssemblyAI"));
+        assert!(
+            CloudProvider::AssemblyAi
+                .consent_text()
+                .contains("AssemblyAI")
+        );
         assert!(CloudProvider::Deepgram.consent_text().contains("Deepgram"));
     }
 

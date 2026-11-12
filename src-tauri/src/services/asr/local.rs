@@ -243,8 +243,8 @@ mod tests {
     #[test]
     #[ignore = "needs a downloaded model + 16 kHz mono WAV on the machine"]
     fn live_transcribe_runs_inference_and_reports_progress() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let models_dir = std::path::PathBuf::from(
             std::env::var("SUNDAYEDIT_TEST_MODELS_DIR").expect("set SUNDAYEDIT_TEST_MODELS_DIR"),
@@ -291,8 +291,8 @@ mod tests {
     #[test]
     #[ignore = "needs a downloaded model + 16 kHz mono WAV on the machine"]
     fn live_transcribe_cancel_aborts_with_cancelled() {
-        use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
 
         let models_dir = std::path::PathBuf::from(
             std::env::var("SUNDAYEDIT_TEST_MODELS_DIR").expect("set SUNDAYEDIT_TEST_MODELS_DIR"),

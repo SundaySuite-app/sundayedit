@@ -16,8 +16,8 @@ use std::process::ExitCode;
 
 use serde::Deserialize;
 use sundayedit_lib::services::asr::calibration::{
-    best_f1, cohens_kappa, default_thresholds, precision_interval, recall_interval, sweep,
-    LabeledWord,
+    LabeledWord, best_f1, cohens_kappa, default_thresholds, precision_interval, recall_interval,
+    sweep,
 };
 
 #[derive(Deserialize)]

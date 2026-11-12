@@ -184,10 +184,10 @@ pub fn truncate_for_prompt(text: &str) -> (String, bool) {
     let mut cut: String = text.chars().take(MAX_DOC_CHARS).collect();
     // Prefer to end on whitespace so we don't slice a word in half, but only
     // if a boundary exists reasonably near the end.
-    if let Some(idx) = cut.rfind(char::is_whitespace) {
-        if idx > MAX_DOC_CHARS * 9 / 10 {
-            cut.truncate(idx);
-        }
+    if let Some(idx) = cut.rfind(char::is_whitespace)
+        && idx > MAX_DOC_CHARS * 9 / 10
+    {
+        cut.truncate(idx);
     }
     (cut.trim_end().to_string(), true)
 }
@@ -221,14 +221,14 @@ pub fn extract_text(path: &Path) -> AppResult<String> {
                 "PDF reference documents aren't supported yet. Export or copy the document to \
                  .txt or .docx, or paste the key passage into the context description."
                     .to_string(),
-            ))
+            ));
         }
         DocFormat::Unsupported => {
             return Err(AppError::Validation(
                 "Unsupported reference-document type. Use a plain-text file (.txt, .md) or a \
                  Word document (.docx)."
                     .to_string(),
-            ))
+            ));
         }
     };
     Ok(normalize_whitespace(&raw))

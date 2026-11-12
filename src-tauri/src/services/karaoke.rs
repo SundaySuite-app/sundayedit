@@ -637,12 +637,16 @@ mod tests {
             vec![w("a", 1_000, 1_500), w("b", 1_500, 2_000)],
         );
         let k = karaoke_words(&c);
-        assert!(word_states_at(&k, 0)
-            .iter()
-            .all(|s| *s == WordState::Pending));
-        assert!(word_states_at(&k, 99_999)
-            .iter()
-            .all(|s| *s == WordState::Done));
+        assert!(
+            word_states_at(&k, 0)
+                .iter()
+                .all(|s| *s == WordState::Pending)
+        );
+        assert!(
+            word_states_at(&k, 99_999)
+                .iter()
+                .all(|s| *s == WordState::Done)
+        );
     }
 
     #[test]

@@ -4,8 +4,8 @@
 use crate::error::{AppError, AppResult};
 use crate::model::Project;
 use crate::services::export::{
-    build_docx, project_karaoke, write_ass_with, write_json, write_srt, write_txt, write_vtt,
-    JsonOptions, SrtOptions, TxtOptions, VttOptions,
+    JsonOptions, SrtOptions, TxtOptions, VttOptions, build_docx, project_karaoke, write_ass_with,
+    write_json, write_srt, write_txt, write_vtt,
 };
 use crate::services::karaoke::KaraokeOptions;
 
@@ -109,7 +109,7 @@ pub fn save_export(
         other => {
             return Err(AppError::Validation(format!(
                 "unknown export format: {other}"
-            )))
+            )));
         }
     };
     std::fs::write(&path, bytes)?;

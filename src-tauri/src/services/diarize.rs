@@ -52,7 +52,7 @@ pub fn parse_diarization_json(json: &str) -> AppResult<Vec<SpeakerTurn>> {
             _ => {
                 return Err(AppError::Validation(
                     "diarization output had no JSON array".into(),
-                ))
+                ));
             }
         }
     };
@@ -67,14 +67,15 @@ pub fn parse_diarization_json(json: &str) -> AppResult<Vec<SpeakerTurn>> {
         let start = t.get("start").and_then(|v| v.as_f64());
         let end = t.get("end").and_then(|v| v.as_f64());
         let speaker = t.get("speaker").and_then(|v| v.as_str());
-        if let (Some(start), Some(end), Some(speaker)) = (start, end, speaker) {
-            if end > start && !speaker.trim().is_empty() {
-                turns.push(SpeakerTurn {
-                    start_ms: sec_to_ms(start),
-                    end_ms: sec_to_ms(end),
-                    speaker: speaker.trim().to_string(),
-                });
-            }
+        if let (Some(start), Some(end), Some(speaker)) = (start, end, speaker)
+            && end > start
+            && !speaker.trim().is_empty()
+        {
+            turns.push(SpeakerTurn {
+                start_ms: sec_to_ms(start),
+                end_ms: sec_to_ms(end),
+                speaker: speaker.trim().to_string(),
+            });
         }
     }
     Ok(turns)

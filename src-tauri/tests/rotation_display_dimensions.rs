@@ -38,7 +38,7 @@ use sundayedit_lib::services::video::{parse_ffprobe_json, probe};
 
 mod common;
 use common::{
-    canvas_settings, item, media_sized, project, sample_rgb, track, TrackKind, Transform,
+    TrackKind, Transform, canvas_settings, item, media_sized, project, sample_rgb, track,
 };
 
 // ── fixtures ─────────────────────────────────────────────────────────────────

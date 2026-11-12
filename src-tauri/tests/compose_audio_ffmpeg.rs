@@ -33,7 +33,7 @@ use sundayedit_lib::model::{
 };
 use sundayedit_lib::services::burnin::{Encoder, VideoCodec};
 use sundayedit_lib::services::compose::ComposeSettings;
-use sundayedit_lib::services::video::{parse_ffprobe_json, MediaKind};
+use sundayedit_lib::services::video::{MediaKind, parse_ffprobe_json};
 
 // ── binaries ─────────────────────────────────────────────────────────────────
 

@@ -323,11 +323,7 @@ fn parse_fps(r: Option<&str>) -> f32 {
             if let Some((num, den)) = s.split_once('/') {
                 let num: f32 = num.parse().unwrap_or(0.0);
                 let den: f32 = den.parse().unwrap_or(1.0);
-                if den != 0.0 {
-                    num / den
-                } else {
-                    0.0
-                }
+                if den != 0.0 { num / den } else { 0.0 }
             } else {
                 s.parse().unwrap_or(0.0)
             }
@@ -401,23 +397,22 @@ pub fn find_relink_candidate(
         // First pass: same filename (fast win — most moves keep the name)
         if let Some(name) = original_filename {
             let candidate = dir.join(name);
-            if candidate.is_file() {
-                if let Ok(h) = content_hash(&candidate) {
-                    if h == target_hash {
-                        return Ok(Some(candidate));
-                    }
-                }
+            if candidate.is_file()
+                && let Ok(h) = content_hash(&candidate)
+                && h == target_hash
+            {
+                return Ok(Some(candidate));
             }
         }
         // Second pass: any supported media file in the dir
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.is_file() && classify_extension(&p).is_some() {
-                if let Ok(h) = content_hash(&p) {
-                    if h == target_hash {
-                        return Ok(Some(p));
-                    }
-                }
+            if p.is_file()
+                && classify_extension(&p).is_some()
+                && let Ok(h) = content_hash(&p)
+                && h == target_hash
+            {
+                return Ok(Some(p));
             }
         }
     }
@@ -1006,7 +1001,7 @@ mod tests {
 
     #[test]
     fn filmstrip_args_use_the_tile_grid_span() {
-        use crate::services::tiles::{tile_range_ms, TILE_COLS_DEFAULT, TILE_HEIGHT_PX};
+        use crate::services::tiles::{TILE_COLS_DEFAULT, TILE_HEIGHT_PX, tile_range_ms};
         let (s, e) = tile_range_ms(4, 3); // 4 s tiles at tier 4
         let args = filmstrip_tile_args("/m.mp4", s, e, TILE_COLS_DEFAULT, TILE_HEIGHT_PX, "/o.jpg");
         assert_eq!(vf_of(&args), "fps=8000/4000,scale=-2:72,tile=8x1");
@@ -1041,7 +1036,7 @@ mod tests {
     #[test]
     #[ignore = "needs ffmpeg/ffprobe on PATH"]
     fn filmstrip_tile_renders_a_single_strip_of_cols_frames() {
-        use crate::services::tiles::{tile_range_ms, TILE_HEIGHT_PX};
+        use crate::services::tiles::{TILE_HEIGHT_PX, tile_range_ms};
         use std::process::Command;
 
         let dir = tempfile::tempdir().unwrap();

@@ -5,7 +5,7 @@
 //! (burn-in, Phase 6.2). The renderer's `styleToCss` mirrors the same
 //! Style fields so preview ≈ burn-in.
 
-use crate::services::style_presets::{catalog, StylePreset};
+use crate::services::style_presets::{StylePreset, catalog};
 
 #[tauri::command]
 pub fn style_list_presets() -> Vec<StylePreset> {

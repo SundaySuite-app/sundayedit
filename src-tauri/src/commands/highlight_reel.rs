@@ -18,8 +18,8 @@
 //! curate manually.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
@@ -29,10 +29,10 @@ use crate::error::AppResult;
 use crate::model::{Project, Style};
 use crate::services::burnin;
 use crate::services::highlight_reel::{
-    self, build_render_plan, heuristic_plan, HeuristicParams, ReelRenderProgress, RenderPlan,
+    self, HeuristicParams, ReelRenderProgress, RenderPlan, build_render_plan, heuristic_plan,
 };
 use crate::services::llm::clips::{
-    self, build_clips_system_prompt, build_clips_user_prompt, estimate_output_tokens, ClipPlan,
+    self, ClipPlan, build_clips_system_prompt, build_clips_user_prompt, estimate_output_tokens,
 };
 use crate::services::llm::{self, ClaudeModel, LlmConfig};
 use crate::services::secrets::{self, SecretProvider};

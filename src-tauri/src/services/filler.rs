@@ -191,11 +191,11 @@ fn merge_ranges(ranges: &[(i64, i64)]) -> Vec<(i64, i64)> {
     sorted.sort_by_key(|r| r.0);
     let mut merged: Vec<(i64, i64)> = Vec::new();
     for (s, e) in sorted {
-        if let Some(last) = merged.last_mut() {
-            if s <= last.1 {
-                last.1 = last.1.max(e);
-                continue;
-            }
+        if let Some(last) = merged.last_mut()
+            && s <= last.1
+        {
+            last.1 = last.1.max(e);
+            continue;
         }
         merged.push((s, e));
     }
@@ -360,7 +360,7 @@ mod tests {
         let w = &out.captions[0].words;
         assert_eq!(w.len(), 3);
         assert_eq!(w[0].text, "a"); // 0..200 unchanged
-                                    // "b" 400..600: 200ms cut before it → 200..400
+        // "b" 400..600: 200ms cut before it → 200..400
         assert_eq!(w[1].text, "b");
         assert_eq!(w[1].start_ms, 200);
         // "c" 800..1000: 400ms cut before it → 400..600

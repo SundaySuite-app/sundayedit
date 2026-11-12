@@ -32,7 +32,7 @@ use sundayedit_lib::model::{
 };
 use sundayedit_lib::services::burnin::{Encoder, VideoCodec};
 use sundayedit_lib::services::compose::ComposeSettings;
-use sundayedit_lib::services::video::{parse_ffprobe_json, MediaKind};
+use sundayedit_lib::services::video::{MediaKind, parse_ffprobe_json};
 
 /// Test shim: the real builder is fallible (it refuses item kinds the compose
 /// graph cannot render — see `compose::validate_composable`); every fixture in
@@ -152,11 +152,7 @@ fn track(id: &str, kind: TrackKind, index: i32) -> Track {
 fn default_compose_settings_ts_mirror(project: &Project) -> ComposeSettings {
     fn even_up_ts(n: i32) -> i32 {
         let m = n.max(2);
-        if m % 2 == 1 {
-            m + 1
-        } else {
-            m
-        }
+        if m % 2 == 1 { m + 1 } else { m }
     }
     let width = if project.video_width > 0 {
         project.video_width

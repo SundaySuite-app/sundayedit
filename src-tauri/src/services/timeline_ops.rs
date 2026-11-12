@@ -580,9 +580,9 @@ pub fn split_timeline_item(
     right.in_ms = src_split;
     right.timeline_start_ms = at_timeline_ms;
     right.transition_in = None; // the cut is not a transition
-                                // Flooring `src_split` hands the boundary source ms to the RIGHT piece,
-                                // which can push its derived end past the original clip end (and into a
-                                // butt-joined neighbour). Trim its tail so the split never grows the span.
+    // Flooring `src_split` hands the boundary source ms to the RIGHT piece,
+    // which can push its derived end past the original clip end (and into a
+    // butt-joined neighbour). Trim its tail so the split never grows the span.
     let original_end = original.timeline_end_ms();
     while right.out_ms > right.in_ms + 1 && right.timeline_end_ms() > original_end {
         right.out_ms -= 1;
