@@ -37,9 +37,9 @@ use sundayedit_lib::services::compose::{build_filter_complex, rendered_duration_
 
 mod common;
 use common::{
-    canvas_settings, container_duration_secs, generate_solid, generate_solid_with_tone, item,
-    media_sized, media_sized_with_audio, project, run_compose_argv, sample_rgb,
-    stream_duration_secs, track, TrackKind, Transform,
+    TrackKind, Transform, canvas_settings, container_duration_secs, generate_solid,
+    generate_solid_with_tone, item, media_sized, media_sized_with_audio, project, run_compose_argv,
+    sample_rgb, stream_duration_secs, track,
 };
 
 const W: i32 = 320;

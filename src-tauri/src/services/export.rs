@@ -22,7 +22,7 @@ use crate::error::{AppError, AppResult};
 use crate::model::{
     Caption, Clip, Project, Speaker, Style, TimelineItem, TimelineItemKind, Transform,
 };
-use crate::services::karaoke::{karaoke_words, uncertain_flags, KaraokeOptions};
+use crate::services::karaoke::{KaraokeOptions, karaoke_words, uncertain_flags};
 
 // ── SRT ─────────────────────────────────────────────────────────────────────
 
@@ -104,18 +104,17 @@ pub fn write_vtt(project: &Project, opts: VttOptions) -> String {
         out.push_str(" --> ");
         out.push_str(&fmt_vtt_time(c.end_ms));
         out.push('\n');
-        if opts.include_speakers {
-            if let Some(speaker_id) = &c.speaker_id {
-                if let Some(name) = speakers_map.get(speaker_id) {
-                    out.push_str(&format!(
-                        "<v {}>{}</v>\n",
-                        vtt_escape(&sanitize_cue_text(name)),
-                        vtt_escape(&sanitize_cue_text(&c.text()))
-                    ));
-                    out.push('\n');
-                    continue;
-                }
-            }
+        if opts.include_speakers
+            && let Some(speaker_id) = &c.speaker_id
+            && let Some(name) = speakers_map.get(speaker_id)
+        {
+            out.push_str(&format!(
+                "<v {}>{}</v>\n",
+                vtt_escape(&sanitize_cue_text(name)),
+                vtt_escape(&sanitize_cue_text(&c.text()))
+            ));
+            out.push('\n');
+            continue;
         }
         out.push_str(&vtt_escape(&sanitize_cue_text(&c.text())));
         out.push_str("\n\n");
@@ -941,10 +940,10 @@ fn speakers_by_id(speakers: &[Speaker]) -> std::collections::HashMap<String, Str
 }
 
 fn format_with_speaker(c: &Caption, map: &std::collections::HashMap<String, String>) -> String {
-    if let Some(id) = &c.speaker_id {
-        if let Some(name) = map.get(id) {
-            return format!("{}: {}", name, c.text());
-        }
+    if let Some(id) = &c.speaker_id
+        && let Some(name) = map.get(id)
+    {
+        return format!("{}: {}", name, c.text());
     }
     c.text()
 }
@@ -1403,8 +1402,11 @@ mod tests {
     fn ass_includes_dialogue_events() {
         let out = write_ass(&p());
         // Centisecond format: 1500ms → 0:00:01.50
-        assert!(out
-            .contains("Dialogue: 0,0:00:01.50,0:00:03.75,Default,Pastor Lars,0,0,0,,Hello world"));
+        assert!(
+            out.contains(
+                "Dialogue: 0,0:00:01.50,0:00:03.75,Default,Pastor Lars,0,0,0,,Hello world"
+            )
+        );
     }
 
     // ── ASS karaoke (E4a) ──────────────────────────────────────────────────
@@ -1413,7 +1415,7 @@ mod tests {
     // the output. Everything below either pins the OFF output byte-for-byte or
     // asserts a property of the ON output.
 
-    use crate::services::karaoke::{karaoke_words, KaraokeOptions, KaraokeStyle};
+    use crate::services::karaoke::{KaraokeOptions, KaraokeStyle, karaoke_words};
 
     /// The complete pre-E4a `.ass` for the `p()` fixture, captured before the
     /// karaoke work landed. Any diff here is a regression in the flagship
@@ -2083,7 +2085,7 @@ Dialogue: 0,0:00:04.00,0:00:07.25,Default,Maria,0,0,0,,This is two
     fn hex_to_ass_bgr_falls_back_on_bad_input() {
         assert_eq!(hex_to_ass_bgr("#fff"), "&H00FFFFFF"); // too short
         assert_eq!(hex_to_ass_bgr("#zzzzzz"), "&H00FFFFFF"); // non-hex
-                                                             // Multibyte char inside the first 6 bytes must NOT panic on a slice.
+        // Multibyte char inside the first 6 bytes must NOT panic on a slice.
         assert_eq!(hex_to_ass_bgr("#café12"), "&H00FFFFFF");
     }
 

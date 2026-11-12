@@ -22,7 +22,7 @@ use std::collections::HashSet;
 use ts_rs::TS;
 
 use crate::model::{Clip, Project};
-use crate::services::export_presets::{catalog, ExportPreset};
+use crate::services::export_presets::{ExportPreset, catalog};
 use crate::services::llm::clips::ClipPlan;
 
 // ── Heuristic clip detection (keyless fallback) ─────────────────────────────────
@@ -649,10 +649,11 @@ mod tests {
         );
         let paths: HashSet<&str> = plan.items.iter().map(|i| i.output_path.as_str()).collect();
         assert_eq!(paths.len(), plan.items.len(), "output paths must be unique");
-        assert!(plan
-            .items
-            .iter()
-            .all(|i| i.output_path.starts_with("/out/")));
+        assert!(
+            plan.items
+                .iter()
+                .all(|i| i.output_path.starts_with("/out/"))
+        );
     }
 
     #[test]

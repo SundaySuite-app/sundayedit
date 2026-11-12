@@ -38,7 +38,7 @@ use sundayedit_lib::model::{
     Transform, Transition,
 };
 use sundayedit_lib::services::burnin::{Encoder, VideoCodec};
-use sundayedit_lib::services::compose::{build_filter_complex, ComposeSettings};
+use sundayedit_lib::services::compose::{ComposeSettings, build_filter_complex};
 use sundayedit_lib::services::video::MediaKind;
 
 // ── output geometry the whole file reasons in ────────────────────────────────

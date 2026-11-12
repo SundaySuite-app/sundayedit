@@ -628,9 +628,11 @@ mod tests {
             ..ReflowConfig::default()
         };
         let issues = analyze(&proj(vec![c]), &cfg);
-        assert!(issues
-            .iter()
-            .any(|i| i.kind == "line_count" && i.value == 5.0));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.kind == "line_count" && i.value == 5.0)
+        );
     }
 
     #[test]
@@ -860,10 +862,12 @@ mod tests {
         let out = repair(&p, &ReflowConfig::default(), 9, counter_ids()).unwrap();
         assert_eq!(out.captions.len(), 1);
         assert_eq!(out.captions[0].id, "long"); // original id preserved
-                                                // The issue is still honestly reported — splitting can't fix it.
-        assert!(analyze(&out, &ReflowConfig::default())
-            .iter()
-            .any(|i| i.kind == "line_length"));
+        // The issue is still honestly reported — splitting can't fix it.
+        assert!(
+            analyze(&out, &ReflowConfig::default())
+                .iter()
+                .any(|i| i.kind == "line_length")
+        );
     }
 
     #[test]

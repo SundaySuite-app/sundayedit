@@ -31,8 +31,8 @@ use sundayedit_lib::services::compose::build_filter_complex;
 
 mod common;
 use common::{
-    canvas_settings, item, media_sized, project, run_compose_argv, sample_rgb, track, TrackKind,
-    Transform,
+    TrackKind, Transform, canvas_settings, item, media_sized, project, run_compose_argv,
+    sample_rgb, track,
 };
 
 fn tmp(name: &str) -> PathBuf {

@@ -602,7 +602,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("stream_unclamped.wav");
         let n = 200_000usize; // 800 * 4^4 = 204_800 > n is NOT required here —
-                              // this n keeps every level below n, so none clamp.
+        // this n keeps every level below n, so none clamp.
         write_tone_wav(&path, n);
 
         let (samples, sample_rate) = read_wav_samples(&path).unwrap();

@@ -39,7 +39,7 @@ use sundayedit_lib::model::{
 };
 use sundayedit_lib::services::burnin::{Encoder, VideoCodec};
 use sundayedit_lib::services::compose::ComposeSettings;
-use sundayedit_lib::services::video::{parse_ffprobe_json, MediaKind};
+use sundayedit_lib::services::video::{MediaKind, parse_ffprobe_json};
 
 /// Test shim: the real builder is fallible (it refuses item kinds the compose
 /// graph cannot render — see `compose::validate_composable`); every fixture in

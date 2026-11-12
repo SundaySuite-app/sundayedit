@@ -16,11 +16,11 @@ use crate::error::AppResult;
 use crate::model::Project;
 use crate::services::document::{self, ExtractedDocument};
 use crate::services::llm::glossary_suggest::{
-    self, build_doc_glossary_system_prompt, build_doc_glossary_user_prompt,
+    self, SuggestedTerm, build_doc_glossary_system_prompt, build_doc_glossary_user_prompt,
     build_glossary_system_prompt, build_glossary_user_prompt, estimate_doc_output_tokens,
-    estimate_output_tokens, SuggestedTerm,
+    estimate_output_tokens,
 };
-use crate::services::llm::{self, estimate_cost_usd, rough_token_count, ClaudeModel, LlmConfig};
+use crate::services::llm::{self, ClaudeModel, LlmConfig, estimate_cost_usd, rough_token_count};
 
 #[tauri::command]
 pub fn glossary_suggest_estimate(

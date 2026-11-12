@@ -31,12 +31,12 @@ use std::process::Command;
 
 use sundayedit_lib::services::compose::{build_filter_complex, proxy_settings};
 use sundayedit_lib::services::video::{
-    parse_ffprobe_json, probe, sane_fps, DEFAULT_FPS, MAX_FPS, MIN_FPS,
+    DEFAULT_FPS, MAX_FPS, MIN_FPS, parse_ffprobe_json, probe, sane_fps,
 };
 
 mod common;
 use common::{
-    canvas_settings, item, media_sized, project, run_compose_argv, track, TrackKind, Transform,
+    TrackKind, Transform, canvas_settings, item, media_sized, project, run_compose_argv, track,
 };
 
 // ── 1. TS ↔ Rust parity ──────────────────────────────────────────────────────
@@ -124,11 +124,7 @@ fn rational(s: &str) -> f64 {
                 n.parse::<f64>().unwrap_or(0.0),
                 d.parse::<f64>().unwrap_or(1.0),
             );
-            if d == 0.0 {
-                0.0
-            } else {
-                n / d
-            }
+            if d == 0.0 { 0.0 } else { n / d }
         }
         None => s.parse().unwrap_or(0.0),
     }

@@ -14,8 +14,8 @@
 //!     thin read-only round-trip rather than a new plugin dependency.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::AppResult;
 use crate::model::Project;

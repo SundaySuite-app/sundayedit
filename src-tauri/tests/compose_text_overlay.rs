@@ -35,14 +35,14 @@
 use std::path::{Path, PathBuf};
 
 use sundayedit_lib::model::{TextSpec, TimelineItem, TimelineItemKind};
-use sundayedit_lib::services::burnin::{build_ffmpeg_args, BurnInOptions, Encoder, VideoCodec};
+use sundayedit_lib::services::burnin::{BurnInOptions, Encoder, VideoCodec, build_ffmpeg_args};
 use sundayedit_lib::services::compose::{build_filter_complex, is_simple_timeline};
 use sundayedit_lib::services::export::write_ass;
 
 mod common;
 use common::{
-    canvas_settings, generate_solid, item, media_sized, project, run_compose_argv, sample_rgb,
-    track, TrackKind, Transform,
+    TrackKind, Transform, canvas_settings, generate_solid, item, media_sized, project,
+    run_compose_argv, sample_rgb, track,
 };
 
 fn tmp(name: &str) -> PathBuf {

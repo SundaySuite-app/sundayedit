@@ -15,7 +15,7 @@
 use sundayedit_lib::model::{
     MediaItem, Project, Style, TimelineItem, TimelineItemKind, Track, TrackKind, Transform,
 };
-use sundayedit_lib::services::compose::{is_simple_timeline, ComposeSettings};
+use sundayedit_lib::services::compose::{ComposeSettings, is_simple_timeline};
 use sundayedit_lib::services::video::MediaKind;
 
 /// Test shim: the real builder is fallible (it refuses item kinds the compose

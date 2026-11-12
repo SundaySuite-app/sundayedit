@@ -10,10 +10,10 @@ use crate::commands::polish::PolishEstimate;
 use crate::error::AppResult;
 use crate::model::Project;
 use crate::services::llm::suggest::{
-    self, build_suggest_system_prompt, build_suggest_user_prompt, estimate_output_tokens,
-    Strictness, Suggestion,
+    self, Strictness, Suggestion, build_suggest_system_prompt, build_suggest_user_prompt,
+    estimate_output_tokens,
 };
-use crate::services::llm::{self, estimate_cost_usd, rough_token_count, ClaudeModel, LlmConfig};
+use crate::services::llm::{self, ClaudeModel, LlmConfig, estimate_cost_usd, rough_token_count};
 
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};

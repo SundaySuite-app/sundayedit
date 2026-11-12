@@ -85,7 +85,9 @@ fn language_rules(language: &str) -> &'static str {
         "sv" => "The language is Swedish. Use standard Swedish casing and punctuation.",
         "da" => "The language is Danish. Use standard Danish casing and punctuation.",
         "de" => "The language is German. Capitalize nouns as German grammar requires.",
-        _ => "Use the standard sentence-casing and punctuation conventions of the caption's language.",
+        _ => {
+            "Use the standard sentence-casing and punctuation conventions of the caption's language."
+        }
     }
 }
 

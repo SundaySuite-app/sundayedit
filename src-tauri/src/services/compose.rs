@@ -34,8 +34,8 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
@@ -44,9 +44,9 @@ use ts_rs::TS;
 use crate::error::{AppError, AppResult};
 use crate::model::{Project, TimelineItem, TimelineItemKind, Transform};
 use crate::services::burnin::{
-    default_encoder, encoder_name, escape_filter_path, Encoder, VideoCodec,
+    Encoder, VideoCodec, default_encoder, encoder_name, escape_filter_path,
 };
-use crate::services::video::{ffmpeg_path, MediaKind};
+use crate::services::video::{MediaKind, ffmpeg_path};
 
 /// Output settings for a compose render. Mirrors the knobs `BurnInOptions`
 /// exposes, but the compose engine always targets fixed output dimensions +
@@ -191,10 +191,11 @@ fn used_media(project: &Project) -> Vec<String> {
         if !item_contributes(project, it, any_solo) {
             continue;
         }
-        if let Some(mid) = &it.source_media_id {
-            if !seen.iter().any(|s| s == mid) && project.media.iter().any(|m| &m.id == mid) {
-                seen.push(mid.clone());
-            }
+        if let Some(mid) = &it.source_media_id
+            && !seen.iter().any(|s| s == mid)
+            && project.media.iter().any(|m| &m.id == mid)
+        {
+            seen.push(mid.clone());
         }
     }
     seen
@@ -1021,11 +1022,7 @@ pub fn build_filter_complex(
 /// dimensions). Never returns below 2.
 fn even_up(n: i32) -> i32 {
     let n = n.max(2);
-    if n % 2 == 0 {
-        n
-    } else {
-        n + 1
-    }
+    if n % 2 == 0 { n } else { n + 1 }
 }
 
 /// Derive a LOW-RES fast-render profile from a project — the "preview-render
@@ -1147,10 +1144,10 @@ fn parse_progress_line(line: &str, out_ms: &mut i64, frame: &mut i64, done: &mut
         if let Ok(f) = v.trim().parse::<i64>() {
             *frame = f;
         }
-    } else if let Some(v) = line.strip_prefix("progress=") {
-        if v.trim() == "end" {
-            *done = true;
-        }
+    } else if let Some(v) = line.strip_prefix("progress=")
+        && v.trim() == "end"
+    {
+        *done = true;
     }
 }
 
@@ -1744,9 +1741,10 @@ mod tests {
         let inputs = args.iter().filter(|a| *a == "-i").count();
         assert_eq!(inputs, 2, "one deduped media input + one canvas input");
         // The canvas is a lavfi color source.
-        assert!(args
-            .iter()
-            .any(|a| a.starts_with("color=black:s=1920x1080")));
+        assert!(
+            args.iter()
+                .any(|a| a.starts_with("color=black:s=1920x1080"))
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::model::{Clip, Project};
-use crate::services::burnin::{default_encoder, BurnInOptions, VideoCodec};
+use crate::services::burnin::{BurnInOptions, VideoCodec, default_encoder};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "kebab-case")]
@@ -298,9 +298,10 @@ mod tests {
     fn shorts_rejects_over_60s() {
         let p = project(1080, 1920, 75_000, 3); // 75s
         let w = validate(&p, &preset("export:youtube_shorts"));
-        assert!(w
-            .iter()
-            .any(|x| x.severity == "error" && x.message.contains("60")));
+        assert!(
+            w.iter()
+                .any(|x| x.severity == "error" && x.message.contains("60"))
+        );
     }
 
     #[test]
@@ -326,9 +327,10 @@ mod tests {
     fn landscape_source_to_portrait_target_warns_crop() {
         let p = project(1920, 1080, 30_000, 3); // landscape source
         let w = validate(&p, &preset("export:tiktok")); // portrait target
-        assert!(w
-            .iter()
-            .any(|x| x.severity == "warning" && x.message.contains("beskåret")));
+        assert!(
+            w.iter()
+                .any(|x| x.severity == "warning" && x.message.contains("beskåret"))
+        );
     }
 
     #[test]

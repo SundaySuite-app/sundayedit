@@ -6,18 +6,18 @@
 //! confidence already populated.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::Emitter;
 
 use crate::error::AppResult;
 use crate::model::{Caption, Project};
-use crate::services::asr::captionize::{captionize, CaptionizeOptions};
+use crate::services::asr::captionize::{CaptionizeOptions, captionize};
 use crate::services::asr::cloud::{self, CloudCostEstimate, CloudProvider, CloudProviderInfo};
 use crate::services::asr::download::download_model;
 use crate::services::asr::local::LocalWhisperProvider;
-use crate::services::asr::model::{catalog, WhisperModel, WhisperModelInfo};
+use crate::services::asr::model::{WhisperModel, WhisperModelInfo, catalog};
 use crate::services::asr::{AsrOptions, AsrProvider, TranscribeProgress};
 use crate::services::secrets::{self, SecretProvider};
 

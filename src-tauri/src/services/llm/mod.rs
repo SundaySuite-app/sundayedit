@@ -162,10 +162,10 @@ pub fn parse_text_response(json: &str) -> AppResult<String> {
 
     let mut text = String::new();
     for block in content {
-        if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-            if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                text.push_str(t);
-            }
+        if block.get("type").and_then(|t| t.as_str()) == Some("text")
+            && let Some(t) = block.get("text").and_then(|t| t.as_str())
+        {
+            text.push_str(t);
         }
     }
 

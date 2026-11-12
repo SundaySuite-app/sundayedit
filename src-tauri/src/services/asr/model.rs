@@ -144,9 +144,10 @@ mod tests {
     #[test]
     fn urls_point_to_ggml_repo() {
         for info in catalog() {
-            assert!(info
-                .url
-                .starts_with("https://huggingface.co/ggerganov/whisper.cpp"));
+            assert!(
+                info.url
+                    .starts_with("https://huggingface.co/ggerganov/whisper.cpp")
+            );
             assert!(info.url.ends_with(".bin"));
         }
     }
